@@ -1,14 +1,16 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { expect } from "bun:test"
-import { LLMEvent, LLMResponse } from "@opencode/ai"
+import { LLMEvent, LLMResponse } from "@opencode/ai/effect"
 import { Generate, type CompletionInput } from "@opencode/core/generate"
 import { Embeddings, type EmbedInput } from "@opencode/core/embeddings"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Effect, Layer, Stream } from "effect"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
-import { ServerFetch } from "../src/fetch"
+import { serveRoutes } from "./fixture/routes"
+import { MAX_JSON_BODY_BYTES, readBoundedJsonBody } from "../src/handlers/completions"
+import { Headers, HttpServerRequest } from "effect/http"
 
 const events = [
   LLMEvent.textDelta({ id: "t1", text: "Hello" }),
@@ -26,6 +28,14 @@ const fake = makeLocationNode({
   layer: Layer.succeed(
     Generate.Service,
     Generate.Service.of({
+      image: () => Effect.die("unused"),
+      decisions: () => Effect.die("unused"),
+      video: {
+        start: () => Effect.die("unused"),
+        status: () => Effect.die("unused"),
+        result: () => Effect.die("unused"),
+        cancel: () => Effect.die("unused"),
+      },
       text: () => Effect.die("unused"),
       complete: (input) => {
         captured.push(input)
@@ -85,15 +95,19 @@ const setup = Effect.gen(function* () {
       }),
     ),
   )
-  return yield* ServerFetch.make(
+  const server = yield* serveRoutes(
     {
       database: { path: ":memory:" },
       config: { directory: global },
       fs: { filewatcher: false },
       models: { fetch: false },
     },
-    { overrides: [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings)] },
+    [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings)],
   )
+  // The route models come from the config plugin, which loads after the server answers; /v1/models lists only
+  // what has loaded, so the test waits for it as a client would.
+  yield* server.pluginsLoaded(global)
+  return server.handler
 })
 
 const post = (handler: (request: Request) => Promise<Response>, body: unknown) =>
@@ -269,7 +283,12 @@ it.live("gets a route model by its opencode-route id at /v1/models/{id}", () =>
     for (const form of ["opencode-route%2Fworkhorse", "opencode-route/workhorse"]) {
       const res = yield* getModel(handler, form)
       expect(res.status).toBe(200)
-      const body = (yield* Effect.promise(() => res.json())) as { id: string; object: string; created: number; owned_by: string }
+      const body = (yield* Effect.promise(() => res.json())) as {
+        id: string
+        object: string
+        created: number
+        owned_by: string
+      }
       expect(body).toEqual({ id: "opencode-route/workhorse", object: "model", created: 0, owned_by: "opencode-route" })
     }
     // The bare id exactly as it appears in the models list works too.
@@ -322,7 +341,12 @@ it.live("gets a concrete catalog model by provider/model ref at /v1/models/{id}"
     for (const form of ["deepseek%2Fdeepseek-chat", "deepseek/deepseek-chat"]) {
       const res = yield* getModel(handler, form)
       expect(res.status).toBe(200)
-      const body = (yield* Effect.promise(() => res.json())) as { id: string; object: string; created: number; owned_by: string }
+      const body = (yield* Effect.promise(() => res.json())) as {
+        id: string
+        object: string
+        created: number
+        owned_by: string
+      }
       expect(body).toEqual({ id: "deepseek/deepseek-chat", object: "model", created: 0, owned_by: "deepseek" })
     }
   }),
@@ -343,7 +367,6 @@ it.live("answers an OpenAI-shaped 404 for an unknown model id", () =>
     expect(body.error.message).toContain("opencode-route/no-such-route")
   }),
 )
-
 
 const postTo = (handler: (request: Request) => Promise<Response>, url: string, body: unknown) =>
   Effect.promise(() =>
@@ -399,7 +422,15 @@ it.live("streams typed Responses events with no [DONE] sentinel", () =>
     const parsed = text
       .split("\n\n")
       .filter(Boolean)
-      .map((chunk) => JSON.parse(chunk.split("\n").find((l) => l.startsWith("data: "))!.slice(6)) as Record<string, unknown>)
+      .map(
+        (chunk) =>
+          JSON.parse(
+            chunk
+              .split("\n")
+              .find((l) => l.startsWith("data: "))!
+              .slice(6),
+          ) as Record<string, unknown>,
+      )
     expect(parsed.map((data) => data.type)).toEqual([
       "response.created",
       "response.in_progress",
@@ -526,7 +557,10 @@ it.live("rejects an unsupported content block with a 400 naming the shape", () =
       model: "workhorse",
       max_tokens: 64,
       messages: [
-        { role: "user", content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "x" } }] },
+        {
+          role: "user",
+          content: [{ type: "document", source: { type: "text", media_type: "text/plain", data: "x" } }],
+        },
       ],
     })
     expect(res.status).toBe(400)
@@ -679,7 +713,11 @@ it.live("refuses to extend a chain already 64 links deep", () =>
       expect(current.status).toBe(200)
       id = (yield* responseJson(current)).id
     }
-    const refused = yield* postResponses(handler, { model: "workhorse", input: "one too many", previous_response_id: id })
+    const refused = yield* postResponses(handler, {
+      model: "workhorse",
+      input: "one too many",
+      previous_response_id: id,
+    })
     expect(refused.status).toBe(400)
     const body = yield* responseJson(refused)
     expect(body.error?.message).toContain("64")
@@ -696,5 +734,88 @@ it.live("chained façade calls create no sessions", () =>
     expect(res.status).toBe(200)
     const sessions = (yield* Effect.promise(() => res.json())) as { data: Array<unknown> }
     expect(sessions.data).toHaveLength(0)
+  }),
+)
+
+// #2314: JSON bodies are bounded while reading. The reader's oracle is
+// its `limit` argument; the routes use MAX_JSON_BODY_BYTES.
+const fakeRequest = (chunks: Uint8Array[], headers?: Record<string, string>) =>
+  ({
+    headers: Headers.fromInput(headers ?? {}),
+    stream: Stream.fromIterable(chunks),
+  }) as unknown as HttpServerRequest.HttpServerRequest
+
+it.live("bounded JSON reader refuses a declared length over the limit without reading", () =>
+  Effect.gen(function* () {
+    let pulled = false
+    const request = {
+      headers: Headers.fromInput({ "content-length": "101" }),
+      stream: Stream.unwrap(
+        Effect.sync(() => {
+          pulled = true
+          return Stream.fromIterable([new TextEncoder().encode("{}")])
+        }),
+      ),
+    } as unknown as HttpServerRequest.HttpServerRequest
+    const result = yield* readBoundedJsonBody(request, 100)
+    expect(result.tooLarge).toContain("content-length declares 101 bytes")
+    expect(result.tooLarge).toContain("100 bytes")
+    expect(pulled).toBe(false)
+  }),
+)
+
+it.live("bounded JSON reader cuts a chunked body off at the limit", () =>
+  Effect.gen(function* () {
+    const chunk = new TextEncoder().encode("x".repeat(64))
+    const result = yield* readBoundedJsonBody(fakeRequest([chunk, chunk, chunk]), 100)
+    expect(result.tooLarge).toContain("crossed the limit while reading")
+    expect(result.body).toBeNull()
+  }),
+)
+
+it.live("bounded JSON reader parses an ordinary body and nulls an unparseable one", () =>
+  Effect.gen(function* () {
+    const ok = yield* readBoundedJsonBody(
+      fakeRequest([new TextEncoder().encode('{"model":"workhorse","n":'), new TextEncoder().encode("1}")]),
+      100,
+    )
+    expect(ok.tooLarge).toBeNull()
+    expect(ok.body).toEqual({ model: "workhorse", n: 1 })
+    expect(ok.raw).toContain('"workhorse"')
+    const bad = yield* readBoundedJsonBody(fakeRequest([new TextEncoder().encode("not json")]), 100)
+    expect(bad.tooLarge).toBeNull()
+    expect(bad.body).toBeNull()
+  }),
+)
+
+it.live("rejects an oversized chat body with 413 before Generate is called", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const before = captured.length
+    const res = yield* post(handler, {
+      model: "workhorse",
+      messages: [{ role: "user", content: "x".repeat(MAX_JSON_BODY_BYTES) }],
+    })
+    expect(res.status).toBe(413)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; code?: string } }
+    expect(body.error.message).toContain("too large")
+    expect(body.error.code).toBe("request_too_large")
+    expect(captured.length).toBe(before)
+  }),
+)
+
+it.live("rejects an oversized messages body with 413 in the messages envelope", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const before = captured.length
+    const res = yield* postTo(handler, "http://opencode.local/v1/messages", {
+      model: "workhorse",
+      messages: [{ role: "user", content: "x".repeat(MAX_JSON_BODY_BYTES) }],
+    })
+    expect(res.status).toBe(413)
+    const body = (yield* Effect.promise(() => res.json())) as { error: { message: string; type: string } }
+    expect(body.error.message).toContain("too large")
+    expect(body.error.type).toBe("invalid_request_error")
+    expect(captured.length).toBe(before)
   }),
 )

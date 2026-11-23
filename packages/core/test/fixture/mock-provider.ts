@@ -13,7 +13,7 @@
  * first-token timeout (`session/runner/step.ts`). Nothing here touches the network or a real
  * provider quota.
  */
-import { AIError, TransportError } from "@opencode/ai"
+import { AIError, TransportError } from "@opencode/ai/effect"
 import { RequestExecutor } from "@opencode/ai/route"
 
 /** One scripted attempt outcome. Queues are consumed in order; the last outcome repeats, so a
@@ -235,6 +235,33 @@ export const MockScenarios = {
     kind: "http",
     status: 429,
     headers: { "retry-after": String(retryAfterSeconds) },
+    body: JSON.stringify({ error: { message: "Rate limit reached; slow down" } }),
+  }),
+
+  /** A throttle whose only recovery statement is the reset header (the OpenAI
+   * shape): the requests window is exhausted and resets after the stated
+   * duration; no `retry-after` header is sent (#12228). */
+  rateLimitReset: (reset = "2h0m0s"): MockOutcome => ({
+    kind: "http",
+    status: 429,
+    headers: {
+      "x-ratelimit-limit-requests": "100",
+      "x-ratelimit-remaining-requests": "0",
+      "x-ratelimit-reset-requests": reset,
+    },
+    body: JSON.stringify({ error: { message: "Rate limit reached; slow down" } }),
+  }),
+
+  /** A throttle stating its reset as a timestamp and no remaining counts at
+   * all (the Anthropic shape, trimmed): the reset header is the only
+   * recovery statement (#12228). */
+  rateLimitResetTimestamp: (resetAt: string): MockOutcome => ({
+    kind: "http",
+    status: 429,
+    headers: {
+      "anthropic-ratelimit-requests-limit": "100",
+      "anthropic-ratelimit-requests-reset": resetAt,
+    },
     body: JSON.stringify({ error: { message: "Rate limit reached; slow down" } }),
   }),
 

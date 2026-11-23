@@ -78,7 +78,9 @@ export function resolveRef(aliases: Aliases | undefined, input: string, exists?:
   while (depth < MAX_DEPTH) {
     depth++
     if (visited.has(current)) {
-      throw new AliasCycleError(`Cycle detected in alias resolution: ${current}`)
+      throw new AliasCycleError(
+        `Cycle detected in alias resolution: ${[...visited, current].join(" -> ")}`,
+      )
     }
     visited.add(current)
 

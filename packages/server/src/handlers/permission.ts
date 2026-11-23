@@ -6,7 +6,7 @@ import { Session } from "@opencode/core/session"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Api } from "../api"
-import { PermissionNotFoundError } from "@opencode/protocol/errors"
+import { ConflictError, PermissionNotFoundError, PermissionSavedNotFoundError } from "@opencode/protocol/errors"
 import { locationErrors, response, sessionInfo } from "../location"
 import { missingSession } from "./session-error"
 
@@ -96,10 +96,43 @@ export const PermissionHandler = HttpApiBuilder.group(Api, "server.permission", 
         }),
       )
       .handle(
+        "permission.saved.update",
+        Effect.fn(function* (ctx) {
+          const saved = yield* PermissionSaved.Service
+          return {
+            data: yield* saved
+              .update({ id: ctx.params.id, action: ctx.payload.action, resource: ctx.payload.resource })
+              .pipe(
+                Effect.catchTags({
+                  "PermissionSaved.NotFoundError": (error) =>
+                    new PermissionSavedNotFoundError({
+                      id: error.id,
+                      message: `Saved permission not found: ${error.id}`,
+                    }),
+                  "PermissionSaved.ConflictError": (error) =>
+                    new ConflictError({
+                      resource: error.id,
+                      message: `A saved permission already allows ${error.action} for ${error.resource}`,
+                    }),
+                }),
+              ),
+          }
+        }),
+      )
+      .handle(
         "permission.saved.remove",
         Effect.fn(function* (ctx) {
           const saved = yield* PermissionSaved.Service
-          yield* saved.remove(ctx.params.id)
+          yield* saved.remove(ctx.params.id).pipe(
+            Effect.catchTag(
+              "PermissionSaved.NotFoundError",
+              (error) =>
+                new PermissionSavedNotFoundError({
+                  id: error.id,
+                  message: `Saved permission not found: ${error.id}`,
+                }),
+            ),
+          )
           return HttpApiSchema.NoContent.make()
         }),
       )

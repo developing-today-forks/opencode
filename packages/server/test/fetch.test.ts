@@ -42,8 +42,6 @@ it.live("returns LocationNotFoundError for a missing folder and recovers once it
       "/api/model",
       "/api/integration",
       `/api/session/${session.id}/permission`,
-      `/api/experimental/session/${session.id}/instructions/entries`,
-      `/api/session/${session.id}/form`,
       "/api/session/global/form",
     ]
     for (const endpoint of endpoints) {
@@ -70,6 +68,115 @@ it.live("returns LocationNotFoundError for a missing folder and recovers once it
       ),
     )
     expect(recovered.status).toBe(200)
+  }),
+)
+
+it.live("validates session and entry existence on instruction entry endpoints", () =>
+  Effect.gen(function* () {
+    const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-instruction-entry-")))
+    const directory = config.path
+    const handler = yield* ServerFetch.make({ ...options, config: { directory } })
+    const headers = { "content-type": "application/json", "x-opencode-directory": encodeURIComponent(directory) }
+    const created = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/session", {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ location: { directory } }),
+        }),
+      ),
+    )
+    expect(created.status).toBe(200)
+    const session = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => created.json()),
+    ).data
+    const url = (sessionID: string, key = "entry") =>
+      `http://opencode.local/api/experimental/session/${sessionID}/instructions/entries${key ? `/${key}` : ""}`
+
+    const unknownSession = yield* Effect.forEach(
+      [
+        ["GET", url("ses_unknown", ""), undefined],
+        ["PUT", url("ses_unknown"), JSON.stringify({ value: "value" })],
+        ["DELETE", url("ses_unknown"), undefined],
+      ] as const,
+      ([method, target, body]) =>
+        Effect.promise(() => handler(new Request(target, { method, headers, body }))).pipe(
+          Effect.flatMap((response) =>
+            Effect.promise(() => response.json()).pipe(
+              Effect.map((json) => ({ method, status: response.status, tag: (json as { _tag: string })._tag })),
+            ),
+          ),
+        ),
+    )
+    expect(unknownSession).toEqual([
+      { method: "GET", status: 404, tag: "SessionNotFoundError" },
+      { method: "PUT", status: 404, tag: "SessionNotFoundError" },
+      { method: "DELETE", status: 404, tag: "SessionNotFoundError" },
+    ])
+
+    const missing = yield* Effect.promise(() => handler(new Request(url(session.id), { method: "DELETE", headers })))
+    expect(missing.status).toBe(404)
+    expect((yield* Effect.promise(() => missing.json()))._tag).toBe("InstructionEntryNotFoundError")
+
+    const put = yield* Effect.promise(() =>
+      handler(new Request(url(session.id), { method: "PUT", headers, body: JSON.stringify({ value: "value" }) })),
+    )
+    expect(put.status).toBe(204)
+    const removed = yield* Effect.promise(() => handler(new Request(url(session.id), { method: "DELETE", headers })))
+    expect(removed.status).toBe(204)
+  }),
+)
+
+it.live("manages a session whose directory was deleted", () =>
+  Effect.gen(function* () {
+    const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-deleted-directory-")))
+    const directory = path.join(config.path, "project")
+    yield* Effect.promise(() => fs.mkdir(directory))
+    const handler = yield* ServerFetch.make({ ...options, config: { directory: config.path } })
+    const request = (endpoint: string, method: string, body?: unknown) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://opencode.local${endpoint}`, {
+            method,
+            headers: { "content-type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          }),
+        ),
+      )
+    const created = yield* request("/api/session", "POST", { location: { directory } })
+    expect(created.status).toBe(200)
+    const session = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => created.json()),
+    ).data
+    yield* Effect.promise(() => fs.rm(directory, { recursive: true }))
+
+    const statuses = [
+      yield* request(`/api/session/${session.id}`, "PATCH", { title: "Renamed" }),
+      yield* request(`/api/session/${session.id}`, "PATCH", { archived: true }),
+      yield* request(`/api/session/${session.id}/interrupt`, "POST"),
+      yield* request(`/api/experimental/session/${session.id}/instructions/entries`, "GET"),
+    ].map((response) => response.status)
+    expect(statuses).toEqual([204, 204, 200, 200])
+
+    const fetched = yield* request(`/api/session/${session.id}`, "GET")
+    const updated = Schema.decodeUnknownSync(Schema.Struct({ data: Session.Info }))(
+      yield* Effect.promise(() => fetched.json()),
+    ).data
+    expect(updated.title).toBe("Renamed")
+    expect(updated.time.archived).toBeDefined()
+
+    // Title generation still runs in the session's folder.
+    const generated = yield* request(`/api/session/${session.id}`, "PATCH", { title: "" })
+    expect(generated.status).toBe(404)
+    expect(yield* Effect.promise(() => generated.json())).toEqual({
+      _tag: "LocationNotFoundError",
+      location: { directory },
+      message: `Location not found: ${directory}`,
+    })
+
+    const missing = yield* request("/api/session/ses_missing/interrupt", "POST")
+    expect(missing.status).toBe(404)
+    expect(((yield* Effect.promise(() => missing.json())) as { _tag: string })._tag).toBe("SessionNotFoundError")
   }),
 )
 
@@ -136,6 +243,13 @@ const callbackPorts = Effect.gen(function* () {
   return { primary, fallback }
 })
 
+// A server without its own config directory reads the developer's global config, whose remote MCP servers would
+// reach the network.
+const isolated = Effect.gen(function* () {
+  const config = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-openai-oauth-")))
+  return yield* ServerFetch.make({ ...options, config: { ...options.config, directory: config.path } })
+})
+
 const connectOpenAI = (handler: Handler) =>
   Effect.gen(function* () {
     // Catalog endpoints no longer wait for plugin initialization.
@@ -187,17 +301,49 @@ it.live("serves the HttpApi and enforces Basic auth like the Node server", () =>
     )
     expect(body.version).toBe("test-version")
     expect(body.paths.tmp).toEndWith("opencode")
-    expect(body.capabilities?.persistentPty).toBe(process.platform !== "win32")
+    expect(body.capabilities?.persistentPty).toBe(true)
   }),
 )
 
-it.live("activates credentials through the HttpApi", () =>
+it.live("answers 404 when activating a missing credential through the HttpApi", () =>
   Effect.gen(function* () {
     const handler = yield* ServerFetch.make(options)
     const response = yield* Effect.promise(() =>
       handler(new Request("http://opencode.local/api/credential/cred_missing/activate", { method: "POST" })),
     )
-    expect(response.status).toBe(204)
+    expect(response.status).toBe(404)
+  }),
+)
+
+it.live("answers 404 when updating or removing a missing credential through the HttpApi", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make(options)
+    const updated = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/credential/cred_missing", {
+          method: "PATCH",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ label: "renamed" }),
+        }),
+      ),
+    )
+    expect(updated.status).toBe(404)
+
+    const removed = yield* Effect.promise(() =>
+      handler(new Request("http://opencode.local/api/credential/cred_missing", { method: "DELETE" })),
+    )
+    expect(removed.status).toBe(404)
+  }),
+)
+
+it.live("removes credentials through the HttpApi", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make(options)
+    const response = yield* Effect.promise(() =>
+      handler(new Request("http://opencode.local/api/credential/cred_missing", { method: "DELETE" })),
+    )
+    // A missing credential answers 404 rather than a 204 that looks like a successful revoke (#2527).
+    expect(response.status).toBe(404)
   }),
 )
 
@@ -308,6 +454,18 @@ it.live("applies custom CORS origins to HTTP responses and PTY ticket checks", (
           )
           expect(invalidTicket.status).toBe(403)
 
+          const invalidMcpTicket = yield* Effect.promise(() =>
+            handler(
+              new Request(
+                "http://opencode.local/api/experimental/client-mcp?ticket=invalid&location[directory]=/tmp&name=tui",
+                {
+                  headers: { origin },
+                },
+              ),
+            ),
+          )
+          expect(invalidMcpTicket.status).toBe(403)
+
           const connect = yield* Effect.promise(() =>
             handler(
               new Request("http://opencode.local/api/pty/pty_missing/connect", {
@@ -325,6 +483,30 @@ it.live("applies custom CORS origins to HTTP responses and PTY ticket checks", (
             ),
           )
           expect(persistentConnect.status).toBe(allowed ? 400 : 403)
+
+          // #2465: an oversized or malformed attachment_id is rejected with
+          // the same 400 as a bad cursor, before any socket upgrade or
+          // attach — it is never echoed in the attached frame or forwarded
+          // to the daemon verbatim.
+          const oversizedAttachment = yield* Effect.promise(() =>
+            handler(
+              new Request(
+                `http://opencode.local/api/experimental/persistent-pty/pty_missing/connect?attachment_id=${"a".repeat(129)}`,
+                { headers: { origin, authorization: `Basic ${btoa("opencode:secret")}` } },
+              ),
+            ),
+          )
+          expect(oversizedAttachment.status).toBe(allowed ? 400 : 403)
+
+          const malformedAttachment = yield* Effect.promise(() =>
+            handler(
+              new Request(
+                "http://opencode.local/api/experimental/persistent-pty/pty_missing/connect?attachment_id=bad%20id%2Fwith%20spaces",
+                { headers: { origin, authorization: `Basic ${btoa("opencode:secret")}` } },
+              ),
+            ),
+          )
+          expect(malformedAttachment.status).toBe(allowed ? 400 : 403)
         }),
     )
 
@@ -415,7 +597,7 @@ it.live(
     Effect.gen(function* () {
       const { primary } = yield* callbackPorts
       const requests = yield* occupy(primary, true)
-      const handler = yield* ServerFetch.make(options)
+      const handler = yield* isolated
       const response = yield* connectOpenAI(handler)
 
       expect(response.status).toBe(200)
@@ -433,7 +615,7 @@ it.live(
     Effect.gen(function* () {
       const { primary, fallback } = yield* callbackPorts
       const requests = yield* occupy(primary)
-      const handler = yield* ServerFetch.make(options)
+      const handler = yield* isolated
       const response = yield* connectOpenAI(handler)
 
       expect(response.status).toBe(200)
@@ -451,7 +633,7 @@ it.live(
       const { primary, fallback } = yield* callbackPorts
       yield* occupy(primary)
       yield* occupy(fallback)
-      const handler = yield* ServerFetch.make(options)
+      const handler = yield* isolated
       const response = yield* connectOpenAI(handler)
 
       expect(response.status).toBe(400)

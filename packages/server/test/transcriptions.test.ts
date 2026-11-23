@@ -4,7 +4,7 @@ import { expect } from "bun:test"
 import { Effect, Layer, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { TranscriptionFacade } from "@opencode/core/transcription-facade"
-import { TranscriptionResponse } from "@opencode/ai"
+import { TranscriptionResponse } from "@opencode/ai/experimental"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
 import { ServerFetch } from "../src/fetch"
@@ -33,7 +33,9 @@ const setup = Effect.gen(function* () {
   const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-stt-door-")))
   const global = path.join(tmp.path, "global")
   yield* Effect.promise(() => fs.mkdir(global, { recursive: true }))
-  yield* Effect.promise(() => fs.writeFile(path.join(global, "opencode.json"), JSON.stringify({ model: "base/default" })))
+  yield* Effect.promise(() =>
+    fs.writeFile(path.join(global, "opencode.json"), JSON.stringify({ model: "base/default" })),
+  )
   return yield* ServerFetch.make(
     {
       database: { path: ":memory:" },
@@ -102,6 +104,63 @@ it.live("stream=true keeps the same §3 gating: a vanished provider's ref is 404
     const response = yield* postForm(handler, form)
     expect(response.status).toBe(404)
     expect(response.headers.get("content-type")).not.toContain("text/event-stream")
+    const body = yield* Effect.promise(() => response.json())
+    expect(body.error.code).toBe("model_not_found")
+  }),
+)
+
+it.live("an over-cap multipart body is a typed 413 audio_too_large, rejected at the route bound (#2433)", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const form = new FormData()
+    form.set("model", "openai/whisper-1")
+    const oversize = new Uint8Array(TranscriptionFacade.maxTranscriptionBodyLimit() + 1024)
+    form.set("file", new File([oversize], "big.mp3", { type: "audio/mpeg" }))
+    const response = yield* postForm(handler, form)
+    expect(response.status).toBe(413)
+    const body = yield* Effect.promise(() => response.json())
+    expect(body.error.code).toBe("audio_too_large")
+  }),
+)
+
+it.live(
+  "a stalled stream that crosses the bound is answered 413 while reading, without waiting for the body to end (#2433)",
+  () =>
+    Effect.gen(function* () {
+      const handler = yield* setup
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(TranscriptionFacade.maxTranscriptionBodyLimit() + 1024))
+          // The stream never closes: a bounded reader must answer from
+          // the bytes already delivered, not wait for the rest.
+        },
+      })
+      const request = new Request("http://localhost/v1/audio/transcriptions", {
+        method: "POST",
+        headers: { "content-type": "multipart/form-data; boundary=----bound2433" },
+        body: stream,
+        duplex: "half",
+      } as RequestInit)
+      const response = yield* Effect.promise(() =>
+        Promise.race([handler(request), new Promise<null>((resolve) => setTimeout(() => resolve(null), 10_000))]),
+      )
+      expect(response).not.toBeNull()
+      expect(response?.status).toBe(413)
+      const body = yield* Effect.promise(() => response!.json())
+      expect(body.error.code).toBe("audio_too_large")
+    }),
+)
+
+it.live("an under-cap body still reaches parsing: the bound does not swallow ordinary requests (#2433)", () =>
+  Effect.gen(function* () {
+    const handler = yield* setup
+    const form = new FormData()
+    form.set("model", "openai/whisper-1")
+    form.set("file", new File([new Uint8Array([1, 2, 3])], "note.mp3", { type: "audio/mpeg" }))
+    const response = yield* postForm(handler, form)
+    // This harness enables no providers, so an under-cap body proceeds
+    // to the usual §3 gating answer instead of the 413 bound.
+    expect(response.status).toBe(404)
     const body = yield* Effect.promise(() => response.json())
     expect(body.error.code).toBe("model_not_found")
   }),

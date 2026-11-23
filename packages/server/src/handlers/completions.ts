@@ -3,11 +3,11 @@ import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Global } from "@opencode/util/global"
-import { Cause, Effect, Result, Stream } from "effect"
-import { HttpServerResponse } from "effect/http"
+import { Cause, Effect, Option, Result, Stream } from "effect"
+import { Headers, HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder } from "effect/http-api"
 import { Api } from "../api"
-import { awaitPlugins, locationErrors } from "../location"
+import { locationErrors } from "../location"
 import { Completions } from "@opencode/core/completions"
 import { Model } from "@opencode/core/model"
 import { ModelRoute } from "@opencode/core/model-route"
@@ -41,22 +41,89 @@ const streamIsQuota = (cause: Cause.Cause<unknown>) => {
 }
 
 /**
- * The request body as raw text plus its parsed form. The raw text is the
- * pass-through candidate (#1146): on a dialect match Generate forwards it
+ * The JSON body bound for the completions façades (#2314): a JSON API
+ * request carries a conversation history plus inline media, so the cap
+ * is generous — 16 MiB — but it is a hard bound enforced WHILE
+ * reading, never after materialization. A declared content-length over
+ * the bound is refused up front; a chunked body (no declared length)
+ * is cut off the moment its streamed total crosses the bound, and the
+ * handler answers a deterministic 413 instead of buffering the rest.
+ * The transcription door (#2433) enforces the same shape for its
+ * multipart bodies; this is that pattern generalized to JSON.
+ */
+export const MAX_JSON_BODY_BYTES = 16 * 1024 * 1024
+
+export interface BoundedJsonBody {
+  readonly raw: string
+  readonly body: unknown
+  /** Non-null when the body crossed the bound: the 413 message. */
+  readonly tooLarge: string | null
+}
+
+const tooLargeMessage = (observed: string, limit: number) =>
+  `request body is too large: ${observed}; the JSON body limit is ${limit} bytes`
+
+/**
+ * Read a JSON request body under a byte bound (oracle: `limit`). The
+ * streamed cutoff uses takeUntilEffect exactly like the transcription
+ * reader, so a body that stalls after crossing the bound is answered
+ * 413 from the bytes already delivered instead of being waited on.
+ * A failed read keeps the old discipline: raw "" / body null, which
+ * the callers' wire validation answers as before.
+ */
+export const readBoundedJsonBody = (
+  request: HttpServerRequest.HttpServerRequest,
+  limit: number = MAX_JSON_BODY_BYTES,
+) =>
+  Effect.gen(function* () {
+    const declaredLength = Number(Option.getOrElse(Headers.get(request.headers, "content-length"), () => ""))
+    if (Number.isFinite(declaredLength) && declaredLength > limit)
+      return {
+        raw: "",
+        body: null,
+        tooLarge: tooLargeMessage(`content-length declares ${declaredLength} bytes`, limit),
+      } satisfies BoundedJsonBody
+    let streamedTotal = 0
+    const read = yield* Effect.result(
+      request.stream.pipe(
+        Stream.takeUntilEffect((chunk) =>
+          Effect.sync(() => {
+            streamedTotal += chunk.length
+            return streamedTotal > limit
+          }),
+        ),
+        Stream.runCollect,
+      ),
+    )
+    if (streamedTotal > limit)
+      return {
+        raw: "",
+        body: null,
+        tooLarge: tooLargeMessage("it crossed the limit while reading", limit),
+      } satisfies BoundedJsonBody
+    if (Result.isFailure(read)) return { raw: "", body: null, tooLarge: null } satisfies BoundedJsonBody
+    const bytes = new Uint8Array(streamedTotal)
+    let offset = 0
+    for (const chunk of read.success) {
+      bytes.set(chunk, offset)
+      offset += chunk.length
+    }
+    const raw = new TextDecoder().decode(bytes)
+    try {
+      return { raw, body: JSON.parse(raw), tooLarge: null } satisfies BoundedJsonBody
+    } catch {
+      return { raw, body: null, tooLarge: null } satisfies BoundedJsonBody
+    }
+  })
+
+/**
+ * The request body as raw text plus its parsed form, read under
+ * MAX_JSON_BODY_BYTES (#2314). The raw text is the pass-through
+ * candidate (#1146): on a dialect match Generate forwards it
  * byte-for-byte, so the door must not round-trip it through JSON first.
  * Unparseable bodies parse to null and fail wire validation as before.
  */
-const requestBody = (ctx: { request: { text: Effect.Effect<string, unknown> } }) =>
-  ctx.request.text.pipe(
-    Effect.catchCause(() => Effect.succeed("")),
-    Effect.map((raw) => {
-      try {
-        return { raw, body: JSON.parse(raw) }
-      } catch {
-        return { raw, body: null }
-      }
-    }),
-  )
+const requestBody = (ctx: { request: HttpServerRequest.HttpServerRequest }) => readBoundedJsonBody(ctx.request)
 
 const errorResponse = (status: number, message: string, type: string, code?: string) =>
   HttpServerResponse.jsonUnsafe(Completions.errorBody(message, type, code), { status })
@@ -65,7 +132,7 @@ const errorResponse = (status: number, message: string, type: string, code?: str
 // 429 with the provider's message (reset hint included) preserved;
 // selection failures are the caller's 400; everything else upstream
 // stays the generic 502.
-const serviceError = (error: Generate.Error) =>
+const serviceError = (error: Generate.CompletionError) =>
   error._tag === "Generate.ModelSelectionError"
     ? errorResponse(400, error.message, "invalid_request_error")
     : error._tag === "Generate.QuotaError"
@@ -75,13 +142,12 @@ const serviceError = (error: Generate.Error) =>
 const messagesErrorResponse = (status: number, message: string, type: string) =>
   HttpServerResponse.jsonUnsafe(Completions.messagesErrorBody(message, type), { status })
 
-const messagesServiceError = (error: Generate.Error) =>
+const messagesServiceError = (error: Generate.CompletionError) =>
   error._tag === "Generate.ModelSelectionError"
     ? messagesErrorResponse(400, error.message, "invalid_request_error")
     : error._tag === "Generate.QuotaError"
       ? messagesErrorResponse(429, error.message, "rate_limit_error")
       : messagesErrorResponse(502, error.message, "api_error")
-
 
 export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions", (handlers) =>
   Effect.gen(function* () {
@@ -97,285 +163,275 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
     // reflected without a restart, and the list and the single-model
     // lookup below are built from the same set and always agree.
     const advertisedRoutes = Effect.gen(function* () {
-      yield* awaitPlugins
       const models = yield* Model.Service
       const available = yield* models.available()
       return available.filter((model) => model.providerID === ModelRoute.PROVIDER_ID).map((model) => String(model.id))
     })
     return handlers
-      .handleRaw(
-        "completions.chat",
-        (ctx) =>
-          Effect.gen(function* () {
-            yield* awaitPlugins
-            const { raw, body } = yield* requestBody(ctx)
-            const parsed = Completions.parseChatRequest(body)
-            if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
-            const input = { ...parsed.value.input, dialect: "chat" as const, rawBody: raw }
-            const generate = yield* Generate.Service
-            const meta = {
-              id: Completions.completionId(),
-              created: Math.floor(Date.now() / 1000),
-              model: parsed.value.modelLabel,
-            }
-            if (!parsed.value.stream) {
-              const result = yield* Effect.result(generate.complete(input))
-              if (Result.isFailure(result)) return serviceError(result.failure)
-              return HttpServerResponse.jsonUnsafe(Completions.completionBody({ ...meta, response: result.success }))
-            }
-            const translator = new Completions.ChatStreamTranslator(meta)
-            const frames = generate
-              .stream(input)
-              .pipe(
-                Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
-                Stream.catchCause((cause) =>
-                  Stream.make(
-                    Completions.errorFrame(
-                      streamErrorMessage(cause),
-                      streamIsQuota(cause) ? "rate_limit_error" : "server_error",
-                    ),
-                  ),
+      .handleRaw("completions.chat", (ctx) =>
+        Effect.gen(function* () {
+          const { raw, body, tooLarge } = yield* requestBody(ctx)
+          if (tooLarge) return errorResponse(413, tooLarge, "invalid_request_error", "request_too_large")
+          const parsed = Completions.parseChatRequest(body)
+          if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
+          const input = { ...parsed.value.input, dialect: "chat" as const, rawBody: raw }
+          const generate = yield* Generate.Service
+          const meta = {
+            id: Completions.completionId(),
+            created: Math.floor(Date.now() / 1000),
+            model: parsed.value.modelLabel,
+          }
+          if (!parsed.value.stream) {
+            const result = yield* Effect.result(generate.complete(input))
+            if (Result.isFailure(result)) return serviceError(result.failure)
+            return HttpServerResponse.jsonUnsafe(Completions.completionBody({ ...meta, response: result.success }))
+          }
+          const translator = new Completions.ChatStreamTranslator(meta)
+          const frames = generate.stream(input).pipe(
+            Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
+            // A failed stream is one error frame and then [DONE], the same
+            // framing the doors write whether or not output had started.
+            Stream.catchCause((cause) =>
+              Stream.make(
+                Completions.errorFrame(
+                  streamErrorMessage(cause),
+                  streamIsQuota(cause) ? "rate_limit_error" : "server_error",
                 ),
-                Stream.concat(Stream.suspend(() => (translator.failed ? Stream.empty : Stream.make(Completions.DONE_FRAME)))),
-                Stream.provide(services),
-              )
-            return HttpServerResponse.stream(frames.pipe(Stream.encodeText), {
-              contentType: "text/event-stream",
-              headers: {
-                "Cache-Control": "no-cache, no-transform",
-                "X-Accel-Buffering": "no",
-                "X-Content-Type-Options": "nosniff",
-              },
-            })
-          }).pipe(Effect.provide(services), locationErrors),
+              ),
+            ),
+            Stream.concat(Stream.make(Completions.DONE_FRAME)),
+            Stream.provide(services),
+          )
+          return HttpServerResponse.stream(frames.pipe(Stream.encodeText), {
+            contentType: "text/event-stream",
+            headers: {
+              "Cache-Control": "no-cache, no-transform",
+              "X-Accel-Buffering": "no",
+              "X-Content-Type-Options": "nosniff",
+            },
+          })
+        }).pipe(Effect.provide(services), locationErrors),
       )
-      .handleRaw(
-        "completions.responses",
-        (ctx) =>
-          Effect.gen(function* () {
-            yield* awaitPlugins
-            const { raw, body } = yield* requestBody(ctx)
-            const parsed = Completions.parseResponsesRequest(body)
-            if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
-            const generate = yield* Generate.Service
-            const store = yield* OpenAIFacadeResponse.Service
-            const meta = {
-              id: Completions.responseId(),
-              created: Math.floor(Date.now() / 1000),
-              model: parsed.value.modelLabel,
-            }
-            // Chain resolution (#1149, design §4): the referenced row's
-            // stored items are the cumulative history, so exactly one row
-            // is loaded and prepended to this turn's input. An unknown or
-            // expired id is OpenAI's 404 `response_not_found`; a chain
-            // already at the depth bound is a 400 asking for a full resend.
-            let input = parsed.value.input
-            let parent: OpenAIFacadeResponse.Stored | undefined
-            if (parsed.value.previousResponseId) {
-              parent = yield* store.get(parsed.value.previousResponseId)
-              if (!parent)
-                return errorResponse(
-                  404,
-                  `response not found: ${parsed.value.previousResponseId}`,
-                  "invalid_request_error",
-                  "response_not_found",
-                )
-              if (parent.depth >= OpenAIFacadeResponse.MAX_CHAIN_DEPTH)
-                return errorResponse(
-                  400,
-                  `previous_response_id chain is already ${OpenAIFacadeResponse.MAX_CHAIN_DEPTH} links deep; resend the full input to start a new chain`,
-                  "invalid_request_error",
-                )
-              const chained = Completions.chainResponsesInput(parsed.value, parent.responseItems)
-              if (!chained.ok) return errorResponse(400, chained.error, "invalid_request_error")
-              input = chained.input
-            }
-            // Pass-through (#1146, spec §3): an unchained request may forward
-            // its raw body on a dialect match. A chained request never does —
-            // its raw body names a façade-owned previous_response_id and
-            // carries only this turn's items, while the provider needs the
-            // history the chain resolution just materialized into `input`;
-            // the store records no native/translated provenance that would
-            // license forwarding the façade-owned id upstream.
-            const generateInput = parsed.value.previousResponseId
-              ? input
-              : { ...input, dialect: "responses" as const, rawBody: raw }
-            // Every completed response — streamed or not — is persisted so
-            // it can be chained from. A store failure must not lose an
-            // answer the provider already produced: it is logged loudly,
-            // and the id simply will not resolve for a later chain (404).
-            const persist = (
-              outputItems: ReadonlyArray<Record<string, unknown>>,
-              usage: Record<string, unknown> | undefined,
-            ) =>
-              store
-                .put({
-                  id: meta.id,
-                  createdAt: meta.created * 1000,
-                  ...(parsed.value.previousResponseId ? { previousResponseId: parsed.value.previousResponseId } : {}),
-                  depth: parent ? parent.depth + 1 : 0,
-                  model: parsed.value.modelLabel,
-                  resolvedModel: parsed.value.modelRef,
-                  requestItems: parsed.value.items,
-                  responseItems: [...(parent?.responseItems ?? []), ...parsed.value.items, ...outputItems],
-                  ...(usage ? { usage } : {}),
-                })
-                .pipe(
-                  Effect.catchCause((cause) =>
-                    Effect.logWarning("failed to persist façade response for chaining", { cause }),
-                  ),
-                )
-            if (!parsed.value.stream) {
-              const result = yield* Effect.result(generate.complete(generateInput))
-              if (Result.isFailure(result)) return serviceError(result.failure)
-              const responseBody = Completions.responsesBody({
-                ...meta,
-                response: result.success,
-                previousResponseId: parsed.value.previousResponseId,
+      .handleRaw("completions.responses", (ctx) =>
+        Effect.gen(function* () {
+          const { raw, body, tooLarge } = yield* requestBody(ctx)
+          if (tooLarge) return errorResponse(413, tooLarge, "invalid_request_error", "request_too_large")
+          const parsed = Completions.parseResponsesRequest(body)
+          if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
+          const generate = yield* Generate.Service
+          const store = yield* OpenAIFacadeResponse.Service
+          const meta = {
+            id: Completions.responseId(),
+            created: Math.floor(Date.now() / 1000),
+            model: parsed.value.modelLabel,
+          }
+          // Chain resolution (#1149, design §4): the referenced row's
+          // stored items are the cumulative history, so exactly one row
+          // is loaded and prepended to this turn's input. An unknown or
+          // expired id is OpenAI's 404 `response_not_found`; a chain
+          // already at the depth bound is a 400 asking for a full resend.
+          let input = parsed.value.input
+          let parent: OpenAIFacadeResponse.Stored | undefined
+          if (parsed.value.previousResponseId) {
+            parent = yield* store.get(parsed.value.previousResponseId)
+            if (!parent)
+              return errorResponse(
+                404,
+                `response not found: ${parsed.value.previousResponseId}`,
+                "invalid_request_error",
+                "response_not_found",
+              )
+            if (parent.depth >= OpenAIFacadeResponse.MAX_CHAIN_DEPTH)
+              return errorResponse(
+                400,
+                `previous_response_id chain is already ${OpenAIFacadeResponse.MAX_CHAIN_DEPTH} links deep; resend the full input to start a new chain`,
+                "invalid_request_error",
+              )
+            const chained = Completions.chainResponsesInput(parsed.value, parent.responseItems)
+            if (!chained.ok) return errorResponse(400, chained.error, "invalid_request_error")
+            input = chained.input
+          }
+          // Pass-through (#1146, spec §3): an unchained request may forward
+          // its raw body on a dialect match. A chained request never does —
+          // its raw body names a façade-owned previous_response_id and
+          // carries only this turn's items, while the provider needs the
+          // history the chain resolution just materialized into `input`;
+          // the store records no native/translated provenance that would
+          // license forwarding the façade-owned id upstream.
+          const generateInput = parsed.value.previousResponseId
+            ? input
+            : { ...input, dialect: "responses" as const, rawBody: raw }
+          // Every completed response — streamed or not — is persisted so
+          // it can be chained from. A store failure must not lose an
+          // answer the provider already produced: it is logged loudly,
+          // and the id simply will not resolve for a later chain (404).
+          const persist = (
+            outputItems: ReadonlyArray<Record<string, unknown>>,
+            usage: Record<string, unknown> | undefined,
+          ) =>
+            store
+              .put({
+                id: meta.id,
+                createdAt: meta.created * 1000,
+                ...(parsed.value.previousResponseId ? { previousResponseId: parsed.value.previousResponseId } : {}),
+                depth: parent ? parent.depth + 1 : 0,
+                model: parsed.value.modelLabel,
+                resolvedModel: parsed.value.modelRef,
+                requestItems: parsed.value.items,
+                responseItems: [...(parent?.responseItems ?? []), ...parsed.value.items, ...outputItems],
+                ...(usage ? { usage } : {}),
               })
-              yield* persist(responseBody.output, responseBody.usage)
-              return HttpServerResponse.jsonUnsafe(responseBody)
-            }
-            const translator = new Completions.ResponsesStreamTranslator({
+              .pipe(
+                Effect.catchCause((cause) =>
+                  Effect.logWarning("failed to persist façade response for chaining", { cause }),
+                ),
+              )
+          if (!parsed.value.stream) {
+            const result = yield* Effect.result(generate.complete(generateInput))
+            if (Result.isFailure(result)) return serviceError(result.failure)
+            const responseBody = Completions.responsesBody({
               ...meta,
+              response: result.success,
               previousResponseId: parsed.value.previousResponseId,
             })
-            const frames = generate
-              .stream(generateInput)
-              .pipe(
-                // On the finish event the translator has accumulated the
-                // full text and tool calls; persist before the terminal
-                // frame goes out so the id is chainable once the client
-                // has seen response.completed.
-                Stream.tap((event) =>
-                  event.type === "finish"
-                    ? persist(translator.outputItems(), Completions.responsesUsageBody(event.usage))
-                    : Effect.void,
+            yield* persist(responseBody.output, responseBody.usage)
+            return HttpServerResponse.jsonUnsafe(responseBody)
+          }
+          const translator = new Completions.ResponsesStreamTranslator({
+            ...meta,
+            previousResponseId: parsed.value.previousResponseId,
+          })
+          const frames = generate.stream(generateInput).pipe(
+            // On the finish event the translator has accumulated the
+            // full text and tool calls; persist before the terminal
+            // frame goes out so the id is chainable once the client
+            // has seen response.completed.
+            Stream.tap((event) =>
+              event.type === "finish"
+                ? persist(translator.outputItems(), Completions.responsesUsageBody(event.usage))
+                : Effect.void,
+            ),
+            Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
+            // The translator failure frame continues the stream
+            // sequence numbers (#1442) instead of restarting them;
+            // a quota failure carries the #1441 rate-limit code.
+            Stream.catchCause((cause) =>
+              Stream.make(
+                translator.failureFrame(
+                  streamErrorMessage(cause),
+                  streamIsQuota(cause) ? "rate_limit_exceeded" : undefined,
                 ),
-                Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
-                // The translator failure frame continues the stream
-                // sequence numbers (#1442) instead of restarting them;
-                // a quota failure carries the #1441 rate-limit code.
-                Stream.catchCause((cause) =>
-                  Stream.make(
-                    translator.failureFrame(
-                      streamErrorMessage(cause),
-                      streamIsQuota(cause) ? "rate_limit_exceeded" : undefined,
-                    ),
-                  ),
-                ),
-                Stream.provide(services),
-              )
-            const all = Stream.make(translator.start()).pipe(Stream.concat(frames))
-            return HttpServerResponse.stream(all.pipe(Stream.encodeText), {
-              contentType: "text/event-stream",
-              headers: {
-                "Cache-Control": "no-cache, no-transform",
-                "X-Accel-Buffering": "no",
-                "X-Content-Type-Options": "nosniff",
-              },
-            })
-          }).pipe(Effect.provide(services), locationErrors),
+              ),
+            ),
+            Stream.provide(services),
+          )
+          const all = Stream.make(translator.start()).pipe(Stream.concat(frames))
+          return HttpServerResponse.stream(all.pipe(Stream.encodeText), {
+            contentType: "text/event-stream",
+            headers: {
+              "Cache-Control": "no-cache, no-transform",
+              "X-Accel-Buffering": "no",
+              "X-Content-Type-Options": "nosniff",
+            },
+          })
+        }).pipe(Effect.provide(services), locationErrors),
       )
-      .handleRaw(
-        "completions.embeddings",
-        (ctx) =>
-          Effect.gen(function* () {
-            yield* awaitPlugins
-            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
-            const parsed = Embeddings.parseEmbeddingsRequest(body)
-            if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
-            const embeddings = yield* Embeddings.Service
-            const result = yield* Effect.result(
-              embeddings.embed({
-                model: parsed.value.model,
-                inputs: parsed.value.inputs,
-                ...(parsed.value.dimensions !== undefined ? { dimensions: parsed.value.dimensions } : {}),
-              }),
-            )
-            if (Result.isFailure(result)) return errorResponse(502, result.failure.message, "server_error")
-            return HttpServerResponse.jsonUnsafe(
-              Embeddings.embeddingsBody({
-                model: parsed.value.modelLabel,
-                vectors: result.success.vectors,
-                promptTokens: result.success.promptTokens,
-                encodingFormat: parsed.value.encodingFormat,
-              }),
-            )
-          }).pipe(Effect.provide(services), locationErrors),
+      .handleRaw("completions.embeddings", (ctx) =>
+        Effect.gen(function* () {
+          const bounded = yield* readBoundedJsonBody(ctx.request)
+          if (bounded.tooLarge)
+            return errorResponse(413, bounded.tooLarge, "invalid_request_error", "request_too_large")
+          const parsed = Embeddings.parseEmbeddingsRequest(bounded.body)
+          if (!parsed.ok) return errorResponse(400, parsed.error, "invalid_request_error")
+          const embeddings = yield* Embeddings.Service
+          const result = yield* Effect.result(
+            embeddings.embed({
+              model: parsed.value.model,
+              inputs: parsed.value.inputs,
+              ...(parsed.value.dimensions !== undefined ? { dimensions: parsed.value.dimensions } : {}),
+            }),
+          )
+          if (Result.isFailure(result)) return errorResponse(502, result.failure.message, "server_error")
+          return HttpServerResponse.jsonUnsafe(
+            Embeddings.embeddingsBody({
+              model: parsed.value.modelLabel,
+              vectors: result.success.vectors,
+              promptTokens: result.success.promptTokens,
+              encodingFormat: parsed.value.encodingFormat,
+            }),
+          )
+        }).pipe(Effect.provide(services), locationErrors),
       )
       .handleRaw("completions.transcriptions", (ctx) =>
         transcriptionRoute(ctx).pipe(Effect.provide(services), locationErrors),
       )
-      .handleRaw(
-        "completions.systemone",
-        (ctx) =>
-          Effect.gen(function* () {
-            yield* awaitPlugins
-            // The door's own error discipline (#690 in the door): a
-            // malformed body is a 400 in the plain {error} envelope,
-            // never a 500 from the upstream path, and an array body is
-            // refused before anything reaches upstream (#2938 guard).
-            const body = yield* ctx.request.json.pipe(Effect.catchCause(() => Effect.succeed(null)))
-            if (body === null)
-              return HttpServerResponse.jsonUnsafe(SystemOne.errorBody("Invalid JSON body: not valid JSON"), { status: 400 })
-            const parsed = SystemOne.parseSystemOneRequest(body)
-            if (!parsed.ok) return HttpServerResponse.jsonUnsafe(SystemOne.errorBody(parsed.error), { status: 400 })
-            const systemone = yield* SystemOne.Service
-            const result = yield* Effect.result(
-              systemone.evaluate({
-                model: parsed.value.model,
-                state: parsed.value.state,
-                questions: parsed.value.questions,
-                authHeader: ctx.request.headers.authorization,
-              }),
-            )
-            if (Result.isFailure(result))
-              return HttpServerResponse.jsonUnsafe(result.failure.body, { status: result.failure.status })
-            return HttpServerResponse.jsonUnsafe(SystemOne.answersBody(result.success.answers))
-          }).pipe(Effect.provide(services), locationErrors),
-      )
-      .handleRaw(
-        "completions.messages",
-        (ctx) =>
-          Effect.gen(function* () {
-            yield* awaitPlugins
-            const { raw, body } = yield* requestBody(ctx)
-            const parsed = Completions.parseMessagesRequest(body)
-            if (!parsed.ok) return messagesErrorResponse(400, parsed.error, "invalid_request_error")
-            const input = { ...parsed.value.input, dialect: "messages" as const, rawBody: raw }
-            const generate = yield* Generate.Service
-            const meta = { id: Completions.messageId(), model: parsed.value.modelLabel }
-            if (!parsed.value.stream) {
-              const result = yield* Effect.result(generate.complete(input))
-              if (Result.isFailure(result)) return messagesServiceError(result.failure)
-              return HttpServerResponse.jsonUnsafe(Completions.messagesBody({ ...meta, response: result.success }))
-            }
-            const translator = new Completions.MessagesStreamTranslator(meta)
-            const frames = generate
-              .stream(input)
-              .pipe(
-                Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
-                Stream.catchCause((cause) =>
-                  Stream.make(
-                    Completions.messagesErrorFrame(
-                      streamErrorMessage(cause),
-                      streamIsQuota(cause) ? "rate_limit_error" : "api_error",
-                    ),
-                  ),
-                ),
-                Stream.provide(services),
-              )
-            const all = Stream.make(translator.start()).pipe(Stream.concat(frames))
-            return HttpServerResponse.stream(all.pipe(Stream.encodeText), {
-              contentType: "text/event-stream",
-              headers: {
-                "Cache-Control": "no-cache, no-transform",
-                "X-Accel-Buffering": "no",
-                "X-Content-Type-Options": "nosniff",
-              },
+      .handleRaw("completions.systemone", (ctx) =>
+        Effect.gen(function* () {
+          // The door's own error discipline (#690 in the door): a
+          // malformed body is a 400 in the plain {error} envelope,
+          // never a 500 from the upstream path, and an array body is
+          // refused before anything reaches upstream (#2938 guard).
+          const bounded = yield* readBoundedJsonBody(ctx.request)
+          if (bounded.tooLarge)
+            return HttpServerResponse.jsonUnsafe(SystemOne.errorBody(bounded.tooLarge), { status: 413 })
+          const body = bounded.body
+          if (body === null)
+            return HttpServerResponse.jsonUnsafe(SystemOne.errorBody("Invalid JSON body: not valid JSON"), {
+              status: 400,
             })
-          }).pipe(Effect.provide(services), locationErrors),
+          const parsed = SystemOne.parseSystemOneRequest(body)
+          if (!parsed.ok) return HttpServerResponse.jsonUnsafe(SystemOne.errorBody(parsed.error), { status: 400 })
+          const systemone = yield* SystemOne.Service
+          const result = yield* Effect.result(
+            systemone.evaluate({
+              model: parsed.value.model,
+              state: parsed.value.state,
+              questions: parsed.value.questions,
+              authHeader: ctx.request.headers.authorization,
+            }),
+          )
+          if (Result.isFailure(result))
+            return HttpServerResponse.jsonUnsafe(result.failure.body, { status: result.failure.status })
+          return HttpServerResponse.jsonUnsafe(SystemOne.answersBody(result.success.answers))
+        }).pipe(Effect.provide(services), locationErrors),
+      )
+      .handleRaw("completions.messages", (ctx) =>
+        Effect.gen(function* () {
+          const { raw, body, tooLarge } = yield* requestBody(ctx)
+          if (tooLarge) return messagesErrorResponse(413, tooLarge, "invalid_request_error")
+          const parsed = Completions.parseMessagesRequest(body)
+          if (!parsed.ok) return messagesErrorResponse(400, parsed.error, "invalid_request_error")
+          const input = { ...parsed.value.input, dialect: "messages" as const, rawBody: raw }
+          const generate = yield* Generate.Service
+          const meta = { id: Completions.messageId(), model: parsed.value.modelLabel }
+          if (!parsed.value.stream) {
+            const result = yield* Effect.result(generate.complete(input))
+            if (Result.isFailure(result)) return messagesServiceError(result.failure)
+            return HttpServerResponse.jsonUnsafe(Completions.messagesBody({ ...meta, response: result.success }))
+          }
+          const translator = new Completions.MessagesStreamTranslator(meta)
+          const frames = generate.stream(input).pipe(
+            Stream.flatMap((event) => Stream.fromIterable(translator.push(event))),
+            Stream.catchCause((cause) =>
+              Stream.make(
+                translator.fail(
+                  streamErrorMessage(cause),
+                  streamIsQuota(cause) ? "rate_limit_error" : "api_error",
+                ),
+              ),
+            ),
+            Stream.provide(services),
+          )
+          const all = Stream.make(translator.start()).pipe(Stream.concat(frames))
+          return HttpServerResponse.stream(all.pipe(Stream.encodeText), {
+            contentType: "text/event-stream",
+            headers: {
+              "Cache-Control": "no-cache, no-transform",
+              "X-Accel-Buffering": "no",
+              "X-Content-Type-Options": "nosniff",
+            },
+          })
+        }).pipe(Effect.provide(services), locationErrors),
       )
       .handleRaw("completions.models", () =>
         advertisedRoutes.pipe(
@@ -389,20 +445,20 @@ export const CompletionsHandler = HttpApiBuilder.group(Api, "server.completions"
           locationErrors,
         ),
       )
-    .handleRaw("completions.model", (ctx) =>
-      advertisedRoutes.pipe(
-        Effect.map((routes) => modelByIdResponse(ctx.request.url, routes)),
-        Effect.provide(services),
-        locationErrors,
-      ),
-    )
-    .handleRaw("completions.modelRef", (ctx) =>
-      advertisedRoutes.pipe(
-        Effect.map((routes) => modelByIdResponse(ctx.request.url, routes)),
-        Effect.provide(services),
-        locationErrors,
-      ),
-    )
+      .handleRaw("completions.model", (ctx) =>
+        advertisedRoutes.pipe(
+          Effect.map((routes) => modelByIdResponse(ctx.request.url, routes)),
+          Effect.provide(services),
+          locationErrors,
+        ),
+      )
+      .handleRaw("completions.modelRef", (ctx) =>
+        advertisedRoutes.pipe(
+          Effect.map((routes) => modelByIdResponse(ctx.request.url, routes)),
+          Effect.provide(services),
+          locationErrors,
+        ),
+      )
   }),
 )
 
@@ -419,5 +475,7 @@ const modelByIdResponse = (url: string, routes: readonly string[]) => {
     // A malformed escape is not a served id; it falls through to the 404.
   }
   const model = Completions.modelBody(id, routes)
-  return model ? HttpServerResponse.jsonUnsafe(model) : errorResponse(404, `model not found: ${id}`, "invalid_request_error")
+  return model
+    ? HttpServerResponse.jsonUnsafe(model)
+    : errorResponse(404, `model not found: ${id}`, "invalid_request_error")
 }

@@ -31,7 +31,7 @@ const happy: GateWiringInput = {
   ),
   uses: happyUses,
   workflowTriggers: {
-    "test.yml": ["workflow_dispatch", "schedule", "push"],
+    "check-test.yml": ["workflow_dispatch", "schedule", "push"],
     "check.yml": ["workflow_dispatch"],
   },
 }
@@ -101,7 +101,7 @@ describe("gateWiringViolations", () => {
     const violations = gateWiringViolations({
       ...happy,
       uses: happy.uses.map((use) =>
-        use.workflow === "test.yml" ? { ...use, stepIf: "github.event_name == 'workflow_dispatch'" } : use,
+        use.workflow === "check-test.yml" ? { ...use, stepIf: "github.event_name == 'workflow_dispatch'" } : use,
       ),
     })
     expect(violations).toEqual([])

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs"
 import os from "node:os"
-import { Message, Media } from "@opencode/ai"
+import { Message, Media } from "@opencode/ai/effect"
 import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
 import { SessionMessage } from "@opencode/core/session/message"
@@ -86,6 +86,7 @@ describe("toLLMMessages", () => {
         agent: build,
         model: { id: Model.ID.make("model"), providerID: Provider.ID.make("provider") },
         content,
+        finish: "stop",
         time: { created, completed: created },
       })
     const messages = toLLMMessages(
@@ -98,7 +99,7 @@ describe("toLLMMessages", () => {
           SessionMessage.AssistantReasoning.make({
             type: "reasoning",
             text: "",
-            state: { signature: "sig_1" },
+            native: { signature: "sig_1" },
           }),
         ]),
       ],
@@ -174,7 +175,7 @@ describe("toLLMMessages", () => {
           status: "completed",
           reason: "auto",
           summary: "Earlier work",
-          recent: "Recent work",
+          metadata: { recent: "Recent work" },
           time: { created },
         }),
       ],
@@ -198,7 +199,6 @@ describe("toLLMMessages", () => {
           { type: "text", text: "Inspect this image" },
           { type: "media", media: Media.base64("aGVsbG8=", "image/png"), filename: "hello.png" },
         ],
-        metadata: { agents: [{ name: "build" }] },
       }),
     )
     expect(messages.slice(3).map((message) => message.content)).toEqual([
@@ -237,7 +237,6 @@ Recent work
           status: "completed",
           reason: "auto",
           summary: "Earlier work",
-          recent: "",
           time: { created },
         }),
       ],
@@ -325,7 +324,6 @@ Earlier work
         {
           type: "text",
           text: "\n\nAttached file: main.ts\n\nexport const value = 1",
-          metadata: { attachment: { source: file.source, name: "main.ts" } },
         },
       ],
     })
@@ -364,7 +362,6 @@ Earlier work
           { type: "text", text: "<skill_content>Design APIs</skill_content>" },
           { type: "text", text: "Use @effect and @api-design" },
         ],
-        metadata: {},
       }),
     ])
   })
@@ -455,7 +452,6 @@ Earlier work
         {
           type: "text",
           text: `\n\nAttached directory: ${location}\n\nlib/\nindex.ts`,
-          metadata: { attachment: { source: directory.source, name: "harness-engineering" } },
         },
       ],
     })
@@ -618,12 +614,6 @@ Earlier work
       {
         type: "text",
         text: "\n\nAttached directory: src/\n\nindex.ts",
-        metadata: {
-          attachment: {
-            source: { type: "uri", uri: "file:///project/src%2Flib" },
-            name: "src/",
-          },
-        },
       },
       { type: "media", media: Media.base64(data, "image/png"), filename: "preview.png" },
     ])
@@ -702,7 +692,6 @@ Earlier work
         type: "media",
         media: Media.base64(data, "image/png"),
         filename: "image.png",
-        metadata: { description: "alternate use" },
       },
     ])
   })
@@ -766,7 +755,7 @@ Earlier work
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
               text: "Think",
-              state: { signature: "sig_1" },
+              native: { signature: "sig_1" },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
@@ -784,7 +773,7 @@ Earlier work
                 input: { path: "README.md" },
                 metadata: { type: "media", mime: "image/png" },
               }),
-              time: { created },
+              time: { created, ran: created },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
@@ -803,36 +792,36 @@ Earlier work
                   },
                 ],
               }),
-              time: { created, completed: created },
+              time: { created, completed: created, ran: created },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
               id: "hosted",
               name: "web_search",
               executed: true,
-              providerState: { continuation: "hosted-call" },
-              providerResultState: { continuation: "hosted-result" },
+              native: { continuation: "hosted" },
               state: SessionMessage.ToolStateCompleted.make({
                 status: "completed",
                 input: { query: "Effect" },
                 content: [{ type: "text", text: "Found it" }],
               }),
-              time: { created, completed: created },
+              time: { created, completed: created, ran: created },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
               id: "hosted-failed",
               name: "write",
               executed: true,
-              providerState: { continuation: "failed" },
+              native: { continuation: "failed" },
               state: SessionMessage.ToolStateError.make({
                 status: "error",
                 input: { path: "README.md" },
                 error: { type: "unknown", message: "Denied" },
               }),
-              time: { created, completed: created },
+              time: { created, completed: created, ran: created },
             }),
           ],
+          finish: "stop",
           time: { created, completed: created },
         }),
       ],
@@ -857,14 +846,14 @@ Earlier work
         name: "web_search",
         input: { query: "Effect" },
         providerExecuted: true,
-        providerMetadata: { provider: { continuation: "hosted-call" } },
+        providerMetadata: { provider: { continuation: "hosted" } },
       },
       {
         type: "tool-result",
         id: "hosted",
         name: "web_search",
         providerExecuted: true,
-        providerMetadata: { provider: { continuation: "hosted-result" } },
+        providerMetadata: { provider: { continuation: "hosted" } },
         result: { type: "text", value: "Found it" },
       },
       {
@@ -931,7 +920,7 @@ Earlier work
 
     try {
       const disk = toLLMMessages([assistant(tool(pathToFileURL(filePath).href))], model)
-      expect(disk.flatMap((message) => message.content)).toContainEqual({
+      expect(disk.flatMap((message): unknown[] => [...message.content])).toContainEqual({
         type: "tool-result",
         id: "file-uri",
         name: "read",
@@ -945,7 +934,7 @@ Earlier work
         id: Tool.CallID.make("call_tool_uri"),
       }
       const authorizeRead: FileAccess.Interface["authorizeRead"] = (path) =>
-        Effect.succeed({ absolute: AbsolutePath.make(path), resource: path })
+        Effect.succeed({ absolute: AbsolutePath.make(path), resource: path } as FileAccess.Target)
       const snapshot = await Effect.runPromise(
         materializeToolResult(
           [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain", name: "hello.txt" }],
@@ -989,7 +978,7 @@ Earlier work
 
       const missingUri = pathToFileURL(path.join(directory, "missing.txt")).href
       const missing = toLLMMessages([assistant(tool(missingUri))], model)
-      expect(missing.flatMap((message) => message.content)).toContainEqual({
+      expect(missing.flatMap((message): unknown[] => [...message.content])).toContainEqual({
         type: "tool-result",
         id: "file-uri",
         name: "read",
@@ -998,7 +987,7 @@ Earlier work
 
       const unsupportedUri = "ftp://example.com/file.txt"
       const unsupported = toLLMMessages([assistant(tool(unsupportedUri))], model)
-      expect(unsupported.flatMap((message) => message.content)).toContainEqual({
+      expect(unsupported.flatMap((message): unknown[] => [...message.content])).toContainEqual({
         type: "tool-result",
         id: "file-uri",
         name: "read",
@@ -1006,7 +995,7 @@ Earlier work
       })
 
       const binary = toLLMMessages([assistant(tool("data:image/png,%89PNG", "image/png"))], model)
-      expect(binary.flatMap((message) => message.content)).toContainEqual({
+      expect(binary.flatMap((message): unknown[] => [...message.content])).toContainEqual({
         type: "tool-result",
         id: "file-uri",
         name: "read",
@@ -1015,7 +1004,7 @@ Earlier work
 
       const httpsUri = "https://example.com/image.png"
       const https = toLLMMessages([assistant(tool(httpsUri, "image/png"))], model)
-      expect(https.flatMap((message) => message.content)).toContainEqual({
+      expect(https.flatMap((message): unknown[] => [...message.content])).toContainEqual({
         type: "tool-result",
         id: "file-uri",
         name: "read",
@@ -1023,7 +1012,7 @@ Earlier work
       })
 
       const rawBase64 = toLLMMessages([assistant(tool("aGVsbG8", "image/png"))], model)
-      expect(rawBase64.flatMap((message) => message.content)).toContainEqual({
+      expect(rawBase64.flatMap((message): unknown[] => [...message.content])).toContainEqual({
         type: "tool-result",
         id: "file-uri",
         name: "read",
@@ -1032,7 +1021,7 @@ Earlier work
 
       for (const payload of ["!!!!", "a==="]) {
         const malformed = toLLMMessages([assistant(tool(`data:image/png;base64,${payload}`, "image/png"))], model)
-        expect(malformed.flatMap((message) => message.content)).toContainEqual({
+        expect(malformed.flatMap((message): unknown[] => [...message.content])).toContainEqual({
           type: "tool-result",
           id: "file-uri",
           name: "read",
@@ -1042,7 +1031,7 @@ Earlier work
 
       const oversizedUri = `data:image/png;base64,${"A".repeat(28 * 1024 * 1024)}`
       const oversized = toLLMMessages([assistant(tool(oversizedUri, "image/png"))], model)
-      expect(oversized.flatMap((message) => message.content)).toContainEqual({
+      expect(oversized.flatMap((message): unknown[] => [...message.content])).toContainEqual({
         type: "tool-result",
         id: "file-uri",
         name: "read",
@@ -1065,9 +1054,10 @@ Earlier work
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
               text: "Think",
-              state: { itemId: "rs_1", reasoningEncryptedContent: "encrypted-state" },
+              native: { itemId: "rs_1", reasoningEncryptedContent: "encrypted-state" },
             }),
           ],
+          finish: "stop",
           time: { created, completed: created },
         }),
       ],
@@ -1096,9 +1086,10 @@ Earlier work
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
               text: "Think",
-              state: { signature: "signed" },
+              native: { signature: "signed" },
             }),
           ],
+          finish: "stop",
           time: { created, completed: created },
         }),
       ],
@@ -1111,7 +1102,7 @@ Earlier work
     ])
   })
 
-  test("lowers failed assistant reasoning to text", () => {
+  test("retries a failed stream from its last local call that ran", () => {
     const messages = toLLMMessages(
       [
         SessionMessage.Assistant.make({
@@ -1122,55 +1113,107 @@ Earlier work
           content: [
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
-              text: "Partial thought",
-              state: { itemId: "rs_failed", reasoningEncryptedContent: null },
+              text: "Finished thought",
+              native: { itemId: "rs_failed", reasoningEncryptedContent: null },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
               id: "hosted-completed",
               name: "web_search",
               executed: true,
-              providerState: { itemId: "call_completed" },
-              providerResultState: { itemId: "result_completed" },
+              native: { itemId: "hosted_completed" },
               state: SessionMessage.ToolStateCompleted.make({
                 status: "completed",
                 input: { query: "Effect" },
                 content: [{ type: "text", text: '{"found":true}' }],
               }),
-              time: { created, completed: created },
+              time: { created, completed: created, ran: created },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
               id: "hosted-failed",
               name: "web_search",
               executed: true,
-              providerState: { itemId: "call_failed" },
-              providerResultState: { itemId: "result_failed" },
+              native: { itemId: "hosted_failed" },
               state: SessionMessage.ToolStateError.make({
                 status: "error",
                 input: { query: "Effect" },
                 error: { type: "unknown", message: "Step interrupted" },
               }),
-              time: { created, completed: created },
+              time: { created, completed: created, ran: created },
+            }),
+            SessionMessage.AssistantTool.make({
+              type: "tool",
+              id: "local-ran",
+              name: "read",
+              state: SessionMessage.ToolStateCompleted.make({
+                status: "completed",
+                input: { path: "README.md" },
+                content: [{ type: "text", text: "Hello" }],
+              }),
+              time: { created, completed: created, ran: created },
+            }),
+            SessionMessage.AssistantTool.make({
+              type: "tool",
+              id: "hosted-after-local",
+              name: "web_search",
+              executed: true,
+              state: SessionMessage.ToolStateError.make({
+                status: "error",
+                input: { query: "Later" },
+                error: { type: "tool.result-missing", message: "Provider did not return a tool result" },
+              }),
+              time: { created, completed: created, ran: created },
             }),
           ],
           finish: "error",
           error: { type: "unknown", message: "Step interrupted" },
           time: { created, completed: created },
         }),
+        // Hosted calls alone are provider-side reads the retry can redo, so the request never ends on an
+        // assistant reply.
+        SessionMessage.Assistant.make({
+          id: id("assistant-failed-hosted-only"),
+          type: "assistant",
+          agent: build,
+          model: { id: Model.ID.make("model"), providerID: Provider.ID.make("provider") },
+          content: [
+            SessionMessage.AssistantTool.make({
+              type: "tool",
+              id: "hosted-only",
+              name: "web_search",
+              executed: true,
+              state: SessionMessage.ToolStateCompleted.make({
+                status: "completed",
+                input: { query: "Effect" },
+                content: [{ type: "text", text: '{"found":true}' }],
+              }),
+              time: { created, completed: created, ran: created },
+            }),
+          ],
+          finish: "error",
+          error: { type: "provider.unknown", message: "Stream dropped" },
+          time: { created, completed: created },
+        }),
       ],
       model,
     )
 
+    expect(messages.map((message) => message.role)).toEqual(["assistant", "tool"])
+    expect(messages[1]?.content).toMatchObject([{ type: "tool-result", id: "local-ran" }])
     expect(messages[0]?.content).toEqual([
-      { type: "text", text: "Partial thought" },
+      {
+        type: "reasoning",
+        text: "Finished thought",
+        providerMetadata: { provider: { itemId: "rs_failed", reasoningEncryptedContent: null } },
+      },
       {
         type: "tool-call",
         id: "hosted-completed",
         name: "web_search",
         input: { query: "Effect" },
         providerExecuted: true,
-        providerMetadata: { provider: { itemId: "call_completed" } },
+        providerMetadata: { provider: { itemId: "hosted_completed" } },
       },
       {
         type: "tool-result",
@@ -1179,8 +1222,7 @@ Earlier work
         result: { type: "text", value: '{"found":true}' },
         providerExecuted: true,
         cache: undefined,
-        metadata: undefined,
-        providerMetadata: { provider: { itemId: "result_completed" } },
+        providerMetadata: { provider: { itemId: "hosted_completed" } },
       },
       {
         type: "tool-call",
@@ -1188,7 +1230,7 @@ Earlier work
         name: "web_search",
         input: { query: "Effect" },
         providerExecuted: true,
-        providerMetadata: { provider: { itemId: "call_failed" } },
+        providerMetadata: { provider: { itemId: "hosted_failed" } },
       },
       {
         type: "tool-result",
@@ -1203,13 +1245,13 @@ Earlier work
         },
         providerExecuted: true,
         cache: undefined,
-        metadata: undefined,
-        providerMetadata: { provider: { itemId: "result_failed" } },
+        providerMetadata: { provider: { itemId: "hosted_failed" } },
       },
+      { type: "tool-call", id: "local-ran", name: "read", input: { path: "README.md" } },
     ])
   })
 
-  test("drops unfinished reasoning metadata from an interrupted assistant message", () => {
+  test("omits unfinished reasoning from an interrupted assistant message", () => {
     const messages = toLLMMessages(
       [
         SessionMessage.Assistant.make({
@@ -1221,13 +1263,13 @@ Earlier work
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
               text: "Completed summary part",
-              state: { itemId: "rs_interrupted", reasoningEncryptedContent: null },
+              native: { itemId: "rs_interrupted", reasoningEncryptedContent: null },
               time: { created, completed: created },
             }),
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
               text: "",
-              state: { itemId: "rs_interrupted", reasoningEncryptedContent: null },
+              native: { itemId: "rs_interrupted", reasoningEncryptedContent: null },
               time: { created },
             }),
           ],
@@ -1237,7 +1279,7 @@ Earlier work
       model,
     )
 
-    expect(messages[0]?.content).toEqual([{ type: "text", text: "Completed summary part" }])
+    expect(messages).toEqual([])
   })
 
   test("drops model-scoped continuation metadata after a model switch but keeps hosted result payloads", () => {
@@ -1252,37 +1294,36 @@ Earlier work
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
               text: "Visible thought",
-              state: { signature: "sig_old" },
+              native: { signature: "sig_old" },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
               id: "hosted-old-model",
               name: "web_search",
               executed: true,
-              providerState: { itemId: "hosted-old-model" },
-              providerResultState: { itemId: "hosted-old-model" },
+              native: { itemId: "hosted-old-model", result: { signature: "result-sig" } },
               state: SessionMessage.ToolStateCompleted.make({
                 status: "completed",
                 input: { query: "Effect" },
                 content: [{ type: "text", text: '{"status":"completed"}' }],
               }),
-              time: { created, completed: created },
+              time: { created, completed: created, ran: created },
             }),
             SessionMessage.AssistantTool.make({
               type: "tool",
               id: "local-old-model",
               name: "read",
               executed: false,
-              providerState: { call: "old" },
-              providerResultState: { result: "old" },
+              native: { call: "old" },
               state: SessionMessage.ToolStateCompleted.make({
                 status: "completed",
                 input: { path: "README.md" },
                 content: [{ type: "text", text: "Hello" }],
               }),
-              time: { created, completed: created },
+              time: { created, completed: created, ran: created },
             }),
           ],
+          finish: "stop",
           time: { created, completed: created },
         }),
       ],
@@ -1306,10 +1347,9 @@ Earlier work
         result: { type: "text", value: '{"status":"completed"}' },
         providerExecuted: true,
         cache: undefined,
-        metadata: undefined,
         // Hosted result payloads are provider-format state and must survive a
         // model switch within the same provider for replay to stay valid.
-        providerMetadata: { provider: { itemId: "hosted-old-model" } },
+        providerMetadata: { provider: { itemId: "hosted-old-model", result: { signature: "result-sig" } } },
       },
       {
         type: "tool-call",
@@ -1328,7 +1368,6 @@ Earlier work
         result: { type: "text", value: "Hello" },
         providerExecuted: false,
         cache: undefined,
-        metadata: undefined,
         providerMetadata: undefined,
       },
     ])
@@ -1346,9 +1385,10 @@ Earlier work
             SessionMessage.AssistantReasoning.make({
               type: "reasoning",
               text: "Visible thought",
-              state: { reasoningEncryptedContent: "encrypted" },
+              native: { reasoningEncryptedContent: "encrypted" },
             }),
           ],
+          finish: "stop",
           time: { created, completed: created },
         }),
       ],
@@ -1364,11 +1404,11 @@ Earlier work
     ])
   })
 
-  test("drops assistant text provider state across model changes and failures", () => {
-    const messages = toLLMMessages(
+  test("drops assistant text provider state across model changes, aborts, and provider failures", () => {
+    const switched = toLLMMessages(
       [
         SessionMessage.Assistant.make({
-          id: id("assistant-phase"),
+          id: id("assistant-switched"),
           type: "assistant",
           agent: build,
           model: { id: Model.ID.make("old"), providerID: Provider.ID.make("provider") },
@@ -1376,23 +1416,360 @@ Earlier work
             SessionMessage.AssistantText.make({
               type: "text",
               text: "Checking.",
-              state: { phase: "commentary" },
+              native: { phase: "commentary" },
             }),
           ],
-          error: { type: "provider.unknown", message: "Interrupted after commentary" },
+          finish: "stop",
           time: { created, completed: created },
         }),
       ],
       Model.Ref.make({ id: Model.ID.make("new"), providerID: Provider.ID.make("provider") }),
     )
-
-    expect(messages[0]?.content).toEqual([
+    expect(switched[0]?.content).toEqual([
       {
         type: "text",
         text: "Checking.",
         providerMetadata: undefined,
       },
     ])
+
+    const aborted = toLLMMessages(
+      [
+        SessionMessage.Assistant.make({
+          id: id("assistant-aborted"),
+          type: "assistant",
+          agent: build,
+          model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+          content: [
+            SessionMessage.AssistantReasoning.make({
+              type: "reasoning",
+              text: "Finished thought",
+              native: { signature: "sig_kept" },
+              time: { created, completed: created },
+            }),
+            SessionMessage.AssistantText.make({
+              type: "text",
+              text: "Closed commentary.",
+              native: { phase: "commentary" },
+            }),
+            SessionMessage.AssistantTool.make({
+              type: "tool",
+              id: "uncalled-stream",
+              name: "write",
+              state: SessionMessage.ToolStateError.make({
+                status: "error",
+                input: {},
+                error: { type: "aborted", message: "Step interrupted" },
+              }),
+              time: { created, completed: created },
+            }),
+          ],
+          error: { type: "aborted", message: "Step interrupted" },
+          time: { created, completed: created },
+        }),
+        SessionMessage.Assistant.make({
+          id: id("assistant-aborted-mid-text"),
+          type: "assistant",
+          agent: build,
+          model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+          content: [
+            SessionMessage.AssistantText.make({
+              type: "text",
+              text: "Cut off sentence",
+              native: { phase: "final_answer" },
+            }),
+          ],
+          error: { type: "aborted", message: "Step interrupted" },
+          time: { created, completed: created },
+        }),
+      ],
+      Model.Ref.make({ id: Model.ID.make("same"), providerID: Provider.ID.make("provider") }),
+    )
+    expect(aborted.map((item) => item.content)).toEqual([
+      [
+        {
+          type: "reasoning",
+          text: "Finished thought",
+          providerMetadata: { provider: { signature: "sig_kept" } },
+        },
+        {
+          type: "text",
+          text: "Closed commentary.",
+          providerMetadata: { provider: { phase: "commentary" } },
+        },
+      ],
+      [
+        {
+          type: "text",
+          text: "Cut off sentence",
+          providerMetadata: undefined,
+        },
+      ],
+    ])
+
+    // A failed stream keeps only what had happened by its last call that ran, whether it was retried,
+    // retries ran out, or Esc landed during the retry wait. With no call that ran, nothing is kept.
+    const failedTurn = (value: string, content: SessionMessage.Assistant["content"]) =>
+      SessionMessage.Assistant.make({
+        id: id(value),
+        type: "assistant",
+        agent: build,
+        model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+        content,
+        error: { type: "provider.unknown", message: "Stream dropped" },
+        finish: "error",
+        time: { created, completed: created },
+      })
+    const failedTurns = toLLMMessages(
+      [
+        failedTurn("retries-exhausted", [
+          SessionMessage.AssistantText.make({
+            type: "text",
+            text: "Partial visible answer",
+            native: { phase: "commentary" },
+          }),
+        ]),
+        SessionMessage.Idle.make({ id: id("idle-failed"), type: "idle", outcome: "failed", time: { created } }),
+        failedTurn("tool-ran-before-failure", [
+          SessionMessage.AssistantText.make({ type: "text", text: "Reading first", native: { phase: "commentary" } }),
+          SessionMessage.AssistantTool.make({
+            type: "tool",
+            id: "ran",
+            name: "read",
+            state: SessionMessage.ToolStateCompleted.make({
+              status: "completed",
+              input: { path: "README.md" },
+              content: [{ type: "text", text: "Hello" }],
+            }),
+            time: { created, completed: created, ran: created },
+          }),
+          SessionMessage.AssistantText.make({ type: "text", text: "Now I'll run the te" }),
+        ]),
+      ],
+      Model.Ref.make({ id: Model.ID.make("same"), providerID: Provider.ID.make("provider") }),
+    )
+    expect(failedTurns.map((item) => ({ role: item.role, types: item.content.map((part) => part.type) }))).toEqual([
+      { role: "assistant", types: ["text", "tool-call"] },
+      { role: "tool", types: ["tool-result"] },
+    ])
+    expect(failedTurns[0]?.content[0]).toEqual({
+      type: "text",
+      text: "Reading first",
+      providerMetadata: { provider: { phase: "commentary" } },
+    })
+
+    const supersededFailed = toLLMMessages(
+      [
+        SessionMessage.Assistant.make({
+          id: id("assistant-superseded"),
+          type: "assistant",
+          agent: build,
+          model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+          content: [
+            SessionMessage.AssistantText.make({
+              type: "text",
+              text: "Partial broken stream",
+              native: { phase: "commentary" },
+            }),
+          ],
+          retry: {
+            attempt: 1,
+            at: created,
+            error: { type: "provider.unknown", message: "Stream dropped" },
+          },
+          error: { type: "provider.unknown", message: "Stream dropped" },
+          time: { created, completed: created },
+        }),
+        SessionMessage.ModelSelected.make({
+          id: id("model-switched-during-retry"),
+          type: "model-switched",
+          model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+          time: { created },
+        }),
+        SessionMessage.Assistant.make({
+          id: id("assistant-replacement"),
+          type: "assistant",
+          agent: build,
+          model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+          content: [
+            SessionMessage.AssistantText.make({
+              type: "text",
+              text: "Clean retry answer",
+              native: { phase: "final_answer" },
+            }),
+          ],
+          finish: "stop",
+          time: { created, completed: created },
+        }),
+      ],
+      Model.Ref.make({ id: Model.ID.make("same"), providerID: Provider.ID.make("provider") }),
+    )
+    expect(supersededFailed).toHaveLength(1)
+    expect(supersededFailed[0]?.content).toEqual([
+      {
+        type: "text",
+        text: "Clean retry answer",
+        providerMetadata: { provider: { phase: "final_answer" } },
+      },
+    ])
+
+    // A crashed step is stamped completed when the next step starts but never gets a finish. Cut turns drop
+    // calls that never ran and only replay reasoning the model moved past, so a reasoning-only cut is omitted.
+    const cutAssistant = (
+      value: string,
+      content: SessionMessage.Assistant["content"],
+      error?: SessionMessage.Assistant["error"],
+    ) =>
+      SessionMessage.Assistant.make({
+        id: id(value),
+        type: "assistant",
+        agent: build,
+        model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+        content,
+        error,
+        finish: error === undefined ? undefined : "error",
+        time: { created, completed: created },
+      })
+    const signed = (text: string, native: SessionMessage.Native, completed = true) =>
+      SessionMessage.AssistantReasoning.make({
+        type: "reasoning",
+        text,
+        native,
+        time: completed ? { created, completed: created } : { created },
+      })
+    const uncalled = (callID: string, state: SessionMessage.AssistantTool["state"], executed?: boolean) =>
+      SessionMessage.AssistantTool.make({ type: "tool", id: callID, name: "echo", executed, state, time: { created } })
+    const stepAborted = { type: "aborted" as const, message: "Step interrupted" }
+    const edgeAborts = toLLMMessages(
+      [
+        cutAssistant("crash-cut-reasoning-and-streaming-tool", [
+          signed("Signed thought before crash", { signature: "sig_crash" }),
+          uncalled("stale-streaming", SessionMessage.ToolStateStreaming.make({ status: "streaming", input: '{"te' })),
+        ]),
+        cutAssistant(
+          "whitespace-between-thinking-and-aborted-tool",
+          [
+            signed("Signed thought", { signature: "sig_ws" }),
+            SessionMessage.AssistantText.make({ type: "text", text: "\n\n" }),
+            uncalled(
+              "aborted-uncalled",
+              SessionMessage.ToolStateError.make({ status: "error", input: {}, error: stepAborted }),
+            ),
+          ],
+          stepAborted,
+        ),
+        cutAssistant(
+          "openai-multipart-summary-cut",
+          [
+            signed("Part 0", { itemId: "rs_cut", reasoningEncryptedContent: null }),
+            signed("Part 1", { itemId: "rs_cut", reasoningEncryptedContent: null }, false),
+          ],
+          stepAborted,
+        ),
+        cutAssistant(
+          "openai-multipart-summary-then-text",
+          [
+            signed("Part 0", { itemId: "rs_done", reasoningEncryptedContent: null }),
+            signed("Part 1", { itemId: "rs_done", reasoningEncryptedContent: "encrypted" }),
+            SessionMessage.AssistantText.make({
+              type: "text",
+              text: "Visible answer before Esc",
+              native: { itemId: "msg" },
+            }),
+          ],
+          stepAborted,
+        ),
+      ],
+      Model.Ref.make({ id: Model.ID.make("same"), providerID: Provider.ID.make("provider") }),
+    )
+    expect(edgeAborts).toHaveLength(1)
+    expect(edgeAborts[0]?.content).toEqual([
+      {
+        type: "reasoning",
+        text: "Part 0",
+        providerMetadata: { provider: { itemId: "rs_done", reasoningEncryptedContent: null } },
+      },
+      {
+        type: "reasoning",
+        text: "Part 1",
+        providerMetadata: { provider: { itemId: "rs_done", reasoningEncryptedContent: "encrypted" } },
+      },
+      { type: "text", text: "Visible answer before Esc", providerMetadata: undefined },
+    ])
+
+    // A cut stream drops a hosted call that never ran (marked executed at input start) but keeps input
+    // feedback so the model can reissue a malformed call.
+    const failedWithCalls = toLLMMessages(
+      [
+        cutAssistant(
+          "terminal-failure-with-uncalled-calls",
+          [
+            SessionMessage.AssistantText.make({ type: "text", text: "Searching" }),
+            uncalled(
+              "hosted-uncalled",
+              SessionMessage.ToolStateError.make({
+                status: "error",
+                input: {},
+                error: stepAborted,
+              }),
+              true,
+            ),
+            uncalled(
+              "malformed",
+              SessionMessage.ToolStateError.make({
+                status: "error",
+                input: { raw: "{" },
+                error: { type: "tool.input-json", message: "Reissue the call with valid JSON arguments." },
+              }),
+            ),
+          ],
+          stepAborted,
+        ),
+      ],
+      Model.Ref.make({ id: Model.ID.make("same"), providerID: Provider.ID.make("provider") }),
+    )
+    expect(failedWithCalls.map((message) => message.content.map((part) => part.type))).toEqual([
+      ["text", "tool-call"],
+      ["tool-result"],
+    ])
+    expect(failedWithCalls[0]?.content[1]).toMatchObject({ type: "tool-call", id: "malformed" })
+  })
+
+  test("replays tools migrated from V1, which never recorded when they ran", () => {
+    const migrated = (value: string, error?: SessionMessage.Assistant["error"]) =>
+      SessionMessage.Assistant.make({
+        id: id(value),
+        type: "assistant",
+        agent: build,
+        model: { id: Model.ID.make("same"), providerID: Provider.ID.make("provider") },
+        content: [
+          SessionMessage.AssistantTool.make({
+            type: "tool",
+            id: `${value}-read`,
+            name: "read",
+            state: SessionMessage.ToolStateCompleted.make({
+              status: "completed",
+              input: { path: "README.md" },
+              content: [{ type: "text", text: "Hello" }],
+            }),
+            time: { created, completed: created },
+          }),
+        ],
+        error,
+        finish: error === undefined ? "tool-calls" : "error",
+        time: { created, completed: created },
+      })
+    const messages = toLLMMessages(
+      [
+        migrated("finished"),
+        migrated("aborted", { type: "aborted", message: "Step interrupted" }),
+        migrated("failed", { type: "provider.unknown", message: "Stream dropped" }),
+      ],
+      Model.Ref.make({ id: Model.ID.make("same"), providerID: Provider.ID.make("provider") }),
+    )
+    expect(
+      messages.map((message) => message.content.map((part) => (part.type === "tool-call" ? part.id : part.type))),
+    ).toEqual([["finished-read"], ["tool-result"], ["aborted-read"], ["tool-result"], ["failed-read"], ["tool-result"]])
   })
 
   test("preserves assistant text provider state for the same model", () => {
@@ -1407,9 +1784,10 @@ Earlier work
             SessionMessage.AssistantText.make({
               type: "text",
               text: "Checking.",
-              state: { phase: "commentary" },
+              native: { phase: "commentary" },
             }),
           ],
+          finish: "stop",
           time: { created, completed: created },
         }),
       ],

@@ -1,6 +1,6 @@
 import { expect } from "bun:test"
 import { Effect } from "effect"
-import { LLM, LLMClient, Message, ToolDefinition } from "../../src/index.js"
+import { ai, LLMClient, Message, ToolDefinition } from "../../src/effect.js"
 import { MistralChat } from "../../src/protocols/mistral-chat.js"
 import { Vibe } from "../../src/providers/vibe.js"
 import { compileRequest } from "../../src/route/client.js"
@@ -28,7 +28,7 @@ it.effect("Vibe provider stays wired to the Mistral Chat protocol", () =>
 
 it.effect("Vibe route points at the binary's endpoint", () =>
   Effect.gen(function* () {
-    const request = LLM.request({ model, prompt: "Hello" })
+    const request = ai.request({ model, prompt: "Hello" })
     const compiled = yield* compileRequest(request)
     const url = Endpoint.render(model.route.endpoint, { request, body: compiled.body }).toString()
     expect(url).toBe("https://api.mistral.ai/v1/chat/completions")
@@ -37,7 +37,7 @@ it.effect("Vibe route points at the binary's endpoint", () =>
 
 it.effect("default model carries the binary's request defaults: temperature 1.0, thinking high, no top_p", () =>
   Effect.gen(function* () {
-    const compiled = yield* compileRequest(LLM.request({ model, prompt: "hi" }))
+    const compiled = yield* compileRequest(ai.request({ model, prompt: "hi" }))
     const body = compiled.body as Record<string, unknown>
     expect(body.model).toBe("mistral-vibe-cli-latest")
     expect(body.temperature).toBe(1.0)
@@ -49,7 +49,7 @@ it.effect("default model carries the binary's request defaults: temperature 1.0,
 it.effect("the binary's alias for the default model gets the same defaults", () =>
   Effect.gen(function* () {
     const alias = Vibe.configure({ apiKey: "fixture-key" }).model("mistral-medium-3.5")
-    const compiled = yield* compileRequest(LLM.request({ model: alias, prompt: "hi" }))
+    const compiled = yield* compileRequest(ai.request({ model: alias, prompt: "hi" }))
     const body = compiled.body as Record<string, unknown>
     expect(body.temperature).toBe(1.0)
     expect(body.reasoning_effort).toBe("high")
@@ -58,14 +58,14 @@ it.effect("the binary's alias for the default model gets the same defaults", () 
 
 it.effect("caller topP suppresses the preset temperature for the default model and its alias", () =>
   Effect.gen(function* () {
-    const withTopP = Vibe.configure({ apiKey: "fixture-key", generation: { topP: 0.9 } })
+    const withTopP = Vibe.configure({ apiKey: "fixture-key", topP: 0.9 })
     const defaultModel = withTopP.model("mistral-vibe-cli-latest")
-    const defaultBody = (yield* compileRequest(LLM.request({ model: defaultModel, prompt: "hi" }))).body as Record<
+    const defaultBody = (yield* compileRequest(ai.request({ model: defaultModel, prompt: "hi" }))).body as Record<
       string,
       unknown
     >
     const alias = withTopP.model("mistral-medium-3.5")
-    const aliasBody = (yield* compileRequest(LLM.request({ model: alias, prompt: "hi" }))).body as Record<
+    const aliasBody = (yield* compileRequest(ai.request({ model: alias, prompt: "hi" }))).body as Record<
       string,
       unknown
     >
@@ -81,10 +81,10 @@ it.effect("caller-supplied generation and provider options win over the preset d
   Effect.gen(function* () {
     const custom = Vibe.configure({
       apiKey: "fixture-key",
-      generation: { temperature: 0.2 },
+      temperature: 0.2,
       providerOptions: { reasoningEffort: "off" },
     }).model("mistral-vibe-cli-latest")
-    const compiled = yield* compileRequest(LLM.request({ model: custom, prompt: "hi" }))
+    const compiled = yield* compileRequest(ai.request({ model: custom, prompt: "hi" }))
     const body = compiled.body as Record<string, unknown>
     expect(body.temperature).toBe(0.2)
     expect(body.reasoning_effort).toBe("off")
@@ -94,7 +94,7 @@ it.effect("caller-supplied generation and provider options win over the preset d
 it.effect("non-default presets get no invented defaults", () =>
   Effect.gen(function* () {
     const codestral = Vibe.configure({ apiKey: "fixture-key" }).model("codestral-latest")
-    const compiled = yield* compileRequest(LLM.request({ model: codestral, prompt: "hi" }))
+    const compiled = yield* compileRequest(ai.request({ model: codestral, prompt: "hi" }))
     const body = compiled.body as Record<string, unknown>
     expect(body.model).toBe("codestral-latest")
     expect(body.temperature).toBeUndefined()
@@ -111,9 +111,7 @@ it.effect("tools lower through the Mistral Chat route; parallel_tool_calls follo
         inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
       }),
     ]
-    const compiled = yield* compileRequest(
-      LLM.request({ model, messages: [Message.user("weather?")], tools }),
-    )
+    const compiled = yield* compileRequest(ai.request({ model, messages: [Message.user("weather?")], tools }))
     const body = compiled.body as { tools?: Array<{ function?: { name?: string } }> }
     expect(body.tools?.[0]?.function?.name).toBe("get_weather")
 
@@ -121,16 +119,57 @@ it.effect("tools lower through the Mistral Chat route; parallel_tool_calls follo
       "mistral-vibe-cli-latest",
     )
     const compiledParallel = yield* compileRequest(
-      LLM.request({ model: parallel, messages: [Message.user("weather?")], tools }),
+      ai.request({ model: parallel, messages: [Message.user("weather?")], tools }),
     )
     expect((compiledParallel.body as Record<string, unknown>).parallel_tool_calls).toBe(true)
+  }),
+)
+
+// #2232 (from #1707 §1-G2): the combined fixture — reasoningEffort "high" and
+// a tool call in ONE request. The preset tests and the tools test above cover
+// each half separately; this one pins the interaction so neither the preset
+// path nor the tool-lowering path can drop the other's output.
+it.effect("tools lower alongside reasoning_effort high: preset default and explicit provider option", () =>
+  Effect.gen(function* () {
+    const tools = [
+      ToolDefinition.make({
+        name: "get_weather",
+        description: "Get weather",
+        inputSchema: { type: "object", properties: { city: { type: "string" } }, required: ["city"] },
+      }),
+    ]
+    // Oracle: the compiled wire body carries BOTH the preset's
+    // reasoning_effort/temperature and the lowered tool definition.
+    const preset = yield* compileRequest(ai.request({ model, messages: [Message.user("weather?")], tools }))
+    const presetBody = preset.body as {
+      reasoning_effort?: string
+      temperature?: number
+      tools?: Array<{ function?: { name?: string } }>
+    }
+    expect(presetBody.reasoning_effort).toBe("high")
+    expect(presetBody.temperature).toBe(1.0)
+    expect(presetBody.tools?.[0]?.function?.name).toBe("get_weather")
+
+    const explicit = Vibe.configure({
+      apiKey: "fixture-key",
+      providerOptions: { reasoningEffort: "high" },
+    }).model("mistral-vibe-cli-latest")
+    const explicitCompiled = yield* compileRequest(
+      ai.request({ model: explicit, messages: [Message.user("weather?")], tools }),
+    )
+    const explicitBody = explicitCompiled.body as {
+      reasoning_effort?: string
+      tools?: Array<{ function?: { name?: string } }>
+    }
+    expect(explicitBody.reasoning_effort).toBe("high")
+    expect(explicitBody.tools?.[0]?.function?.name).toBe("get_weather")
   }),
 )
 
 it.effect("stream: SSE chunks become text + usage, and the only auth header is the Bearer key", () =>
   Effect.gen(function* () {
     const calls: Array<{ headers: Headers }> = []
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.gen(function* () {
@@ -169,7 +208,7 @@ it.effect("stream: SSE chunks become text + usage, and the only auth header is t
 it.effect("wire body carries the binary's attribution stamp (metadata.call_source meters Vibe usage)", () =>
   Effect.gen(function* () {
     const bodies: Array<string> = []
-    yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.gen(function* () {
@@ -195,7 +234,7 @@ it.effect("caller-supplied metadata wins over the stamp, per key", () =>
       http: { body: { metadata: { call_type: "sub_call", session_id: "sess-1" } } },
     }).model("mistral-vibe-cli-latest")
     const bodies: Array<string> = []
-    yield* LLMClient.generate(LLM.request({ model: stamped, prompt: "hi" })).pipe(
+    yield* LLMClient.generate(ai.request({ model: stamped, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.gen(function* () {
@@ -229,7 +268,7 @@ it.effect("credential resolution feeds the auth header (keyring tier, via inject
       },
     }).model("mistral-vibe-cli-latest")
     const calls: Array<{ headers: Headers }> = []
-    const response = yield* LLMClient.generate(LLM.request({ model: keyed, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model: keyed, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.gen(function* () {
@@ -252,7 +291,7 @@ it.effect("absent credential fails with the not-signed-in guidance, before any r
     const unsigned = Vibe.configure({
       sources: { env: {}, readFile: () => undefined, keyringLookup: async () => undefined },
     }).model("mistral-vibe-cli-latest")
-    const result = yield* LLMClient.generate(LLM.request({ model: unsigned, prompt: "hi" })).pipe(
+    const result = yield* LLMClient.generate(ai.request({ model: unsigned, prompt: "hi" })).pipe(
       Effect.provide(fixedResponse(sseEvents(chunk({ content: "unreachable" }, "stop")))),
       Effect.result,
     )
@@ -273,7 +312,7 @@ it.effect("a 401 invalidates the credential, re-resolves the rotated key, and re
     }).model("mistral-vibe-cli-latest")
     const calls: Array<{ headers: Headers }> = []
     const seen: Array<{ method: string; url: string; headers: Headers; body: string }> = []
-    const response = yield* LLMClient.generate(LLM.request({ model: rotated, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model: rotated, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.gen(function* () {
@@ -312,7 +351,7 @@ it.effect("a second 401 is terminal - the retry happens exactly once", () =>
       },
     }).model("mistral-vibe-cli-latest")
     let calls = 0
-    const result = yield* LLMClient.generate(LLM.request({ model: dead, prompt: "hi" })).pipe(
+    const result = yield* LLMClient.generate(ai.request({ model: dead, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.sync(() => {

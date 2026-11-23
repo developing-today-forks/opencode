@@ -4,13 +4,14 @@ import { and, asc, eq, isNotNull, isNull, ne, or } from "drizzle-orm"
 import { Context, Effect, Layer, Schema } from "effect"
 import { InstructionEntry } from "@opencode/schema/instruction-entry"
 import { Database } from "../database/database.js"
-import { makeLocationNode } from "@opencode/util/effect/app-node"
+import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Instructions } from "../instructions/index.js"
 import { SessionSchema } from "./schema.js"
 import { InstructionEntryTable } from "./sql.js"
 
 export const Key = InstructionEntry.Key
 export type Key = typeof Key.Type
+export const NotFoundError = InstructionEntry.NotFoundError
 export const Info = InstructionEntry.Info
 export type Info = typeof Info.Type
 export const Snapshot = InstructionEntry.Snapshot
@@ -25,6 +26,10 @@ export const snapshot = Effect.fn("InstructionEntry.snapshot")(function* (
   db: DatabaseService,
   sessionID: SessionSchema.ID,
 ) {
+  return yield* rows(db, sessionID, true)
+})
+
+const rows = Effect.fnUntraced(function* (db: DatabaseService, sessionID: SessionSchema.ID, includeRemoved: boolean) {
   return yield* db
     .select({
       key: InstructionEntryTable.key,
@@ -32,7 +37,12 @@ export const snapshot = Effect.fn("InstructionEntry.snapshot")(function* (
       removed: InstructionEntryTable.removed,
     })
     .from(InstructionEntryTable)
-    .where(eq(InstructionEntryTable.session_id, sessionID))
+    .where(
+      and(
+        eq(InstructionEntryTable.session_id, sessionID),
+        includeRemoved ? undefined : eq(InstructionEntryTable.removed, false),
+      ),
+    )
     .orderBy(asc(InstructionEntryTable.key))
     .all()
     .pipe(Effect.orDie)
@@ -73,7 +83,10 @@ export interface Interface {
     readonly key: Key
     readonly value: Schema.Json
   }) => Effect.Effect<void, InstructionEntry.ValueTooLargeError>
-  readonly remove: (input: { readonly sessionID: SessionSchema.ID; readonly key: Key }) => Effect.Effect<void>
+  readonly remove: (input: {
+    readonly sessionID: SessionSchema.ID
+    readonly key: Key
+  }) => Effect.Effect<void, InstructionEntry.NotFoundError>
   /** Produces one Instructions source per stored entry, keyed `api/<key>`. */
   readonly load: (sessionID: SessionSchema.ID) => Effect.Effect<Instructions.List>
 }
@@ -108,27 +121,8 @@ const layer = Layer.effect(
   Effect.gen(function* () {
     const { db } = yield* Database.Service
 
-    const rows = Effect.fnUntraced(function* (sessionID: SessionSchema.ID, includeRemoved: boolean) {
-      return yield* db
-        .select({
-          key: InstructionEntryTable.key,
-          value: InstructionEntryTable.value,
-          removed: InstructionEntryTable.removed,
-        })
-        .from(InstructionEntryTable)
-        .where(
-          and(
-            eq(InstructionEntryTable.session_id, sessionID),
-            includeRemoved ? undefined : eq(InstructionEntryTable.removed, false),
-          ),
-        )
-        .orderBy(asc(InstructionEntryTable.key))
-        .all()
-        .pipe(Effect.orDie)
-    })
-
     const list = Effect.fn("InstructionEntry.list")(function* (sessionID: SessionSchema.ID) {
-      return (yield* rows(sessionID, false)).map((row) => ({ key: row.key, value: row.value }))
+      return (yield* rows(db, sessionID, false)).map((row) => ({ key: row.key, value: row.value }))
     })
 
     const put = Effect.fn("InstructionEntry.put")(function* (input: Parameters<Interface["put"]>[0]) {
@@ -156,7 +150,7 @@ const layer = Layer.effect(
     })
 
     const remove = Effect.fn("InstructionEntry.remove")(function* (input: Parameters<Interface["remove"]>[0]) {
-      yield* db
+      const removed = yield* db
         .update(InstructionEntryTable)
         .set({ value: null, removed: true, time_updated: Date.now() })
         .where(
@@ -166,16 +160,18 @@ const layer = Layer.effect(
             eq(InstructionEntryTable.removed, false),
           ),
         )
-        .run()
+        .returning({ key: InstructionEntryTable.key })
+        .get()
         .pipe(Effect.orDie)
+      if (!removed) return yield* new NotFoundError({ key: input.key })
     })
 
     const load = Effect.fn("InstructionEntry.load")(function* (sessionID: SessionSchema.ID) {
-      return Instructions.combine((yield* rows(sessionID, true)).map(source))
+      return Instructions.combine((yield* rows(db, sessionID, true)).map(source))
     })
 
     return Service.of({ list, put, remove, load })
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [Database.node] })
+export const node = makeGlobalNode({ service: Service, layer, deps: [Database.node] })

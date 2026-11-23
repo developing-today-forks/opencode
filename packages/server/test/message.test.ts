@@ -24,12 +24,12 @@ const messages: SessionMessageInfo[] = [
     status: "completed",
     reason: "manual",
     summary: "Conversation summary",
-    recent: "",
     time: { created: 700 },
   },
   { id: "msg_x", type: "user", text: "Third request", time: { created: 600 } },
   { id: "msg_system", type: "system", text: "Updated instructions", time: { created: 800 } },
   { id: "msg_a", type: "user", text: "Fourth request", time: { created: 500 } },
+  { id: "msg_idle", type: "idle", outcome: "succeeded", time: { created: 900 } },
 ]
 
 const setup = Effect.gen(function* () {
@@ -48,7 +48,7 @@ const setup = Effect.gen(function* () {
   })
   const session = yield* Effect.promise(async () => {
     const template = await api.session.create({ title: "Message filtering" })
-    return api.session.import({ info: { ...template, id: Session.ID.create() }, messages })
+    return api.experimental.session.import({ info: { ...template, id: Session.ID.create() }, messages })
   })
   return { api, handler, sessionID: session.id }
 })
@@ -81,6 +81,9 @@ it.live("filters message types before paginating in either direction through the
       expect(
         (await fixture.api.message.list({ sessionID: fixture.sessionID, type: "assistant", limit: 1 })).data,
       ).toEqual([messages[1]])
+      expect((await fixture.api.message.list({ sessionID: fixture.sessionID, type: "idle" })).data).toEqual([
+        messages[8],
+      ])
       expect((await fixture.api.message.list({ sessionID: fixture.sessionID, type: "shell" })).data).toEqual([])
     })
   }),
@@ -97,6 +100,51 @@ it.live("rejects unknown message type filters at the HTTP boundary", () =>
         expect(response.status).toBe(400)
         expect(await response.json()).toMatchObject({ _tag: "InvalidRequestError" })
       }
+    })
+  }),
+)
+
+it.live("binds the type filter into the cursor so a follow-up cannot retarget or drop it", () =>
+  Effect.gen(function* () {
+    const fixture = yield* setup
+    yield* Effect.promise(async () => {
+      // Page 1 of the user-filtered sequence (desc): the cursor is minted under type=user.
+      const first = await fixture.api.message.list({
+        sessionID: fixture.sessionID,
+        type: "user",
+        limit: 2,
+        order: "desc",
+      })
+      expect(first.data.map((message) => message.id)).toEqual(["msg_a", "msg_x"])
+      if (!first.cursor.next) throw new Error("Expected a next cursor")
+      // Following with the type omitted continues the original filtered sequence.
+      const continued = await fixture.api.message.list({ sessionID: fixture.sessionID, cursor: first.cursor.next })
+      expect(continued.data.map((message) => message.id)).toEqual(["msg_b", "msg_z"])
+      // Following with the same type is accepted and returns the same page.
+      const same = await fixture.api.message.list({
+        sessionID: fixture.sessionID,
+        type: "user",
+        cursor: first.cursor.next,
+      })
+      expect(same.data.map((message) => message.id)).toEqual(["msg_b", "msg_z"])
+      // Following with a different type is rejected instead of mixing sequences.
+      const retargeted = await fixture.handler(
+        new Request(
+          `http://opencode.local/api/session/${fixture.sessionID}/message?cursor=${first.cursor.next}&type=assistant`,
+        ),
+      )
+      expect(retargeted.status).toBe(400)
+      expect(await retargeted.json()).toMatchObject({ _tag: "InvalidCursorError" })
+      // An unfiltered cursor cannot be retargeted to a filter either.
+      const unfiltered = await fixture.api.message.list({ sessionID: fixture.sessionID, limit: 2, order: "desc" })
+      if (!unfiltered.cursor.next) throw new Error("Expected a next cursor")
+      const adopted = await fixture.handler(
+        new Request(
+          `http://opencode.local/api/session/${fixture.sessionID}/message?cursor=${unfiltered.cursor.next}&type=user`,
+        ),
+      )
+      expect(adopted.status).toBe(400)
+      expect(await adopted.json()).toMatchObject({ _tag: "InvalidCursorError" })
     })
   }),
 )

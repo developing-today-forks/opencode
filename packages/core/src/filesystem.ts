@@ -10,17 +10,28 @@ import { FileSystemSearch } from "./filesystem/search.js"
 import { Entry, FileSystem, FindInput, Write } from "@opencode/schema/filesystem"
 export { Entry, Match, Submatch } from "@opencode/schema/filesystem"
 
-export const ReadInput = Schema.Struct({
-  path: RelativePath,
-})
-export type ReadInput = typeof ReadInput.Type
+export interface ReadInput {
+  readonly path: RelativePath
+}
 
-export const WriteInput = Schema.Struct({
+export interface WriteInput {
   /** Absolute, or relative to the location directory. */
+  readonly path: string
+  readonly data: Uint8Array
+}
+
+/**
+ * Write size cap (#2502): one fs.write body never exceeds 10 MiB — the same bound the
+ * shell capture and VCS patch paths use. The check runs before any parent directory or
+ * file is created, so a rejected write leaves no residue; the server maps it to 413.
+ */
+export const MAX_WRITE_BYTES = 10 * 1024 * 1024
+
+export class WriteTooLargeError extends Schema.TaggedError<WriteTooLargeError>()("FileSystem.WriteTooLargeError", {
   path: Schema.String,
-  data: Schema.Uint8Array,
-})
-export type WriteInput = typeof WriteInput.Type
+  size: Schema.Number,
+  max: Schema.Number,
+}) {}
 
 export class NotFoundError extends Schema.TaggedError<NotFoundError>()("FileSystem.NotFoundError", {
   path: RelativePath,
@@ -59,10 +70,9 @@ export const Content = Schema.Struct({
 }).annotate({ identifier: "FileSystem.Content" })
 export type Content = typeof Content.Type
 
-export const ListInput = Schema.Struct({
-  path: Schema.String.pipe(Schema.optional),
-})
-export type ListInput = typeof ListInput.Type
+export interface ListInput {
+  readonly path?: string
+}
 
 export { FindInput, Write }
 
@@ -103,7 +113,7 @@ export interface Interface {
   readonly list: (input?: ListInput) => Effect.Effect<Entry[], NotFoundError>
   readonly find: (input: FindInput) => Effect.Effect<Entry[]>
   /** Writes a file at an absolute path or one relative to the location; not confined to it. */
-  readonly write: (input: WriteInput) => Effect.Effect<Write>
+  readonly write: (input: WriteInput) => Effect.Effect<Write, WriteTooLargeError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/FileSystem") {}
@@ -123,17 +133,12 @@ const baseLayer = Layer.effect(
     const root = location.workspaceID
       ? location.directory
       : yield* fs.realPath(location.directory).pipe(
+          // Linux realpath succeeds on an unreadable directory, so probe readability explicitly.
+          Effect.tap((real) => fs.access(real, { readable: true })),
           Effect.catch((cause): Effect.Effect<never, DirectoryNotFoundError | DirectoryAccessDeniedError> => {
             if (cause.reason._tag === "NotFound")
               return Effect.fail(new DirectoryNotFoundError({ directory: location.directory, cause }))
-            // macOS privacy denials arrive as Unknown with an EPERM cause.
-            if (
-              cause.reason._tag === "PermissionDenied" ||
-              (cause.reason._tag === "Unknown" &&
-                cause.reason.cause instanceof Error &&
-                "code" in cause.reason.cause &&
-                cause.reason.cause.code === "EPERM")
-            )
+            if (FSUtil.isAccessDenied(cause))
               return Effect.fail(new DirectoryAccessDeniedError({ directory: location.directory, cause }))
             return Effect.die(cause)
           }),
@@ -191,13 +196,14 @@ const baseLayer = Layer.effect(
           Effect.map((items) =>
             items
               .flatMap((item) => {
-                if (item.type !== "file" && item.type !== "directory") return []
+                if (item.type !== "File" && item.type !== "Directory") return []
+                const type = item.type === "Directory" ? "directory" : "file"
                 const absolute = path.join(directory, item.name)
                 const relative = path.relative(location.directory, absolute) || "."
                 return [
                   Entry.make({
-                    path: RelativePath.make(relative + (item.type === "directory" ? path.sep : "")),
-                    type: item.type,
+                    path: RelativePath.make(relative + (type === "directory" ? path.sep : "")),
+                    type,
                   }),
                 ]
               })
@@ -208,6 +214,12 @@ const baseLayer = Layer.effect(
       // Unlike read, write reaches outside the location so clients can stage files in the
       // server tmp directory, which the model is already told to prefer and permitted to access.
       write: Effect.fn("FileSystem.write")(function* (input) {
+        if (input.data.byteLength > MAX_WRITE_BYTES)
+          return yield* new WriteTooLargeError({
+            path: input.path,
+            size: input.data.byteLength,
+            max: MAX_WRITE_BYTES,
+          })
         const target = path.resolve(location.directory, input.path)
         yield* fs.writeWithDirs(target, input.data).pipe(Effect.orDie)
         return Write.make({ path: AbsolutePath.make(target) })

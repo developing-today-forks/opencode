@@ -47,8 +47,17 @@ export * as TranscriptionFacade from "./transcription-facade.js"
  */
 import { Context, Effect, Layer, Schema, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { AIError, AuthenticationError, Media, ProviderID, QuotaExceededError, RateLimitError, Transcription, TranscriptionClient, TranscriptionResponse, UnsupportedOperationError } from "@opencode/ai"
-import type { TranscriptionEvent, TranscriptionModel } from "@opencode/ai"
+import {
+  AIError,
+  AuthenticationError,
+  Media,
+  ProviderID,
+  QuotaExceededError,
+  RateLimitError,
+  UnsupportedOperationError,
+} from "@opencode/ai/effect"
+import { Transcription, TranscriptionClient, TranscriptionResponse } from "@opencode/ai/experimental"
+import type { TranscriptionEvent, TranscriptionModel } from "@opencode/ai/experimental"
 import { configure } from "@opencode/ai/providers/openai"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ownValue } from "./util/record.js"
@@ -88,6 +97,41 @@ export interface TranscriptionModelRegistration {
 
 const MIB = 1024 * 1024
 
+/**
+ * Multipart overhead allowance for the route-level body bound (#2433):
+ * a transcription request body is the audio file plus multipart
+ * boundaries, part headers and the non-file form fields, so the body
+ * bound is the audio cap plus this small named allowance — never a
+ * second hard-coded upload cap.
+ */
+export const MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
+/** The request-body bound for one registration: its audio cap plus
+ * the multipart overhead allowance. */
+export const transcriptionBodyLimit = (registration: TranscriptionModelRegistration): number =>
+  registration.maxUploadBytes + MULTIPART_OVERHEAD_BYTES
+
+/**
+ * The route-level request-body bound (#2433): the largest body bound
+ * among the registrations visible to the caller. The handler enforces
+ * this bound while reading — a declared content-length over it is
+ * refused up front and a streamed body is cut off at it — because the
+ * resolved registration is only known after the multipart form (which
+ * carries the model field) has been parsed. The per-registration cap
+ * itself is still enforced exactly by parseTranscriptionRequest once
+ * the registration is resolved. When no provider is enabled the
+ * visible set is empty; the bound then falls back to all
+ * registrations, so the route safety limit still applies (the request
+ * itself will answer model_not_found after the bounded read).
+ */
+export const maxTranscriptionBodyLimit = (enabledProviders?: ReadonlySet<string>): number => {
+  const visible = TRANSCRIPTION_MODELS.filter(
+    (model) => enabledProviders === undefined || enabledProviders.has(model.providerID),
+  )
+  const registrations = visible.length > 0 ? visible : TRANSCRIPTION_MODELS
+  return Math.max(...registrations.map(transcriptionBodyLimit))
+}
+
 export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration> = [
   {
     ref: "openai/whisper-1",
@@ -101,7 +145,19 @@ export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration>
       timestamps: ["segment", "word"],
       diarize: false,
       maxDurationSeconds: 600,
-      mediaTypes: ["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg", "audio/flac", "audio/x-flac"],
+      mediaTypes: [
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/m4a",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/webm",
+        "audio/ogg",
+        "audio/flac",
+        "audio/x-flac",
+      ],
     },
     backend: { kind: "http" },
     apiKeyEnv: "OPENAI_API_KEY",
@@ -123,7 +179,19 @@ export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration>
       timestamps: ["segment", "word"],
       diarize: true,
       maxDurationSeconds: 600,
-      mediaTypes: ["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg", "audio/flac", "audio/x-flac"],
+      mediaTypes: [
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/m4a",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/webm",
+        "audio/ogg",
+        "audio/flac",
+        "audio/x-flac",
+      ],
     },
     backend: { kind: "http" },
     apiKeyEnv: "DEEPGRAM_API_KEY",
@@ -146,7 +214,18 @@ export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration>
       timestamps: ["segment", "word"],
       diarize: true,
       maxDurationSeconds: 600,
-      mediaTypes: ["audio/mpeg", "audio/wav", "audio/x-wav", "audio/wave", "audio/aiff", "audio/x-aiff", "audio/aac", "audio/ogg", "audio/flac", "audio/x-flac"],
+      mediaTypes: [
+        "audio/mpeg",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/aiff",
+        "audio/x-aiff",
+        "audio/aac",
+        "audio/ogg",
+        "audio/flac",
+        "audio/x-flac",
+      ],
     },
     backend: { kind: "http" },
     apiKeyEnv: "GOOGLE_GENERATIVE_AI_API_KEY",
@@ -168,7 +247,19 @@ export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration>
       timestamps: ["segment", "word"],
       diarize: true,
       maxDurationSeconds: 600,
-      mediaTypes: ["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg", "audio/flac", "audio/x-flac"],
+      mediaTypes: [
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/m4a",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/webm",
+        "audio/ogg",
+        "audio/flac",
+        "audio/x-flac",
+      ],
     },
     backend: { kind: "http" },
     apiKeyEnv: "ASSEMBLYAI_API_KEY",
@@ -190,7 +281,19 @@ export const TRANSCRIPTION_MODELS: ReadonlyArray<TranscriptionModelRegistration>
       timestamps: ["segment", "word"],
       diarize: true,
       maxDurationSeconds: 600,
-      mediaTypes: ["audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/m4a", "audio/wav", "audio/x-wav", "audio/wave", "audio/webm", "audio/ogg", "audio/flac", "audio/x-flac"],
+      mediaTypes: [
+        "audio/mpeg",
+        "audio/mp4",
+        "audio/x-m4a",
+        "audio/m4a",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/webm",
+        "audio/ogg",
+        "audio/flac",
+        "audio/x-flac",
+      ],
     },
     backend: { kind: "http" },
     apiKeyEnv: "ELEVENLABS_API_KEY",
@@ -307,8 +410,7 @@ export const parseTranscriptionRequest = (
   const fail = (error: FacadeErrorShape): ParseTranscriptionResult => ({ ok: false, error })
 
   const modelLabel = field(form, "model")
-  if (modelLabel === undefined || modelLabel === "")
-    return fail(shape(400, "invalid_request", "model is required"))
+  if (modelLabel === undefined || modelLabel === "") return fail(shape(400, "invalid_request", "model is required"))
   const registration = resolveTranscriptionModel(modelLabel, enabledProviders)
   if (typeof registration === "string") return fail(shape(404, "model_not_found", registration))
   const capabilities = registration.capabilities
@@ -469,7 +571,7 @@ export const transcriptionBody = (
         }
       : {}),
     ...(response.usage !== undefined ? { usage: response.usage } : {}),
-    notices: response.notices ?? [],
+    notices: [],
     provider_metadata: {
       provider: registration.providerID,
       model: registration.modelID,
@@ -525,9 +627,9 @@ export const transcriptionStreamFrame = (
 /** The transcription entries GET /v1/models can advertise alongside
  * the other doors' models (§3). */
 export const transcriptionModelEntries = (enabledProviders?: ReadonlySet<string>) =>
-  TRANSCRIPTION_MODELS.filter(
-    (model) => enabledProviders === undefined || enabledProviders.has(model.providerID),
-  ).map((model) => ({ id: model.ref, object: "model", created: 0, owned_by: model.providerID }))
+  TRANSCRIPTION_MODELS.filter((model) => enabledProviders === undefined || enabledProviders.has(model.providerID)).map(
+    (model) => ({ id: model.ref, object: "model", created: 0, owned_by: model.providerID }),
+  )
 
 // ------------------------------------------------------------ service
 
@@ -558,9 +660,7 @@ const { configure: configureDeepgram } = await import("@opencode/ai/providers/de
 const { configure: configureElevenLabs } = await import("@opencode/ai/providers/elevenlabs")
 const { configure: configureGoogle } = await import("@opencode/ai/providers/google")
 
-const PROVIDER_FACTORIES: Readonly<
-  Record<string, (modelID: string, apiKey: string) => TranscriptionModel>
-> = {
+const PROVIDER_FACTORIES: Readonly<Record<string, (modelID: string, apiKey: string) => TranscriptionModel>> = {
   openai: (modelID, apiKey) => configure({ apiKey }).transcription(modelID),
   deepgram: (modelID, apiKey) => configureDeepgram({ apiKey }).transcription(modelID),
   google: (modelID, apiKey) => configureGoogle({ apiKey }).transcription(modelID),
@@ -610,8 +710,7 @@ const classifyFailure = (failure: unknown): FacadeErrorShape => {
   if (failure instanceof AIError) {
     const reason = failure.reason as { _tag?: string; message?: string; operation?: string }
     const message = reason.message ?? failure.message ?? "transcription failed"
-    if (reason instanceof QuotaExceededError)
-      return shape(429, "quota_exceeded", message)
+    if (reason instanceof QuotaExceededError) return shape(429, "quota_exceeded", message)
     if (reason instanceof RateLimitError) return shape(429, "rate_limit", message)
     if (reason instanceof UnsupportedOperationError) {
       if (reason.operation === "media.timestamps") return shape(400, "timestamps_not_supported", message)
@@ -780,9 +879,7 @@ export const layer = Layer.effect(
           Stream.timeoutOrElse({
             duration: STREAM_IDLE_TIMEOUT,
             orElse: () =>
-              Stream.fail(
-                new Error(`the transcription provider sent no stream events for ${STREAM_IDLE_TIMEOUT}`),
-              ),
+              Stream.fail(new Error(`the transcription provider sent no stream events for ${STREAM_IDLE_TIMEOUT}`)),
           }),
           Stream.mapError((failure) => {
             if (!settled) {

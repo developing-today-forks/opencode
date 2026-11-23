@@ -1,6 +1,6 @@
 import { createMemo, createSignal, Match, Show, Switch } from "solid-js"
 import { RGBA, TextAttributes, type MouseEvent } from "@opentui/core"
-import type { JSX } from "@opentui/solid"
+import { useRenderer, type JSX } from "@opentui/solid"
 import type {
   SessionMessageAssistant,
   SessionMessageAssistantReasoning,
@@ -15,6 +15,7 @@ import { Locale } from "../../util/locale"
 import { use } from "./render-context"
 import { generateThinkingSyntax } from "./thinking-syntax"
 import { canonicalToolName } from "../../util/tool-display"
+import { useSessionLinks } from "../../ui/session-link"
 
 export const INLINE_TOOL_ICON_WIDTH = 2
 
@@ -30,6 +31,7 @@ const toolDisplays = new Set([
   "subagent",
   "execute",
   "patch",
+  "todowrite",
   "question",
   "skill",
 ])
@@ -45,8 +47,6 @@ export function ReasoningPart(props: {
   message: SessionMessageAssistant
 }) {
   const theme = useTheme()
-  const { currentSyntax: syntax } = useThemes()
-  const thinkingSyntax = createSyntaxStyleMemo(() => generateThinkingSyntax(syntax(), theme.text.muted))
   const ctx = use()
   // Collapsed by default in hide mode: a single line throughout, so the
   // layout never shifts. Click to open the full markdown block, click to close.
@@ -95,19 +95,50 @@ export function ReasoningPart(props: {
               borderColor={theme.decrease(theme.background.base)}
               paddingLeft={inMinimal() ? 3 : 1}
             >
-              <code
-                filetype="markdown"
-                drawUnstyledText={false}
-                streaming={true}
-                syntaxStyle={thinkingSyntax()}
-                content={content()}
-                conceal={ctx.markdownMode() === "rendered"}
-                fg={theme.text.muted}
-              />
+              <ReasoningBody content={content()} streaming={!isDone()} sourceStreaming={true} />
             </box>
           </box>
         </Show>
       </box>
+    </Show>
+  )
+}
+
+/**
+ * Reasoning in the reasoning colors. Rendered mode draws it with OpenTUI's native Markdown, as answers are drawn, so
+ * none of it goes to the highlighter; source mode keeps the highlighted Markdown source.
+ */
+export function ReasoningBody(props: { content: string; streaming: boolean; sourceStreaming: boolean }) {
+  const ctx = use()
+  const theme = useTheme()
+  const { currentSyntax: syntax } = useThemes()
+  const renderer = useRenderer()
+  const thinkingSyntax = createSyntaxStyleMemo(() =>
+    generateThinkingSyntax(syntax(), theme.text.muted, renderer.nativeScene),
+  )
+  return (
+    <Show
+      when={ctx.markdownMode() === "rendered"}
+      fallback={
+        <code
+          filetype="markdown"
+          drawUnstyledText={false}
+          streaming={props.sourceStreaming}
+          syntaxStyle={thinkingSyntax()}
+          content={props.content}
+          conceal={false}
+          fg={theme.text.muted}
+        />
+      }
+    >
+      <markdown
+        streaming={props.streaming}
+        syntaxStyle={thinkingSyntax()}
+        content={props.content}
+        tableOptions={{ style: "grid", cellPaddingX: 1 }}
+        conceal={true}
+        fg={theme.text.muted}
+      />
     </Show>
   )
 }
@@ -180,11 +211,11 @@ export function TextPart(props: {
       <box paddingLeft={3} flexShrink={0}>
         {/* Configure custom nodes before parsing; apply content before streaming so completion keeps the final tokens. */}
         <markdown
+          ref={useSessionLinks()}
           syntaxStyle={syntax()}
-          renderNode={plugins.markdown()}
+          renderBlock={plugins.markdown()}
           content={props.part.text.trim()}
           streaming={props.message.time.completed === undefined}
-          internalBlockMode="top-level"
           tableOptions={{ style: "grid", cellPaddingX: 1 }}
           conceal={ctx.markdownMode() === "rendered"}
           fg={theme.markdown.text}

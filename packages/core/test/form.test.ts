@@ -41,12 +41,8 @@ describe("Form", () => {
       expect(Form.validateAnswer(fields, { at: "2024-02-29T10:00:00Z" })).toBeUndefined()
       expect(Form.validateAnswer(fields, { at: "2026-01-15T10:30:00Z" })).toBeUndefined()
       expect(Form.validateAnswer(fields, { at: "2026-01-15T10:30:00+02:00" })).toBeUndefined()
-      expect(Form.validateAnswer(fields, { at: "2026-01-01T25:00:00Z" })).toBe(
-        "Expected date-time for form field: at",
-      )
-      expect(Form.validateAnswer(fields, { at: "2026-01-01T10:60:00Z" })).toBe(
-        "Expected date-time for form field: at",
-      )
+      expect(Form.validateAnswer(fields, { at: "2026-01-01T25:00:00Z" })).toBe("Expected date-time for form field: at")
+      expect(Form.validateAnswer(fields, { at: "2026-01-01T10:60:00Z" })).toBe("Expected date-time for form field: at")
       expect(Form.validateAnswer(fields, { at: "not-a-date" })).toBe("Expected date-time for form field: at")
       // Non-ISO forms carry no YYYY-MM-DD part, so their existing leniency is unchanged.
       expect(Form.validateAnswer(fields, { at: "Jan 5 2026" })).toBeUndefined()
@@ -401,10 +397,7 @@ describe("Form", () => {
       // Closed-options targets stay decided by membership alone, even when an
       // option value would fail the target's other constraints.
       expect(
-        gated(
-          { key: "a", type: "string", minLength: 5, options: [{ value: "abc", label: "ABC" }] },
-          "abc",
-        ),
+        gated({ key: "a", type: "string", minLength: 5, options: [{ value: "abc", label: "ABC" }] }, "abc"),
       ).toBeUndefined()
       // Custom string targets still get the checks: options do not bind answers.
       expect(
@@ -656,17 +649,15 @@ describe("Form", () => {
       expect(Form.validateFields([{ key: "name", type: "string", required: true, options: [] }])).toBe(
         "Form field has no options but is required: name",
       )
-      expect(
-        Form.validateFields([{ key: "tags", type: "multiselect", required: true, options: [] }]),
-      ).toBe("Form field has no options but is required: tags")
+      expect(Form.validateFields([{ key: "tags", type: "multiselect", required: true, options: [] }])).toBe(
+        "Form field has no options but is required: tags",
+      )
       // Satisfiable controls still create: the same shapes without required
       // (0 stays a legal cap for optional fields), a cap of 1, and custom
       // fields whose answers are not limited to the declared options.
       expect(Form.validateFields([{ key: "name", type: "string", maxLength: 0 }])).toBeUndefined()
       expect(
-        Form.validateFields([
-          { key: "tags", type: "multiselect", options: [{ value: "a", label: "A" }], maxItems: 0 },
-        ]),
+        Form.validateFields([{ key: "tags", type: "multiselect", options: [{ value: "a", label: "A" }], maxItems: 0 }]),
       ).toBeUndefined()
       expect(Form.validateFields([{ key: "name", type: "string", options: [] }])).toBeUndefined()
       expect(Form.validateFields([{ key: "tags", type: "multiselect", options: [] }])).toBeUndefined()
@@ -718,9 +709,9 @@ describe("Form", () => {
       expect(
         Form.validateAnswer([{ key: "tags", type: "multiselect", options, maxItems: 1 }], { tags: ["a"] }),
       ).toBeUndefined()
-      expect(
-        Form.validateAnswer([{ key: "tags", type: "multiselect", options, minItems: 2 }], { tags: ["a"] }),
-      ).toBe("Too few selections for form field: tags")
+      expect(Form.validateAnswer([{ key: "tags", type: "multiselect", options, minItems: 2 }], { tags: ["a"] })).toBe(
+        "Too few selections for form field: tags",
+      )
     }),
   )
 
@@ -831,6 +822,73 @@ describe("Form ask bounds (#1883)", () => {
       // Oracle: the form's own state (the session-store record the form endpoints serve).
       expect(yield* Fiber.join(fiber)).toEqual({ status: "cancelled", message: "too slow" })
       expect(yield* service.state(formID)).toEqual({ status: "cancelled", message: "too slow" })
+    }),
+  )
+
+  it.effect("a joined ask timeout does not cancel the pending form it joined (#2445)", () =>
+    Effect.gen(function* () {
+      const service = yield* Form.Service
+      const askInput = {
+        sessionID: SessionSchema.ID.make("ses_test"),
+        title: "Test form",
+        fields: [{ key: "name", type: "string", required: true }],
+      } satisfies Form.CreateInput
+      const owner = yield* service
+        .ask(askInput, { dedupePending: true, timeout: "10 minutes", timeoutMessage: "owner timed out" })
+        .pipe(Effect.forkScoped)
+      // Let the owner create the form the joiner dedupes onto.
+      let pending = yield* service.list({ sessionID: askInput.sessionID })
+      for (let i = 0; i < 50 && pending.length === 0; i++) {
+        yield* TestClock.adjust("10 millis")
+        pending = yield* service.list({ sessionID: askInput.sessionID })
+      }
+      expect(pending).toHaveLength(1)
+      const joiner = yield* service
+        .ask(askInput, { dedupePending: true, timeout: "1 minute", timeoutMessage: "joiner timed out" })
+        .pipe(Effect.forkScoped)
+      // Fire the joiner timer (1 minute); the owner timer (10 minutes) is far off.
+      yield* TestClock.adjust("2 minutes")
+      // Oracle: the shared form state the form endpoints serve. A joiner timeout
+      // must not settle it: the form stays pending and joinable, and a later reply
+      // still answers the owner.
+      expect(yield* service.list({ sessionID: askInput.sessionID })).toHaveLength(1)
+      expect(yield* service.state(pending[0]!.id)).toEqual({ status: "pending" })
+      // The joiner itself resolved at its own deadline with its timeout outcome
+      // (#2619), without settling the shared form.
+      expect(yield* Fiber.join(joiner)).toEqual({ status: "cancelled", message: "joiner timed out" })
+      yield* service.reply({ id: pending[0]!.id, answer: { name: "Ava" } })
+      expect(yield* Fiber.join(owner)).toEqual({ status: "answered", answer: { name: "Ava" } })
+    }),
+  )
+
+  it.effect("a joined ask resolves at its own timeout when the owner set none (#2619)", () =>
+    Effect.gen(function* () {
+      const service = yield* Form.Service
+      const askInput = {
+        sessionID: SessionSchema.ID.make("ses_test"),
+        title: "Test form",
+        fields: [{ key: "name", type: "string", required: true }],
+      } satisfies Form.CreateInput
+      // The owner set no timeout: without a bound of its own, a joined ask would
+      // pend on the shared deferred indefinitely.
+      const owner = yield* service.ask(askInput, { dedupePending: true }).pipe(Effect.forkScoped)
+      // Let the owner create the form the joiner dedupes onto.
+      let pending = yield* service.list({ sessionID: askInput.sessionID })
+      for (let i = 0; i < 50 && pending.length === 0; i++) {
+        yield* TestClock.adjust("10 millis")
+        pending = yield* service.list({ sessionID: askInput.sessionID })
+      }
+      expect(pending).toHaveLength(1)
+      const joiner = yield* service
+        .ask(askInput, { dedupePending: true, timeout: "1 minute", timeoutMessage: "joiner timed out" })
+        .pipe(Effect.forkScoped)
+      yield* TestClock.adjust("2 minutes")
+      // Oracle: the joiner resolved at its own deadline with its timeout outcome,
+      // while the shared form stays pending and a later reply still answers the owner.
+      expect(yield* Fiber.join(joiner)).toEqual({ status: "cancelled", message: "joiner timed out" })
+      expect(yield* service.state(pending[0]!.id)).toEqual({ status: "pending" })
+      yield* service.reply({ id: pending[0]!.id, answer: { name: "Ava" } })
+      expect(yield* Fiber.join(owner)).toEqual({ status: "answered", answer: { name: "Ava" } })
     }),
   )
 

@@ -1,4 +1,4 @@
-import type { Library } from "./codemode.js"
+import type { Library } from "./codemode/codemode.js"
 
 export const name = "std"
 export const version = "1.0.0"

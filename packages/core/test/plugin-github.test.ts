@@ -208,7 +208,7 @@ describe("github plugin through the plugin host", () => {
       const location = yield* Location.Service
       const skills = yield* Skill.Service
       const registry = yield* Tool.Service
-      yield* GitHubPlugin.effect(yield* PluginHost.make(plugins))
+      yield* GitHubPlugin.effect(yield* PluginHost.make(plugins, "test"))
 
       const skill = (yield* skills.list()).find((entry) => entry.id === "github")
       expect(skill?.autoinvoke).toBe(false)
@@ -241,7 +241,7 @@ describe("github plugin through the plugin host", () => {
       const sessions = yield* Session.Service
       const location = yield* Location.Service
       const registry = yield* Tool.Service
-      yield* GitHubPlugin.effect(yield* PluginHost.make(plugins))
+      yield* GitHubPlugin.effect(yield* PluginHost.make(plugins, "test"))
       const session = yield* sessions.create({ location: Location.Ref.make({ directory: location.directory }) })
       const execute = (code: string) =>
         executeTool(registry, {
@@ -295,7 +295,7 @@ describe("github plugin through the plugin host", () => {
     Effect.gen(function* () {
       const plugins = yield* Plugin.Service
       const registry = yield* Tool.Service
-      const host = yield* PluginHost.make(plugins)
+      const host = yield* PluginHost.make(plugins, "test")
       yield* GitHubPlugin.effect({ ...host, options: { codemode: false } })
       const names = (yield* toolDefinitions(registry)).map((definition) => definition.name)
       expect(names).toContain("github_feedback")

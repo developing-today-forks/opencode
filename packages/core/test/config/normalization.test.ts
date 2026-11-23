@@ -192,7 +192,8 @@ describe("ConfigNormalize", () => {
     expect(result.encoded.warming).toEqual({ interval: "240000 millis", duration: "1800000 millis" })
     const info = Schema.decodeUnknownSync(Info)(result.encoded)
     if (typeof info.warming === "boolean" || info.warming === undefined) throw new Error("expected warming info")
-    expect(Duration.toMillis(info.warming.interval ?? Duration.zero)).toBe(240_000)
+    const interval = info.warming.interval
+    expect(interval === "auto" ? interval : Duration.toMillis(interval ?? Duration.zero)).toBe(240_000)
     expect(Duration.toMillis(info.warming.duration ?? Duration.zero)).toBe(1_800_000)
   })
 
@@ -286,6 +287,22 @@ describe("ConfigNormalize", () => {
       providerID: "anthropic",
       model: "claude",
     })
+  })
+
+  test("keeps an inline variant in legacy model references", () => {
+    const result = normalized({
+      small_model: "anthropic/claude-haiku-4-5#low",
+      agent: { reviewer: { model: "anthropic/claude#high", variant: "low" } },
+      command: { review: { template: "review", model: "anthropic/claude#high" } },
+    })
+    expect(result.encoded.agents).toEqual({
+      reviewer: { model: { providerID: "anthropic", model: "claude", variant: "high" } },
+      title: { model: { providerID: "anthropic", model: "claude-haiku-4-5", variant: "low" } },
+    })
+    expect(result.encoded.commands).toEqual({
+      review: { template: "review", model: { providerID: "anthropic", model: "claude", variant: "high" } },
+    })
+    expect(result.diagnostics).toEqual([])
   })
 
   test("migrates the legacy small model to the title agent", () => {
@@ -421,6 +438,16 @@ describe("ConfigNormalize", () => {
     ])
   })
 
+  test("maps the media tools' old experimental names in native rules", () => {
+    const rule = { action: "experimental_image_generate", resource: "*", effect: "deny" }
+    const result = normalized({
+      permissions: [rule],
+      agents: { build: { permissions: [{ ...rule, action: "experimental_video_generate" }] } },
+    }).encoded
+    expect(result.permissions).toEqual([{ ...rule, action: "generate_image" }])
+    expect(result.agents).toMatchObject({ build: { permissions: [{ ...rule, action: "generate_video" }] } })
+  })
+
   test.each(["agent", "mode"])("preserves legacy %s permission source order", (key) => {
     const build = {
       tools: { write: false, read: true },
@@ -535,6 +562,24 @@ describe("ConfigNormalize", () => {
     expect(
       result.diagnostics.some((item) => item.kind === "invalid" && item.path.join(".") === "mcp.servers.invalid"),
     ).toBe(true)
+  })
+
+  test.each([
+    { type: "local", command: ["example"] },
+    { type: "remote", url: "https://example.com/mcp" },
+  ])("preserves codemode: false for legacy $type MCP servers", (server) => {
+    const result = normalized({ mcp: { example: { ...server, codemode: false } } })
+    expect(result.diagnostics).toEqual([])
+    expect(Schema.decodeUnknownSync(Info)(result.encoded).mcp?.servers?.example?.codemode).toBe(false)
+  })
+
+  test.each([
+    { type: "local", command: ["example"] },
+    { type: "remote", url: "https://example.com/mcp" },
+  ])("leaves codemode unset for legacy $type MCP servers when omitted", (server) => {
+    const result = normalized({ mcp: { example: server } })
+    expect(result.diagnostics).toEqual([])
+    expect(Schema.decodeUnknownSync(Info)(result.encoded).mcp?.servers?.example?.codemode).toBeUndefined()
   })
 
   test("expands numeric MCP timeouts to every phase", () => {
@@ -686,6 +731,13 @@ describe("ConfigNormalize", () => {
       ["conflict", ["compaction", "keep", "tokens"]],
       ["conflict", ["compaction", "buffer"]],
     ])
+
+    expect(normalized({ compaction: { buffer: "12.5%" } }).encoded.compaction).toEqual({ buffer: "12.5%" })
+    for (const buffer of ["0%", "100%", "150%"]) {
+      const result = normalized({ compaction: { buffer } })
+      expect(result.encoded.compaction).toBeUndefined()
+      expect(result.diagnostics.map((item) => [item.kind, item.path])).toEqual([["invalid", ["compaction", "buffer"]]])
+    }
   })
 
   test("distinguishes empty, mixed, and wholly malformed enabled provider lists", () => {
@@ -708,12 +760,25 @@ describe("ConfigNormalize", () => {
         policies: [{ action: "provider.use", resource: "native", effect: "deny" }],
         experimental: {
           portable_shell_scanner: true,
+          todo: true,
+          media_blob: true,
+          part_rows: true,
+          image_generate: { model: "openai/gpt-image-2" },
           subagent_depth: 0,
+          location_idle_timeout: "2 hours",
           policies: [{ action: "provider.use", resource: "custom", effect: "allow" }],
         },
       }).encoded,
     ).toMatchObject({
-      experimental: { portable_shell_scanner: true, subagent_depth: 0 },
+      experimental: {
+        portable_shell_scanner: true,
+        todo: true,
+        media_blob: true,
+        part_rows: true,
+        image_generate: { model: { providerID: "openai", model: "gpt-image-2" } },
+        subagent_depth: 0,
+        location_idle_timeout: "7200000 millis",
+      },
       policies: [
         { action: "provider.use", resource: "*", effect: "deny" },
         { action: "provider.use", resource: "anthropic", effect: "allow" },
@@ -735,10 +800,95 @@ describe("ConfigNormalize", () => {
     expect(decoded({ experimental: { shell_timeout: 300000 } }).experimental?.shell_timeout).toBe(300000)
   })
 
+  test("normalizes the image_generate setting", () => {
+    for (const [value, expected] of [
+      [true, true],
+      [false, false],
+      [{}, {}],
+      [{ model: "openai/gpt-image-2#hd" }, { model: { providerID: "openai", model: "gpt-image-2", variant: "hd" } }],
+    ] as const)
+      expect(normalized({ experimental: { image_generate: value } }).encoded.experimental).toEqual({
+        image_generate: expected,
+      })
+    for (const value of ["openai/gpt-image-2", 1, { model: "no-slash" }, { model: 1 }]) {
+      const result = normalized({ experimental: { image_generate: value } })
+      expect(result.encoded.experimental).toBeUndefined()
+      expect(result.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+        ["invalid", ["experimental", "image_generate"]],
+      ])
+    }
+  })
+
+  test("normalizes flag booleans and keeps automations at the top level", () => {
+    const result = normalized({
+      automations: false,
+      experimental: {
+        todo: true,
+        media_blob: false,
+        artifacts: "yes",
+        full_codemode: true,
+        automations: false,
+        schedules: false,
+      },
+    })
+    expect(result.encoded.automations).toBe(false)
+    expect(result.encoded.experimental).toEqual({ todo: true, media_blob: false, full_codemode: true })
+    expect(result.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["removed", ["experimental", "automations"]],
+      ["removed", ["experimental", "schedules"]],
+      ["invalid", ["experimental", "artifacts"]],
+    ])
+    expect(normalized({ experimental: { automations: false, schedules: false } }).encoded).toEqual({})
+  })
+
+  test("accepts deprecated codemode_vm and ignores retired codemodeVm without diagnostics", () => {
+    const result = normalized({ experimental: { codemode_vm: true, codemodeVm: false } })
+    expect(result.encoded.experimental).toEqual({ codemode_vm: true })
+    expect(result.diagnostics).toEqual([])
+  })
+
+  test("passes experimental.all_flags through as a boolean", () => {
+    expect(normalized({ experimental: { all_flags: true } }).encoded.experimental).toEqual({ all_flags: true })
+    expect(normalized({ experimental: { all_flags: false } }).encoded.experimental).toEqual({ all_flags: false })
+    const invalid = normalized({ experimental: { all_flags: "yes" } })
+    expect(invalid.encoded.experimental).toBeUndefined()
+    expect(invalid.diagnostics.map((item) => [item.kind, item.path])).toEqual([
+      ["invalid", ["experimental", "all_flags"]],
+    ])
+  })
+
   test("never emits experimental policies", () => {
     expect(
       normalized({ experimental: { policies: [{ action: "provider.use", resource: "*", effect: "deny" }] } }).encoded,
     ).toEqual({ policies: [{ action: "provider.use", resource: "*", effect: "deny" }] })
+  })
+
+  test("converts legacy prefixed integration.use statements from config and MDM files", () => {
+    expect(
+      normalized({
+        policies: [
+          { action: "integration.use", resource: "mcp:github", effect: "deny" },
+          { action: "integration.use", resource: "*", effect: "deny" },
+        ],
+      }).encoded,
+    ).toEqual({
+      policies: [
+        { action: "mcp.use", resource: "github", effect: "deny" },
+        { action: "integration.use", resource: "*", effect: "deny" },
+      ],
+    })
+  })
+
+  // Oracle: the v2 provider model schema; the same keys in the legacy spelling land unchanged.
+  test("carries hidden and the default effort keys from a legacy provider model", () => {
+    expect(
+      decoded({
+        provider: {
+          custom: { models: { model: { name: "Model", hidden: true, defaultVariant: "high", lockVariant: true } } },
+        },
+      }).providers,
+    ).toMatchObject({ custom: { models: { model: { hidden: true, defaultVariant: "high", lockVariant: true } } } })
+    expect(normalized({ provider: { custom: { models: { model: { hidden: true } } } } }).diagnostics).toEqual([])
   })
 
   test("reports unsupported legacy settings without including their values", () => {
@@ -895,7 +1045,7 @@ describe("ConfigNormalize", () => {
       agents: {},
       providers: {},
       instructions: [],
-      experimental: { subagent_depth: 0 },
+      experimental: { subagent_depth: 0, location_idle_timeout: false },
     })
     expect(result.encoded).toMatchObject({
       snapshots: false,
@@ -904,7 +1054,7 @@ describe("ConfigNormalize", () => {
       agents: {},
       providers: {},
       instructions: [],
-      experimental: { subagent_depth: 0 },
+      experimental: { subagent_depth: 0, location_idle_timeout: false },
     })
     expect(result.encoded.share).toBeUndefined()
   })
@@ -1385,11 +1535,29 @@ describe("per-field normalization survival guard (#1285)", () => {
     providers: { custom: { name: "Custom Provider" } },
     aliases: { providers: { ds: "deepseek" } },
     experimental: { portable_shell_scanner: true },
+    timezone: "America/Chicago",
+    automations: true,
   }
 
   const experimentalFixtures: Record<string, unknown> = {
     aliases: { providers: { ds: "deepseek" } },
     portable_shell_scanner: true,
+    codemode_vm: true,
+    all_flags: true,
+    todo: true,
+    media_blob: true,
+    artifacts: true,
+    video_generate: { model: { providerID: "openai", model: "gpt-6-luna" } },
+    console_watches: true,
+    recommended_api: true,
+    full_codemode: true,
+    machines: true,
+    home_memory: true,
+    project_overlay: true,
+    sqlite_fts: true,
+    part_rows: false,
+    image_generate: { model: { providerID: "openai", model: "gpt-6-luna" } },
+    location_idle_timeout: "30 minutes",
     subagent_depth: 2,
     shell_timeout: 300000,
     policies: [{ action: "tool.use", resource: "shell:*", effect: "deny" }],

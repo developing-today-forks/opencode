@@ -38,7 +38,7 @@ afterEach(() => {
 })
 
 test("an absent session-bus address is synthesized before the entry is constructed (#2313)", async () => {
-  if (typeof process.getuid !== "function") return
+  if (process.platform !== "linux") return
   delete process.env.XDG_RUNTIME_DIR
   delete process.env.DBUS_SESSION_BUS_ADDRESS
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
@@ -46,13 +46,14 @@ test("an absent session-bus address is synthesized before the entry is construct
 })
 
 test("an explicit bogus session-bus address is left alone and still resolves undefined (#2313)", async () => {
+  if (process.platform !== "linux") return
   process.env.DBUS_SESSION_BUS_ADDRESS = "unix:path=/opencode-secret-service-test-unavailable"
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBeUndefined()
   expect(constructedWith).toEqual(["unix:path=/opencode-secret-service-test-unavailable"])
 })
 
 test("a non-canonical XDG_RUNTIME_DIR names the synthesized session-bus address (#2473)", async () => {
-  if (typeof process.getuid !== "function") return
+  if (process.platform !== "linux") return
   delete process.env.DBUS_SESSION_BUS_ADDRESS
   process.env.XDG_RUNTIME_DIR = "/tmp/opencode-secret-service-test-xdg"
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")
@@ -60,7 +61,7 @@ test("a non-canonical XDG_RUNTIME_DIR names the synthesized session-bus address 
 })
 
 test("a literal % in XDG_RUNTIME_DIR is percent-escaped in the synthesized address (#2473)", async () => {
-  if (typeof process.getuid !== "function") return
+  if (process.platform !== "linux") return
   delete process.env.DBUS_SESSION_BUS_ADDRESS
   process.env.XDG_RUNTIME_DIR = "/tmp/opencode-secret-service-test-%-xdg"
   await expect(lookupSecretService("org.opencode.test", "someone")).resolves.toBe("mock-secret")

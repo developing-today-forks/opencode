@@ -1,6 +1,7 @@
 export * as SessionRunnerRenderCard from "./render-card.js"
 
 import { ModelPlan } from "../../model-plan.js"
+import { ownValue } from "../../util/record.js"
 
 /**
  * The render-card seam (opencode#2384 slices 2–3, design A — agent-invoked,
@@ -69,7 +70,8 @@ const ESCAPE_MAP: Record<string, string> = {
   "'": "&#39;",
 }
 
-const escapeHtml = (value: unknown): string => String(value ?? "").replace(/[&<>"']/g, (char) => ESCAPE_MAP[char] ?? char)
+const escapeHtml = (value: unknown): string =>
+  String(value ?? "").replace(/[&<>"']/g, (char) => ownValue(ESCAPE_MAP, char) ?? char)
 
 const capitalizeTier = (tier: string): string => (tier ? tier.charAt(0).toUpperCase() + tier.slice(1) : tier)
 
@@ -97,7 +99,7 @@ const answerScript = () =>
     'var payload;try{payload=JSON.parse(btn.getAttribute("data-payload"));}catch(e){return;}',
     'var summary=btn.getAttribute("data-summary")||(btn.textContent||"").trim();',
     "btn.disabled=true;",
-    "window.openchamber.submit(payload,summary).then(function(){btn.setAttribute(\"aria-pressed\",\"true\");})",
+    'window.openchamber.submit(payload,summary).then(function(){btn.setAttribute("aria-pressed","true");})',
     ".catch(function(){btn.disabled=false;});",
     "});});})();</script>",
   ].join("")
@@ -219,7 +221,8 @@ export const quotaFallbackCard = (input: {
   const tiles = input.actions
     .map((action) => {
       const payload = JSON.stringify({ action: "fallback", provider: action.provider, tier: action.tier })
-      const summary = action.summary ?? action.label ?? `${FALLBACK_LABELS[action.kind]}: ${action.provider}/${action.tier}`
+      const summary =
+        action.summary ?? action.label ?? `${FALLBACK_LABELS[action.kind]}: ${action.provider}/${action.tier}`
       const heading = action.label ?? FALLBACK_LABELS[action.kind]
       return [
         `<button type="button" class="oc-option" data-kind="${escapeHtml(action.kind)}"`,
@@ -268,7 +271,8 @@ export type RenderAnswer =
   | { readonly type: "chat"; readonly note: string }
   | { readonly type: "none" }
 
-const isTier = (value: unknown): value is ModelPlan.Tier => value === "cheap" || value === "standard" || value === "frontier"
+const isTier = (value: unknown): value is ModelPlan.Tier =>
+  value === "cheap" || value === "standard" || value === "frontier"
 
 const asRecord = (value: unknown): Record<string, unknown> | undefined =>
   typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined
@@ -283,6 +287,9 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
  * in chat instead. A bare answer object (what a fake render tool in
  * tests returns) is accepted too. Anything else — a failed call, an
  * unanswered page, a malformed payload — is `none`, never a guess.
+ * A quota-fallback answer additionally requires the complete current
+ * provider/tier `context`: its wait/switch kind is derived from that
+ * comparison, so an incomplete context parses to `none` too.
  */
 export const parseRenderAnswer = (
   result: unknown,
@@ -296,12 +303,19 @@ export const parseRenderAnswer = (
   const answer = asRecord(data?.answer) ?? (data === undefined && root.data === undefined ? root : undefined)
   if (!answer) return { type: "none" }
   if (answer.answered === false) {
+    if (answer.reason !== "chat") return { type: "none" }
     return { type: "chat", note: typeof data?.note === "string" ? data.note : RENDER_PAGE_CLOSED_IN_CHAT_NOTE }
   }
   if (answer.action === "fallback") {
     if (typeof answer.provider !== "string" || !answer.provider || !isTier(answer.tier)) return { type: "none" }
-    const kind =
-      context?.currentProvider === answer.provider && context?.currentTier === answer.tier ? "wait" : "switch"
+    // The wait/switch distinction is a comparison against the *current*
+    // provider/tier: the payload carries no kind of its own. Without
+    // complete context there is nothing to compare against, and
+    // defaulting to "switch" would route the session to the very
+    // provider/tier the answer may be waiting on (#2621). An
+    // unclassifiable fallback answer is `none`, never a guess.
+    if (!context?.currentProvider || !context?.currentTier) return { type: "none" }
+    const kind = context.currentProvider === answer.provider && context.currentTier === answer.tier ? "wait" : "switch"
     return { type: "quota-fallback", choice: { provider: answer.provider, tier: answer.tier, kind } }
   }
   if (typeof answer.model === "string" && answer.model && isTier(answer.tier)) {
@@ -429,7 +443,12 @@ export const applyTierChoice = (
 export const applyQuotaFallback = (
   choice: QuotaFallbackChoice,
   wall: QuotaWall,
-): { readonly instruction: { readonly kind: "switch"; readonly providerID: string; readonly tier: ModelPlan.Tier } | { readonly kind: "wait"; readonly until?: number }; readonly note: ModelPlan.NoteInput } =>
+): {
+  readonly instruction:
+    | { readonly kind: "switch"; readonly providerID: string; readonly tier: ModelPlan.Tier }
+    | { readonly kind: "wait"; readonly until?: number }
+  readonly note: ModelPlan.NoteInput
+} =>
   choice.kind === "wait"
     ? {
         instruction: { kind: "wait", until: wall.resetAt },

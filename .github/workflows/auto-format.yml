@@ -1,0 +1,180 @@
+name: auto-format
+
+# Replicated from the developing-today/code PoC (code#2015, proven
+# 2026-11-14) for this repo's formatter, per issue #2453. Formatting
+# is mechanical and NEVER gates a merge: no format context is a
+# required check. Instead this workflow runs Prettier on a 15-minute
+# schedule and commits any fixes directly to main as the
+# github-actions bot.
+#
+# Design (the PoC invariants, kept):
+#   - every 15 minutes, format the files changed since the last
+#     successful pass;
+#   - the repo variable AUTO_FORMAT_LAST_SUCCESS_SHA stores the main
+#     HEAD that pass pushed back (or verified clean); a run whose
+#     HEAD still equals it exits immediately - this is the loop
+#     guard, and it is an optimization, not a correctness input: if
+#     the variable is missing, stale, or not an ancestor of HEAD,
+#     the run falls back to the last 25 hours of changed files, and
+#     already-formatted files simply produce no commit;
+#   - cancel-in-progress is false: a pass is never cancelled
+#     mid-commit; a queued pass just finds nothing left to do.
+#   - gate guard (#2630): the pass records the three allowlist
+#     gates' status (check:numeric-boundaries, check:bounded-http,
+#     check:proto-reads) on the unformatted tree and re-runs them
+#     before committing; a gate that passed at baseline and fails
+#     on the formatted tree fails the pass instead of pushing a
+#     red main. A gate already red at baseline only warns - that
+#     drift is not this pass's doing.
+#
+# Adaptations from the code-repo PoC:
+#   - the formatter is this repo's Prettier 3.6.2 (version pinned in
+#     package.json, config in package.json, .prettierignore at the
+#     repo root) run via bunx - there is no treefmt/nix format app
+#     in this repo;
+#   - pushes and the variable write use the default GITHUB_TOKEN:
+#     this repo has no REPO_AUTOMATION_TOKEN. The token cannot
+#     write repository variables (the record_success step is
+#     best-effort and only warns) and cannot push workflow files,
+#     so .github/workflows/ paths are excluded from the format
+#     pass. Its pushes do not trigger downstream workflows, which
+#     is fine for a formatter: the next scheduled pass re-checks.
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# One format pass at a time on main; a pass is never cancelled
+# mid-commit.
+concurrency:
+  group: auto-format-main
+  cancel-in-progress: false
+
+jobs:
+  prettier:
+    name: prettier auto-format
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      - name: Format changed files with Prettier and commit any fixes
+        env:
+          LAST_SUCCESS_SHA: ${{ vars.AUTO_FORMAT_LAST_SUCCESS_SHA }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Record a successful pass: store the main HEAD this run
+          # pushed back (or verified clean) so the next run can skip
+          # or diff against it. Best-effort by design (see header):
+          # the default token cannot write repository variables, so
+          # a failure here only means the next run re-checks the
+          # same range and finds it already formatted.
+          record_success() {
+            local sha
+            sha="$(git rev-parse HEAD)"
+            if gh variable set AUTO_FORMAT_LAST_SUCCESS_SHA --body "$sha" 2>/dev/null; then
+              echo "Recorded AUTO_FORMAT_LAST_SUCCESS_SHA=$sha"
+            else
+              echo "::warning::could not update AUTO_FORMAT_LAST_SUCCESS_SHA; the next run will re-check this range."
+            fi
+          }
+          changed_file="$(mktemp)"
+          trap 'rm -f "$changed_file"' EXIT
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          max_attempts=3
+          for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+            # A formatter commit is based on the checkout's main.
+            # Always start from the latest remote tip so a push race
+            # retries the formatting pass rather than rebasing stale
+            # formatter output.
+            git fetch origin main
+            git reset --hard origin/main
+            head_sha="$(git rev-parse HEAD)"
+            if [[ -n "${LAST_SUCCESS_SHA:-}" && "$LAST_SUCCESS_SHA" == "$head_sha" ]]; then
+              echo "main is unchanged since the last successful format pass ($head_sha); nothing to do."
+              exit 0
+            fi
+            : > "$changed_file"
+            if [[ -n "${LAST_SUCCESS_SHA:-}" ]] && git cat-file -e "${LAST_SUCCESS_SHA}^{commit}" 2>/dev/null && git merge-base --is-ancestor "$LAST_SUCCESS_SHA" HEAD; then
+              git diff --name-only --diff-filter=ACMR "$LAST_SUCCESS_SHA...${head_sha}" > "$changed_file"
+            else
+              git log --since="25 hours ago" --pretty=format: --name-only | sort -u | while IFS= read -r f; do
+                if [[ -n "$f" && -f "$f" ]]; then
+                  printf '%s\n' "$f"
+                fi
+              done > "$changed_file"
+            fi
+            # The default token cannot push workflow files, so they
+            # are excluded from the write pass (see header).
+            grep -v '^\.github/workflows/' "$changed_file" > "$changed_file.tmp" || true
+            mv "$changed_file.tmp" "$changed_file"
+            mapfile -t changed_files < "$changed_file"
+            if ((${#changed_files[@]} == 0)); then
+              echo "No changed files to format."
+              record_success
+              exit 0
+            fi
+            printf 'Formatting %s file(s):\n' "${#changed_files[@]}"
+            printf '  %s\n' "${changed_files[@]}"
+            # Gate guard (#2630): baseline the allowlist gates on the
+            # unformatted tree (see header). The gate scripts import
+            # only node builtins, so they run without an install.
+            gate_names=(numeric-boundaries bounded-http proto-reads)
+            declare -A gate_baseline=()
+            for gate in "${gate_names[@]}"; do
+              if bun run "check:$gate" >/dev/null 2>&1; then
+                gate_baseline["$gate"]=pass
+              else
+                gate_baseline["$gate"]=fail
+                echo "::warning::check:$gate already fails on main before formatting; this pass will not be blocked on it."
+              fi
+            done
+            bunx prettier@3.6.2 --write --ignore-unknown "${changed_files[@]}"
+            # Stage every tracked change Prettier actually made, not
+            # just the listed files: the checkout was clean before
+            # Prettier ran, so every tracked modification present
+            # now is Prettier's. Decide "nothing to commit" from
+            # the staged diff instead.
+            git add -u
+            if git diff --cached --quiet; then
+              echo "Prettier made no changes."
+              record_success
+              exit 0
+            fi
+            # A gate that passed at baseline must still pass on the
+            # formatted tree; otherwise the formatter rewrote a
+            # dispositioned line and its key died with it (#2630).
+            for gate in "${gate_names[@]}"; do
+              if [[ "${gate_baseline[$gate]}" == "pass" ]] && ! bun run "check:$gate" >/dev/null 2>&1; then
+                echo "::error::check:$gate passed before formatting and fails on the formatted tree; refusing to commit a formatter pass that turns a gate red (#2630)."
+                exit 1
+              fi
+            done
+            git commit -m "style(auto-format): auto-format on main"
+            if git push origin HEAD:main; then
+              echo "Pushed auto-format commit."
+              record_success
+              exit 0
+            fi
+            echo "Push failed; checking whether main advanced during this pass."
+            git fetch origin main
+            main_sha="$(git rev-parse origin/main)"
+            if [[ "$main_sha" == "$head_sha" ]]; then
+              echo "::error::Auto-format push failed and main did not advance; not retrying the same revision."
+              exit 1
+            fi
+            echo "main advanced during the format pass ($head_sha -> $main_sha); discarding stale formatter output and retrying against the latest main (attempt $attempt/$max_attempts)."
+            git reset --hard origin/main
+          done
+          echo "::warning title=Auto-format retries exhausted::main kept advancing during all $max_attempts format passes; no success SHA was recorded, so the next scheduled run will retry."
+          exit 75

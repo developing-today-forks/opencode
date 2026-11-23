@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { sql } from "drizzle-orm"
-import { Effect, Exit } from "effect"
+import { Effect, Exit, Queue } from "effect"
 import { TestConsole } from "effect/testing"
 import { Database } from "@opencode/core/database/database"
 import { ModelRoute } from "@opencode/core/model-route"
@@ -9,7 +9,7 @@ import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { QuotaCurrent } from "@opencode/core/quota-current"
 import { ModelRouteReview } from "@opencode/core/model-route-review"
 import { ModelUsage } from "@opencode/core/model-usage"
-import { AIError, AuthenticationError, QuotaExceededError, RateLimitError } from "@opencode/ai"
+import { AIError, AuthenticationError, QuotaExceededError, RateLimitError } from "@opencode/ai/effect"
 import { RouteStatsTool } from "@opencode/core/tool/plugin/route-stats"
 import { RouteUsageTool } from "@opencode/core/tool/plugin/route-usage"
 import { RouteAttemptTable, RouteDecisionTable, RouteHealthTable } from "@opencode/core/model-route-log/sql"
@@ -28,6 +28,48 @@ const attempt = (overrides: Partial<ModelRouteLog.Attempt>): ModelRouteLog.Attem
   outcome: "success",
   output_started: true,
   ...overrides,
+})
+
+describe("ModelRouteLog writer backlog (#2335)", () => {
+  const decision = (time: number): ModelRouteLog.Event => ({
+    kind: "decision",
+    row: {
+      time,
+      route_id: "luna",
+      selection: "weighted",
+      candidates: ["openai/gpt-6-luna"],
+      chosen: "openai/gpt-6-luna",
+      reason: "drawn",
+    },
+  })
+
+  test("bounds pending events while the writer is stalled, drops newest, then drains in order", async () => {
+    const backlog = await Effect.runPromise(ModelRouteLog.makeWriterBacklog(4))
+    // Writer gated: nobody takes from the queue while 6 events are offered.
+    const offered = [1, 2, 3, 4, 5, 6].map((time) => backlog.offer(decision(time)))
+    expect(offered).toEqual([true, true, true, true, false, false])
+    expect(backlog.dropped()).toBe(2)
+    expect(await Effect.runPromise(Queue.size(backlog.queue))).toBe(4)
+    // Gate opens: the events that fit drain in FIFO order; the dropped newest never appear.
+    const times: number[] = []
+    for (let i = 0; i < 4; i++) {
+      const event = await Effect.runPromise(Queue.take(backlog.queue))
+      times.push(event.kind === "decision" ? event.row.time : -1)
+    }
+    expect(times).toEqual([1, 2, 3, 4])
+    expect(await Effect.runPromise(Queue.size(backlog.queue))).toBe(0)
+    // And the backlog accepts again after draining.
+    expect(backlog.offer(decision(7))).toBe(true)
+    expect(backlog.dropped()).toBe(2)
+  })
+
+  test("default backlog capacity is the documented bound", async () => {
+    const backlog = await Effect.runPromise(ModelRouteLog.makeWriterBacklog())
+    for (let time = 0; time < ModelRouteLog.maxPendingEvents; time++) backlog.offer(decision(time))
+    expect(await Effect.runPromise(Queue.size(backlog.queue))).toBe(ModelRouteLog.maxPendingEvents)
+    expect(backlog.offer(decision(ModelRouteLog.maxPendingEvents))).toBe(false)
+    expect(backlog.dropped()).toBe(1)
+  })
 })
 
 describe("ModelRouteLog", () => {
@@ -286,7 +328,10 @@ describe("authoritative usage (#7)", () => {
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
       const seed = (overrides: Partial<ModelRouteLog.Attempt>) =>
-        ModelRouteLog.record({ kind: "attempt", row: attempt({ route_id: "auth-pool", session_id: "ses_auth", ...overrides }) })
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({ route_id: "auth-pool", session_id: "ses_auth", ...overrides }),
+        })
       seed({
         time_started: 1_000,
         time_ended: 2_000,
@@ -1455,10 +1500,10 @@ describe("ModelRouteLog.observer", () => {
     Effect.gen(function* () {
       const db = (yield* Database.Service).db
       const attemptFor = (routeID: string, failure: unknown) =>
-        ModelRouteLog.observer({ routeID, providerID: "openai", modelID: "m", startedAt: Date.now() }).done(
-          "failure",
-          { failure, outputStarted: false },
-        )
+        ModelRouteLog.observer({ routeID, providerID: "openai", modelID: "m", startedAt: Date.now() }).done("failure", {
+          failure,
+          outputStarted: false,
+        })
       attemptFor("auth", new AIError({ reason: new AuthenticationError({ message: "bad key" }) }))
       attemptFor("quota", new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
       attemptFor("rate", new AIError({ reason: new RateLimitError({ message: "slow down" }) }))
@@ -1688,7 +1733,8 @@ describe("demotion restore (#1151)", () => {
       const now = Date.now()
       // One failure inside the default retention, two far outside it: replaying
       // through the default four-hour retention would keep only the latest.
-      for (const at of [now - 48 * 3_600_000, now - 24 * 3_600_000, now - 3_600_000]) quotaAttempt("demote-late-window", at)
+      for (const at of [now - 48 * 3_600_000, now - 24 * 3_600_000, now - 3_600_000])
+        quotaAttempt("demote-late-window", at)
       yield* Effect.sleep("100 millis")
 
       ModelRoute.resetHealth()
@@ -1791,7 +1837,8 @@ describe("writer persistence failure (#2331)", () => {
         const lines = yield* TestConsole.logLines
         failureObserved = lines.some(
           (line) =>
-            typeof line === "string" && line.includes("failed to persist model route telemetry; batch retained for retry"),
+            typeof line === "string" &&
+            line.includes("failed to persist model route telemetry; batch retained for retry"),
         )
         if (!failureObserved) yield* Effect.sleep("50 millis")
       }

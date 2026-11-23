@@ -1,9 +1,41 @@
 export * as ConfigWatch from "./watch.js"
 
 import path from "path"
+import { Effect } from "effect"
 import { FSUtil } from "@opencode/util/fs-util"
 import type { Watcher } from "../filesystem/watcher.js"
-import type { ConfigDiscovery } from "./discovery.js"
+import { ConfigDiscovery } from "./discovery.js"
+
+// Case-insensitive everywhere: macOS volumes usually are too, and a false match only costs a reload.
+function key(file: string) {
+  return path.normalize(file).toLowerCase()
+}
+
+/** Paths whose content or presence feeds the loaded config; other writes under watched roots do not. */
+export const inputs = Effect.fnUntraced(function* (sources: ConfigDiscovery.Sources, references: Set<string>) {
+  const fs = yield* FSUtil.Service
+  const real = yield* Effect.forEach(references, (file) => fs.realPath(file).pipe(Effect.orElseSucceed(() => file)), {
+    concurrency: "unbounded",
+  })
+  const roots = [
+    ...(sources.system ? [sources.system.path] : []),
+    ...(sources.global ? [sources.global] : []),
+    ...sources.project.map((root) => root.path),
+  ]
+  const paths = new Set(
+    [
+      ...roots,
+      ...roots.flatMap((root) => ConfigDiscovery.names.map((name) => path.join(root, name))),
+      ...sources.direct,
+      ...sources.claude,
+      ...sources.agents,
+      ...(sources.explicit ? [sources.explicit] : []),
+      ...references,
+      ...real,
+    ].map(key),
+  )
+  return (file: string) => paths.has(key(file))
+})
 
 export function plan(sources: ConfigDiscovery.Sources) {
   const directories = [
@@ -29,7 +61,7 @@ export function plan(sources: ConfigDiscovery.Sources) {
       ...directories.map((path) => ({
         path,
         type: "directory" as const,
-        ignore: ["node_modules", ".git", "**/{node_modules,.git}/**"],
+        ignore: FSUtil.ignoreGlobs,
       })),
       ...Array.from(parents, ([parent, files]) => ({
         path: parent,

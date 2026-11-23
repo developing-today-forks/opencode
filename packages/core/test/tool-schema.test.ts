@@ -1,12 +1,19 @@
 import { expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
+import path from "node:path"
 import Ajv2020 from "ajv/dist/2020.js"
 import { Effect, Schema, SchemaGetter } from "effect"
 import { z } from "zod"
 import { convertSchema } from "@opencode/ai/protocols/antigravity"
-import { emptyInputJsonSchema } from "@opencode/ai/tool"
+import { emptyInputJsonSchema } from "@opencode/ai/effect"
+import { Automation } from "@opencode/core/automation"
+import { ArtifactTools } from "@opencode/core/tool/plugin/artifact"
+import { AutomationTools } from "@opencode/core/tool/plugin/automation"
 import { EditTool } from "@opencode/core/tool/plugin/edit"
 import { GlobTool } from "@opencode/core/tool/plugin/glob"
 import { GrepTool } from "@opencode/core/tool/plugin/grep"
+import { ImageGenerateTool } from "@opencode/core/tool/plugin/image-generate"
+import { McpEventTools } from "@opencode/core/tool/plugin/mcp-events"
 import { McpResourceTools } from "@opencode/core/tool/plugin/mcp-resource"
 import { McpxTool } from "@opencode/core/tool/plugin/mcpx"
 import { MessagingTools } from "@opencode/core/tool/plugin/messaging"
@@ -19,9 +26,12 @@ import { ReadTool } from "@opencode/core/tool/plugin/read"
 import { RouteAdjustTool } from "@opencode/core/tool/plugin/route-adjust"
 import { RouteStatsTool } from "@opencode/core/tool/plugin/route-stats"
 import { RouteUsageTool } from "@opencode/core/tool/plugin/route-usage"
+import { SessionSearchTools } from "@opencode/core/tool/plugin/session-search"
 import { ShellTool } from "@opencode/core/tool/plugin/shell"
 import { SkillTool } from "@opencode/core/tool/plugin/skill"
 import { SubagentTool } from "@opencode/core/tool/plugin/subagent"
+import { TodoTool } from "@opencode/core/tool/plugin/todo"
+import { VideoGenerateTool } from "@opencode/core/tool/plugin/video-generate"
 import { WebFetchTool } from "@opencode/core/tool/plugin/webfetch"
 import { WebSearchTool } from "@opencode/core/tool/plugin/websearch"
 import { WriteTool } from "@opencode/core/tool/plugin/write"
@@ -48,6 +58,22 @@ const builtinInputs: ReadonlyArray<{ name: string; input: Info["input"] }> = [
   { name: "comms_sessions", input: MessagingTools.SessionsInput },
   { name: "opencode_session_rename", input: OpenCodeTools.RenameInput },
   { name: "opencode_session_move", input: OpenCodeTools.MoveInput },
+  { name: "opencode_session_read", input: SessionSearchTools.ReadInput },
+  { name: "opencode_session_search", input: SessionSearchTools.SearchInput },
+  { name: "opencode_list_mcp_events", input: McpEventTools.ListInput },
+  { name: "opencode_artifact_create", input: ArtifactTools.CreateToolInput },
+  { name: "opencode_artifact_read", input: ArtifactTools.ReadToolInput },
+  { name: "opencode_artifact_update", input: ArtifactTools.UpdateToolInput },
+  { name: "opencode_artifact_delete", input: ArtifactTools.DeleteToolInput },
+  { name: "automation_create", input: Automation.Request },
+  { name: "automation_list", input: Schema.Struct({}) },
+  { name: "automation_pause", input: AutomationTools.IDInput },
+  { name: "automation_resume", input: AutomationTools.IDInput },
+  { name: "automation_delete", input: AutomationTools.IDInput },
+  { name: "machine_list", input: Schema.Struct({}) },
+  { name: ImageGenerateTool.name, input: ImageGenerateTool.Input },
+  { name: VideoGenerateTool.name, input: VideoGenerateTool.Input },
+  { name: TodoTool.name, input: TodoTool.Input },
   { name: "opencode_session_switch_model", input: OpenCodeTools.SwitchModelInput },
   { name: "opencode_worktree_create", input: OpenCodeTools.WorktreeCreateInput },
   { name: "opencode_worktree_list", input: OpenCodeTools.WorktreeListInput },
@@ -68,6 +94,77 @@ const builtinInputs: ReadonlyArray<{ name: string; input: Info["input"] }> = [
   { name: "websearch", input: WebSearchTool.Input },
   { name: "write", input: WriteTool.Input },
 ]
+
+// Completeness guard for the hand-written inventory above (#1902). The set of
+// registered built-in tool names is derived mechanically from the registration
+// surfaces - the tool-plugin modules named by PluginInternal's imports, plus
+// the editor-registered tools added by call sites in src/plugin and
+// src/config/plugin (plan-info, model-routes) - so a tool registered without a
+// meta-validated inventory entry (or an inventory entry for a tool that no
+// longer exists) turns this suite red instead of escaping validation silently.
+const srcDir = path.join(import.meta.dir, "../src")
+const readSrc = (rel: string) => readFileSync(path.join(srcDir, rel), "utf8")
+const toSrcRel = (fromRel: string, spec: string) =>
+  path.posix.normalize(path.posix.join(path.posix.dirname(fromRel), spec)).replace(/\.js$/, ".ts")
+
+const exportedToolName = (source: string) => source.match(/export const name = "([^"]+)"/)?.[1]
+
+// Every `(editor|draft).add({ ... })` in a tool-plugin module registers one
+// tool. Its full name is the literal `name:` (or the module's exported `name`
+// for the shorthand form), prefixed by the add's `options.namespace` when one
+// is declared. Name and namespace both appear before `execute:` in every
+// registration, so the segment between `.add({` and `execute:` is enough.
+const namesFromModule = (rel: string): string[] => {
+  const source = readSrc(rel)
+  const own = exportedToolName(source)
+  const names: string[] = []
+  for (const match of source.matchAll(/(?:editor|draft)\.add\(\{/g)) {
+    const rest = source.slice(match.index + match[0].length)
+    const end = rest.indexOf("execute:")
+    if (end === -1) continue
+    const segment = rest.slice(0, end)
+    // A command registration (`ctx.command`) has no input; only tools do.
+    if (!/\binput\b/.test(segment)) continue
+    const literal = segment.match(/name:\s*"([^"]+)"/)?.[1]
+    const name = literal ?? (/(^|\n)\s*name,\s*\n/.test(segment) ? own : undefined)
+    if (!name) continue
+    const namespace = segment.match(/namespace:\s*"([^"]+)"/)?.[1]
+    // The native name joins a dotted namespace with underscores (opencode.session -> opencode_session_read).
+    names.push(namespace ? `${namespace.replaceAll(".", "_")}_${name}` : name)
+  }
+  return names
+}
+
+const registeredBuiltinToolNames = (): Set<string> => {
+  const names = new Set<string>()
+  const internalRel = "plugin/internal.ts"
+  const internal = readSrc(internalRel)
+  // Surface 1: tool-plugin modules PluginInternal imports.
+  for (const match of internal.matchAll(/import \{ (\w+) \} from "([^"]*\/tool\/plugin\/[^"]+)"/g)) {
+    namesFromModule(toSrcRel(internalRel, match[2])).forEach((name) => names.add(name))
+  }
+  // Surface 2: tools registered by `.add(editor, ...)` call sites outside the
+  // tool-plugin modules themselves (PlanInfoTool via src/plugin/plan-info.ts,
+  // the route tools via src/config/plugin/model-routes.ts).
+  for (const rel of ["plugin/plan-info.ts", "config/plugin/model-routes.ts"]) {
+    const source = readSrc(rel)
+    const imports = new Map([...source.matchAll(/import \{ (\w+) \} from "([^"]+)"/g)].map((m) => [m[1], m[2]]))
+    for (const match of source.matchAll(/(\w+)\.add\(editor/g)) {
+      const spec = imports.get(match[1])
+      if (!spec || !spec.includes("/tool/plugin/")) continue
+      const name = exportedToolName(readSrc(toSrcRel(rel, spec)))
+      if (name) names.add(name)
+    }
+  }
+  return names
+}
+
+test("built-in tool inventory is complete against the registration surfaces", () => {
+  const registered = registeredBuiltinToolNames()
+  const inventoried = new Set(builtinInputs.map((entry) => entry.name))
+  expect([...registered].filter((name) => !inventoried.has(name)).sort()).toEqual([])
+  expect([...inventoried].filter((name) => !registered.has(name)).sort()).toEqual([])
+})
 
 const context = {
   sessionID: Session.ID.make("ses_tool_schema"),
@@ -251,6 +348,28 @@ test("Effect tool schemas resolve escaped definition names", () => {
 
   expect(JSON.stringify(definition(tool).inputSchema)).not.toContain("$ref")
   expect(JSON.stringify(definition(tool).inputSchema)).not.toContain("$defs")
+})
+
+test("definitions keep their pinned serialization", () => {
+  const Item = Schema.Struct({ id: Schema.String }).annotate({ identifier: "Item" })
+  const tool: Info = {
+    name: "pinned.tool",
+    description: "Pinned",
+    options: { namespace: "mcp.server" },
+    input: Schema.Struct({
+      offset: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+      items: Schema.Array(Item),
+    }),
+    output: Schema.Struct({}).annotate({ description: "Nothing" }),
+    execute: () => Effect.succeed({ content: "unused" }),
+  }
+  // Key order matters for provider prompt caches.
+  const expected =
+    '{"type":"tool","name":"mcp_server_pinned_tool","description":"Pinned","inputSchema":{"type":"object","properties":{"offset":{"type":"integer","minimum":0},"items":{"type":"array","items":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}}},"required":["items"],"additionalProperties":false},"outputSchema":{"not":{"type":"null"},"description":"Nothing"}}'
+
+  expect(JSON.stringify(definition(tool))).toBe(expected)
+  expect(JSON.stringify(definition(tool))).toBe(expected)
+  expect(JSON.stringify(definition({ ...tool }))).toBe(expected)
 })
 
 test.each(["Lookup Input", "café", "A/B~C% D#E"])(
@@ -567,6 +686,31 @@ test("raw JSON schemas pass input through when they cannot be imported", async (
   expect(await Effect.runPromise(execute(tool, { value: 1, extra: true }, context))).toMatchObject({
     content: [{ type: "text", text: '{"value":1,"extra":true}' }],
   })
+})
+
+test("raw JSON schema validation does not keep the caller alive", async () => {
+  // The session runner executes tools from Effect.fn closures over its Location's services. Building the codec must
+  // not leave anything process-wide that reaches the caller's stack frames once the Location is gone.
+  const call = async () => {
+    const services = { name: "location services" }
+    const tool: Info = {
+      name: "raw-retention",
+      description: "Raw retention tool",
+      input: { type: "object", properties: { value: { type: "string" } }, required: ["value"] },
+      execute: () => Effect.succeed({ content: services.name }),
+    }
+    const run = Effect.fn("LocationCaller.run")(function* () {
+      return yield* execute(tool, { value: "ok" }, context)
+    })
+    expect(await Effect.runPromise(run())).toMatchObject({ content: [{ type: "text", text: "location services" }] })
+    return new WeakRef(services)
+  }
+  const services = await call()
+  for (let attempt = 0; attempt < 50 && services.deref() !== undefined; attempt++) {
+    Bun.gc(true)
+    await Bun.sleep(10)
+  }
+  expect(services.deref()).toBeUndefined()
 })
 
 test("missing external input schemas fall back to an empty schema", () => {

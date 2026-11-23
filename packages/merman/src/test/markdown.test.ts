@@ -2,15 +2,13 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test"
 import { mkdir } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
-import { CodeRenderable, MarkdownRenderable, RGBA, SyntaxStyle, TreeSitterClient } from "@opentui/core"
+import { CodeRenderable, MarkdownRenderable, RGBA, SyntaxStyle, TextRenderable, TreeSitterClient } from "@opentui/core"
 import { createTestRenderer } from "@opentui/core/testing"
 import { createMermaidMarkdownRenderer } from "../markdown.js"
 
-const syntaxStyle = SyntaxStyle.fromStyles({
-  default: { fg: RGBA.fromValues(1, 1, 1, 1) },
-})
+let syntaxStyle: SyntaxStyle
 let treeSitterClient: TreeSitterClient
-let renderer: Awaited<ReturnType<typeof createTestRenderer>>["renderer"] | undefined
+let renderer: Awaited<ReturnType<typeof createTestRenderer>>["renderer"]
 
 beforeAll(async () => {
   const dataPath = join(tmpdir(), "mermaid-markdown-test-data")
@@ -23,10 +21,18 @@ afterAll(async () => {
   await treeSitterClient.destroy()
 })
 
-afterEach(() => {
+afterEach(async () => {
   renderer?.destroy()
-  renderer = undefined
+  await renderer?.closed
+  syntaxStyle?.destroy()
 })
+
+async function setup(options: Parameters<typeof createTestRenderer>[0]) {
+  const output = await createTestRenderer(options)
+  renderer = output.renderer
+  syntaxStyle = SyntaxStyle.fromStyles({ default: { fg: RGBA.fromValues(1, 1, 1, 1) } }, renderer.nativeScene)
+  return output
+}
 
 async function renderMarkdown(
   markdown: MarkdownRenderable,
@@ -54,8 +60,7 @@ async function renderMarkdown(
 }
 
 test("renders a Mermaid flowchart fence inside MarkdownRenderable", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 14 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 14 })
   const { renderOnce, captureCharFrame } = testRenderer
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-mermaid",
@@ -65,7 +70,7 @@ flowchart LR
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -79,8 +84,7 @@ flowchart LR
 })
 
 test("uses compact terminal spacing for Mermaid diagrams by default", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 40 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 40 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-compact-mermaid",
     content: `\`\`\`mermaid
@@ -92,7 +96,7 @@ flowchart TD
   opencode --> modal[Modal workspaces]
 \`\`\``,
     syntaxStyle,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -102,8 +106,7 @@ flowchart TD
 })
 
 test("recognizes normalized Mermaid fence info strings", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 14 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 14 })
   const { renderOnce, captureCharFrame } = testRenderer
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-normalized-mermaid",
@@ -113,7 +116,7 @@ flowchart LR
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -125,8 +128,7 @@ flowchart LR
 })
 
 test("keeps surrounding Markdown content visible around a Mermaid diagram", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 14 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 14 })
   const { renderOnce, captureCharFrame } = testRenderer
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-with-mermaid",
@@ -140,7 +142,7 @@ flowchart LR
 After`,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -154,8 +156,7 @@ After`,
 })
 
 test("renders an incomplete Mermaid fence as ordinary code", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 10 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 10 })
   const { renderOnce, captureCharFrame } = testRenderer
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-incomplete-mermaid",
@@ -165,7 +166,7 @@ flowchart LR
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -175,8 +176,7 @@ flowchart LR
 })
 
 test("keeps the last valid Mermaid diagram while a fence is streaming", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 12 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 12 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-streaming-mermaid",
     content: `\`\`\`mermaid
@@ -185,8 +185,7 @@ flowchart LR
 \`\`\``,
     syntaxStyle,
     streaming: true,
-    internalBlockMode: "top-level",
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -212,8 +211,7 @@ flowchart LR
 })
 
 test("renders the valid prefix of an interrupted Mermaid fence", async () => {
-  const testRenderer = await createTestRenderer({ width: 100, height: 18 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 100, height: 18 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-interrupted-mermaid",
     content: `\`\`\`mermaid
@@ -224,8 +222,7 @@ flowchart TD
   C --> E[No marker found]
   E --> G[Project root is`,
     syntaxStyle,
-    internalBlockMode: "top-level",
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -238,8 +235,7 @@ flowchart TD
 })
 
 test("renders a Mermaid sequence fence inside MarkdownRenderable", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 14 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 14 })
   const { renderOnce, captureCharFrame } = testRenderer
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-sequence",
@@ -249,7 +245,7 @@ sequenceDiagram
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -262,8 +258,7 @@ sequenceDiagram
 })
 
 test("wraps wide Mermaid diagrams in a horizontal viewport", async () => {
-  const testRenderer = await createTestRenderer({ width: 40, height: 14 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 40, height: 14 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-wide-sequence",
     content: `\`\`\`mermaid
@@ -275,7 +270,7 @@ sequenceDiagram
   B->>C: second
 \`\`\``,
     syntaxStyle,
-    renderNode: createMermaidMarkdownRenderer(renderer, {
+    renderBlock: createMermaidMarkdownRenderer(renderer, {
       compact: true,
       colors: { primary: "#ff0000" },
     }),
@@ -300,8 +295,7 @@ sequenceDiagram
 })
 
 test("keeps surrounding Markdown anchored around a wide flowchart", async () => {
-  const testRenderer = await createTestRenderer({ width: 100, height: 40 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 100, height: 40 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-wide-flowchart",
     content: `## Architecture — the profile is three mechanisms
@@ -323,7 +317,7 @@ flowchart TB
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -331,16 +325,16 @@ flowchart TB
 
   const frame = testRenderer.captureCharFrame()
   const heading = frame.split("\n").find((line) => line.includes("Architecture"))
-  const diagram = markdown.getChildren().find((child) => child instanceof CodeRenderable) as CodeRenderable
+  // The wide diagram does not scroll the heading beside it.
+  const title = markdown.getChildren().find((child) => child instanceof TextRenderable) as TextRenderable
   expect(heading?.trimStart()).toStartWith("Architecture")
-  expect(diagram.scrollX).toBe(0)
+  expect(title.scrollX).toBe(0)
   expect(frame).toContain("Durable Object")
   expect(frame).not.toMatch(/<\/?i>|<br|events persist|mcp stdio/)
 })
 
 test("folds a horizontal flowchart to fit the Markdown viewport", async () => {
-  const testRenderer = await createTestRenderer({ width: 160, height: 30 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 160, height: 30 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-horizontal-flowchart",
     content: `\`\`\`mermaid
@@ -348,7 +342,7 @@ flowchart LR
   A["per TURN<br/>fresh sandbox each turn"] --- B["per SESSION/thread<br/>one sandbox per Slack thread"] --- C["per REPO<br/>threads share a sandbox"] --- D["GLOBAL registry<br/>(upstream today: hardwired at boot)"]
 \`\`\``,
     syntaxStyle,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -361,8 +355,7 @@ flowchart LR
 })
 
 test("folds a horizontal state diagram to the Markdown context width", async () => {
-  const testRenderer = await createTestRenderer({ width: 60, height: 48 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 60, height: 48 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-horizontal-state",
     content: `\`\`\`mermaid
@@ -375,7 +368,7 @@ stateDiagram-v2
   D --> [*]
 \`\`\``,
     syntaxStyle,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -388,8 +381,7 @@ stateDiagram-v2
 })
 
 test("renders a Mermaid state fence inside MarkdownRenderable", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 14 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 14 })
   const { renderOnce, captureCharFrame } = testRenderer
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-state",
@@ -399,7 +391,7 @@ stateDiagram-v2
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -411,8 +403,7 @@ stateDiagram-v2
 })
 
 test("sizes a standalone state choice after trimming leading rows", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 6 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 6 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-state-choice",
     content: `\`\`\`mermaid
@@ -421,7 +412,7 @@ stateDiagram-v2
   state Decision <<choice>>
 \`\`\``,
     syntaxStyle,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -432,8 +423,7 @@ stateDiagram-v2
 })
 
 test("renders a Mermaid timeline fence inside MarkdownRenderable", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 18 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 18 })
   const { renderOnce, captureCharFrame } = testRenderer
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-timeline",
@@ -446,7 +436,7 @@ timeline
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)
@@ -460,8 +450,7 @@ timeline
 })
 
 test("renders a Mermaid GitGraph fence inside MarkdownRenderable", async () => {
-  const testRenderer = await createTestRenderer({ width: 80, height: 18 })
-  renderer = testRenderer.renderer
+  const testRenderer = await setup({ width: 80, height: 18 })
   const markdown = new MarkdownRenderable(renderer, {
     id: "markdown-gitgraph",
     content: `\`\`\`mermaid
@@ -472,7 +461,7 @@ gitGraph
 \`\`\``,
     syntaxStyle,
     treeSitterClient,
-    renderNode: createMermaidMarkdownRenderer(renderer),
+    renderBlock: createMermaidMarkdownRenderer(renderer),
   })
 
   renderer.root.add(markdown)

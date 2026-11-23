@@ -1,26 +1,66 @@
 import { PersistentPty } from "@opencode/core/persistent-pty"
+import { AttachmentID } from "@opencode/schema/persistent-pty"
 import { PtyTicket } from "@opencode/core/pty/ticket"
-import { ForbiddenError, PtyNotFoundError, ServiceUnavailableError } from "@opencode/protocol/errors"
+import {
+  ForbiddenError,
+  InvalidRequestError,
+  PtyNotFoundError,
+  ServiceUnavailableError,
+} from "@opencode/protocol/errors"
 import {
   PTY_CONNECT_TICKET_QUERY,
   PTY_CONNECT_TOKEN_HEADER,
   PTY_CONNECT_TOKEN_HEADER_VALUE,
 } from "@opencode/protocol/groups/persistent-pty"
-import { Effect } from "effect"
+import { Effect, Schema } from "effect"
 import { HttpServerRequest, HttpServerResponse } from "effect/http"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
 import { Socket } from "effect/socket"
 import { Api } from "../api"
 import { CorsConfig, isAllowedRequestOrigin } from "../cors"
-import { makePtyOutbox, runPtySocket } from "./pty-socket"
+import { makeArtifact } from "./artifact"
+import { makeBlobGet } from "./blob"
+import { makeAutomation } from "./automation"
+import { makeJob } from "./job"
+import { makeMachine, makeMachineLink } from "./machine"
+import { makeMediaGet } from "./media"
+import { makePtyOutbox, runPtySocket, withPtySocketTracked } from "./pty-socket"
 
 export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experimental", (handlers) =>
   Effect.gen(function* () {
     const tickets = yield* PtyTicket.Service
     const cors = yield* CorsConfig
     const pty = yield* PersistentPty.Service
+    const artifact = yield* makeArtifact
+    const job = yield* makeJob
+    const mediaGet = yield* makeMediaGet
+    const blobGet = yield* makeBlobGet
+    const automation = yield* makeAutomation
+    const machine = yield* makeMachine
+    const machineLink = yield* makeMachineLink
 
     return handlers
+      .handleRaw("media.get", (ctx) => mediaGet(ctx.params.hash, ctx.request))
+      .handleRaw("blob.get", (ctx) => blobGet(ctx.params.id, ctx.request))
+      .handle("job.list", (ctx) => job.list(ctx.query))
+      .handle("job.cancel", (ctx) => job.cancel(ctx.params.id))
+      .handleRaw("machine.link", (ctx) => machineLink(ctx.request))
+      .handle("machine.list", () => machine.list())
+      .handle("machine.add", (ctx) => machine.add(ctx.payload))
+      .handle("machine.remove", (ctx) => machine.remove(ctx.params.name))
+      .handle("artifacts.providers", (ctx) => artifact.providers(ctx.query, ctx.request))
+      .handle("artifacts.list", (ctx) => artifact.list(ctx.query, ctx.request))
+      .handle("artifacts.create", (ctx) => artifact.create(ctx.query, ctx.payload, ctx.request))
+      .handle("artifacts.get", (ctx) => artifact.get(ctx.params.artifactID, ctx.query, ctx.request))
+      .handle("artifacts.update", (ctx) => artifact.update(ctx.params.artifactID, ctx.query, ctx.payload, ctx.request))
+      .handle("artifacts.delete", (ctx) => artifact.remove(ctx.params.artifactID, ctx.query, ctx.request))
+      .handleRaw("artifacts.view", (ctx) => artifact.view(ctx.params.artifactID, ctx.query, ctx.request))
+      .handle("automation.create", (ctx) => automation.create(ctx.payload))
+      .handle("automation.list", (ctx) => automation.list(ctx.query))
+      .handle("automation.get", (ctx) => automation.get(ctx.params.automationID))
+      .handle("automation.pause", (ctx) => automation.pause(ctx.params.automationID))
+      .handle("automation.resume", (ctx) => automation.resume(ctx.params.automationID))
+      .handle("automation.delete", (ctx) => automation.remove(ctx.params.automationID))
       .handle(
         "persistentPty.read",
         Effect.fn(function* (ctx) {
@@ -47,7 +87,13 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
                 cols: ctx.payload.size?.cols,
                 rows: ctx.payload.size?.rows,
               })
-              .pipe(Effect.catchTag("PersistentPty.UnavailableError", unavailable)),
+              .pipe(
+                Effect.catchTags({
+                  "PersistentPty.InvalidCwdError": (error) =>
+                    new InvalidRequestError({ message: error.message, kind: "invalid_cwd", field: "cwd" }),
+                  "PersistentPty.UnavailableError": unavailable,
+                }),
+              ),
           }
         }),
       )
@@ -73,10 +119,12 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
       .handle(
         "persistentPty.update",
         Effect.fn(function* (ctx) {
-          yield* pty
-            .resize(ctx.params.ptyID, ctx.payload.size.cols, ctx.payload.size.rows, ctx.payload.attachmentID)
-            .pipe(mapTerminalError)
-          return { data: yield* pty.get(ctx.params.ptyID).pipe(mapTerminalError) }
+          if (ctx.payload.size)
+            yield* pty
+              .resize(ctx.params.ptyID, ctx.payload.size.cols, ctx.payload.size.rows, ctx.payload.attachmentID)
+              .pipe(mapTerminalError)
+          if (ctx.payload.title === undefined) return { data: yield* pty.get(ctx.params.ptyID).pipe(mapTerminalError) }
+          return { data: yield* pty.rename(ctx.params.ptyID, ctx.payload.title).pipe(mapTerminalError) }
         }),
       )
       .handle(
@@ -121,6 +169,7 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
           const framedInput = url.searchParams.get("input_protocol") === "1"
           const attachmentID = url.searchParams.get("attachment_id") ?? crypto.randomUUID()
           if (!Number.isSafeInteger(cursor) || cursor < 0) return HttpServerResponse.empty({ status: 400 })
+          if (!Schema.is(AttachmentID)(attachmentID)) return HttpServerResponse.empty({ status: 400 })
 
           const socket = yield* Effect.orDie(ctx.request.upgrade)
           const outbox = yield* makePtyOutbox()
@@ -175,30 +224,36 @@ export const PersistentPtyHandler = HttpApiBuilder.group(Api, "server.experiment
             attachment.activate()
           })
 
-          yield* runPtySocket({
-            socket,
-            outbox: outbox.queue,
-            onDequeued: outbox.release,
-            onOverflow: outbox.whenOverflowed,
-            onOpen,
-            onMessage: (message) => {
-              if (!attachment) return Effect.void
-              const data = typeof message === "string" ? Buffer.from(message) : message
-              if (!framedInput)
-                return pty
-                  .input(ctx.params.ptyID, attachmentID, attachment.info.size.cols, attachment.info.size.rows, data)
-                  .pipe(Effect.ignore)
-              if (data.byteLength < 5) return Effect.void
-              const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
-              const type = data[0]
-              const cols = view.getUint16(1)
-              const rows = view.getUint16(3)
-              if ((type !== 0 && type !== 1) || cols === 0 || rows === 0) return Effect.void
-              if (type === 0) return pty.control(ctx.params.ptyID, attachmentID, cols, rows).pipe(Effect.ignore)
-              return pty.input(ctx.params.ptyID, attachmentID, cols, rows, data.subarray(5)).pipe(Effect.ignore)
+          yield* withPtySocketTracked(
+            {
+              close: () => void outbox.offer(new Socket.CloseEvent(1001, "server shutting down")),
+              terminate: outbox.shutdown,
             },
-            detach: () => attachment?.detach(),
-          })
+            runPtySocket({
+              socket,
+              outbox: outbox.queue,
+              onDequeued: outbox.release,
+              onOverflow: outbox.whenOverflowed,
+              onOpen,
+              onMessage: (message) => {
+                if (!attachment) return Effect.void
+                const data = typeof message === "string" ? Buffer.from(message) : message
+                if (!framedInput)
+                  return pty
+                    .input(ctx.params.ptyID, attachmentID, attachment.info.size.cols, attachment.info.size.rows, data)
+                    .pipe(Effect.ignore)
+                if (data.byteLength < 5) return Effect.void
+                const view = new DataView(data.buffer, data.byteOffset, data.byteLength)
+                const type = data[0]
+                const cols = view.getUint16(1)
+                const rows = view.getUint16(3)
+                if ((type !== 0 && type !== 1) || cols === 0 || rows === 0) return Effect.void
+                if (type === 0) return pty.control(ctx.params.ptyID, attachmentID, cols, rows).pipe(Effect.ignore)
+                return pty.input(ctx.params.ptyID, attachmentID, cols, rows, data.subarray(5)).pipe(Effect.ignore)
+              },
+              detach: () => attachment?.detach(),
+            }),
+          )
           return HttpServerResponse.empty()
         }),
       )
@@ -211,11 +266,13 @@ const mapUnavailable = <A>(effect: Effect.Effect<A, PersistentPty.UnavailableErr
 const mapTerminalError = <A>(effect: Effect.Effect<A, PersistentPty.NotFoundError | PersistentPty.UnavailableError>) =>
   effect.pipe(
     Effect.catchTags({
-      "PersistentPty.NotFoundError": (error) =>
-        new PtyNotFoundError({ ptyID: error.ptyID, message: `PTY session not found: ${error.ptyID}` }),
+      "PersistentPty.NotFoundError": notFound,
       "PersistentPty.UnavailableError": unavailable,
     }),
   )
+
+const notFound = (error: PersistentPty.NotFoundError) =>
+  new PtyNotFoundError({ ptyID: error.ptyID, message: `PTY session not found: ${error.ptyID}` })
 
 const unavailable = (error: PersistentPty.UnavailableError) =>
   new ServiceUnavailableError({ message: error.message, service: "opencode-pty" })

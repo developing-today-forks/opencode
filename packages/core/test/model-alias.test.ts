@@ -122,6 +122,20 @@ describe("ModelAlias", () => {
     expect(() => ModelAlias.resolve(cyclicAliases, "a")).toThrow(AliasCycleError)
   })
 
+  test("33. Cycle error names the full alias chain", () => {
+    const cyclicAliases: ModelAlias.Aliases = {
+      models: {
+        a: "b",
+        b: "c",
+        c: "a",
+      },
+    }
+
+    expect(() => ModelAlias.resolve(cyclicAliases, "a")).toThrow(
+      "Cycle detected in alias resolution: a -> b -> c -> a",
+    )
+  })
+
   test("13. Chained alias expansion works without cycle", () => {
     const chainAliases: ModelAlias.Aliases = {
       providers: {

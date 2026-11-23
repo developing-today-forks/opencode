@@ -1,22 +1,19 @@
 import { describe, expect } from "bun:test"
 import {
+  ai,
   AIError,
   AuthenticationError,
   HttpRateLimitDetails,
   InvalidRequestError,
   LanguageModel,
-  LLM,
   LLMEvent,
-  ModelID,
-  NoRouteError,
-  ProviderID,
   ProviderInternalError,
   QuotaExceededError,
   RateLimitError,
   TimeoutError,
   UnknownProviderError,
   UnsupportedOperationError,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
@@ -38,7 +35,10 @@ import { SessionStep } from "@opencode/core/session/runner/step"
 import { StepFailedError } from "@opencode/core/session/error"
 import { Model } from "@opencode/core/model"
 import { SessionMessageTable, SessionTable } from "@opencode/core/session/sql"
+import { SessionHistory } from "@opencode/core/session/history"
 import { Snapshot } from "@opencode/core/snapshot"
+import { Tool } from "@opencode/core/tool"
+import { Permission } from "@opencode/core/permission"
 import { ToolOutput } from "@opencode/core/tool-output"
 import { Money } from "@opencode/schema/money"
 import { ModelRoute } from "@opencode/core/model-route"
@@ -46,7 +46,7 @@ import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { asc, eq } from "drizzle-orm"
-import { Cause, Effect, Exit, Layer, Stream } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Stream } from "effect"
 import { testEffect } from "./lib/effect"
 
 const it = testEffect(
@@ -136,7 +136,7 @@ for (const fixture of [
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Run one tool", toolChoice: fixture.toolChoice }),
+            request: ai.request({ model: model.model, prompt: "Run one tool", toolChoice: fixture.toolChoice }),
             options: {},
             executeTool: () =>
               Effect.sync(() => {
@@ -158,11 +158,10 @@ for (const fixture of [
         )
       expect(yield* llm.requests()).toHaveLength(1)
       expect(captures).toBe(2)
-      const message = yield* db
-        .select()
-        .from(SessionMessageTable)
-        .where(eq(SessionMessageTable.id, assistantMessageID))
-        .get()
+      const [message] = yield* SessionHistory.withParts(
+        db,
+        yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).all(),
+      )
       expect(message?.data).toMatchObject({
         finish: fixture.finish,
         tokens: { input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } },
@@ -263,7 +262,7 @@ it.effect("fails over a routed request before any output is committed", () =>
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -362,7 +361,7 @@ it.live("hedges to the next target when the first stays silent, and the faster a
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -372,7 +371,7 @@ it.live("hedges to the next target when the first stays silent, and the faster a
         prepareFor: (next) =>
           Effect.succeed({
             retry: () => Effect.void,
-            request: LLM.request({ model: next.model, prompt: "Check the service" }),
+            request: ai.request({ model: next.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           }),
@@ -512,7 +511,7 @@ it.live("a capped primary hedges to the next target when it stays silent, and ga
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -522,7 +521,7 @@ it.live("a capped primary hedges to the next target when it stays silent, and ga
         prepareFor: (next) =>
           Effect.succeed({
             retry: () => Effect.void,
-            request: LLM.request({ model: next.model, prompt: "Check the service" }),
+            request: ai.request({ model: next.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           }),
@@ -549,6 +548,130 @@ it.live("a capped primary hedges to the next target when it stays silent, and ga
     // gate slot and the hedge leg's own slot (#2383).
     expect(ModelRoute.membershipSnapshot("openai").inFlight).toBe(0)
     expect(ModelRoute.membershipSnapshot("anthropic").inFlight).toBe(0)
+  }),
+)
+
+it.live("releases the hedge slot when the attempt is interrupted while the race is pending (#2417)", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    ModelRoute.resetHealth()
+    const offMembershipLimits = ModelRoute.onMembershipLimits(
+      () => ({ concurrent: 10, requestsPerMinute: 100 }),
+      "/project",
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(() => offMembershipLimits()))
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: "route-step",
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "primary", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const fallback = {
+      ...SessionRunnerModel.resolved(
+        LanguageModel.make({ id: "backup", provider: "anthropic", route: OpenAIChat.route }),
+        { capabilities, cost, limit },
+      ),
+      membership: { providerID: "anthropic" },
+    }
+    const model = {
+      ...SessionRunnerModel.resolved(primary.model, {
+        capabilities,
+        cost,
+        limit,
+        routing: {
+          routeID: Model.ID.make("smart-slow-capped"),
+          target: primary.ref,
+          attempts: 1,
+          policy: ModelRoute.policy({ firstTokenTimeoutMs: false }),
+          hedgeAfterMs: 60,
+          fallback: () => Effect.succeed(fallback),
+        },
+      }),
+      membership: { providerID: "openai" },
+    }
+    // Neither leg ever answers: the race stays pending, holding the hedge
+    // leg's slot, until the attempt is interrupted.
+    yield* llm.push(TestLLM.hangAfter())
+    yield* llm.push(TestLLM.hangAfter())
+
+    const fiber = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        estimatedInputTokens: 1_234,
+        prepareFor: (next) =>
+          Effect.succeed({
+            retry: () => Effect.void,
+            request: ai.request({ model: next.model, prompt: "Check the service" }),
+            options: {},
+            executeTool: () => Effect.die("not used"),
+          }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit, Effect.forkScoped)
+
+    // Wait until the hedge has actually started and taken its slot: the
+    // leak under test is precisely that slot, acquired inside the race.
+    let held = false
+    for (let waited = 0; waited < 5_000 && !held; waited += 25) {
+      held = ModelRoute.membershipSnapshot("anthropic").inFlight === 1
+      if (!held) yield* Effect.sleep("25 millis")
+    }
+    expect(held).toBe(true)
+    expect(ModelRoute.membershipSnapshot("openai").inFlight).toBe(1)
+
+    yield* Fiber.interrupt(fiber)
+
+    // Oracle (#2417): interruption during SessionHedge.race releases every
+    // hedge slot — the account returns to zero in flight instead of
+    // leaking the slot for the process lifetime.
+    expect(ModelRoute.membershipSnapshot("anthropic").inFlight).toBe(0)
+    expect(ModelRoute.membershipSnapshot("openai").inFlight).toBe(0)
   }),
 )
 
@@ -628,7 +751,7 @@ it.live("does not hedge when the first target answers in time", () =>
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -637,7 +760,7 @@ it.live("does not hedge when the first target answers in time", () =>
         prepareFor: (next) =>
           Effect.succeed({
             retry: () => Effect.void,
-            request: LLM.request({ model: next.model, prompt: "Check the service" }),
+            request: ai.request({ model: next.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           }),
@@ -727,7 +850,7 @@ it.effect("cools a target that reports an exhausted quota for the quota cooldown
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -813,11 +936,12 @@ it.effect("benches a routed target after repeated non-retryable timeout failures
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
-        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
         recoverContinuation: true,
         recoverOverflow: Effect.succeed(false),
       })
@@ -902,19 +1026,18 @@ it.effect("benches a routed target after repeated non-retryable 402 billing fail
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
-        retry: (_cause, _error, retry) => Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
+        retry: (_cause, _error, retry) =>
+          Effect.succeed(retry ? { retry: true, attempt: 1, delay: 0 } : { retry: false }),
         recoverContinuation: true,
         recoverOverflow: Effect.succeed(false),
       })
 
     const fail = () =>
-      TestLLM.failAfter(
-        new AIError({ reason: new UnknownProviderError({ message: "Payment Required (HTTP 402)" }) }),
-      )
+      TestLLM.failAfter(new AIError({ reason: new UnknownProviderError({ message: "Payment Required (HTTP 402)" }) }))
     yield* llm.push(fail())
     yield* attempt().pipe(Effect.exit)
     const first = ModelRoute.cooldownUntil(primary.ref)
@@ -1001,7 +1124,7 @@ it.effect("fails over to the next target when the retry hook declines a route fa
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -1100,7 +1223,7 @@ it.effect("switches to the next credential again on a second quota failure in th
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -1210,7 +1333,7 @@ it.effect("does not fail over within the same message when a quota failure follo
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -1222,11 +1345,16 @@ it.effect("does not fail over within the same message when a quota failure follo
       .pipe(Effect.exit)
 
     // Pinned gate (#1014): partial output is already published on this assistant message, so a
-    // different model must not append to it via Failover; the post-output cascade is the
-    // Continue outcome on a new message when a retry is authorized. The target is still
-    // marked failed, so a later re-selection sees it cooling.
+    // different model must not append to it via Failover. The cascade continues on a new message
+    // instead: Continue when a retry is authorized, and otherwise -- a quota failure is never
+    // retried -- ContinueOn with the route's next member (#1806: a session errors only when every
+    // candidate is exhausted). The target is still marked failed, so a later re-selection sees it
+    // cooling.
     expect(Exit.isSuccess(result) ? result.value._tag : undefined).not.toBe("Failover")
-    expect(fallbackCalls).toBe(0)
+    expect(Exit.isSuccess(result) ? result.value : undefined).toEqual(
+      SessionStep.Outcome.ContinueOn({ model: fallback, error: expect.anything() }),
+    )
+    expect(fallbackCalls).toBe(1)
     expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
     expect(yield* llm.requests()).toHaveLength(1)
   }),
@@ -1308,7 +1436,7 @@ it.effect("cools a rate-limited target for exactly what the provider asked", () 
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -1417,7 +1545,7 @@ it.effect("holds a rate-limited target until the window the provider reported re
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -1519,7 +1647,7 @@ it.effect("retries the same target before failing over when a route allows more 
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -1615,7 +1743,7 @@ it.live("fails over when a routed provider misses the first-output deadline", ()
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Quick check" }),
+          request: ai.request({ model: model.model, prompt: "Quick check" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -1633,6 +1761,191 @@ it.live("fails over when a routed provider misses the first-output deadline", ()
     // request to actually be recorded before snapshotting llm.requests() (issue #488).
     yield* llm.wait(1)
     expect(yield* llm.requests()).toHaveLength(1)
+  }),
+)
+
+// The first-output wait only moves a request to another target. Oracle: the rule stated on
+// Config.ModelRoute.Health.lastTargetTimeoutMs — with another target to take the request, the
+// attempt ends at firstTokenTimeoutMs; with none, the target keeps going until lastTargetTimeoutMs
+// (never shorter than the first-output wait), and output that arrives in the meantime stands.
+const lastTargetAttempt = (input: {
+  readonly slug: string
+  readonly policy: ModelRoute.Policy
+  readonly response: Stream.Stream<LLMEvent, AIError>
+  /** What the route's fallback resolves: another target, or none. */
+  readonly next: "target" | "none"
+  /** How long resolving the fallback takes, to land output inside it. */
+  readonly fallbackDelayMs?: number
+}) =>
+  Effect.gen(function* () {
+    ModelRoute.resetHealth()
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        slug: input.slug,
+        directory: "/project",
+        version: "test",
+      })
+      .run()
+    const capabilities = { tools: true, input: ["text"], output: ["text"] } as const
+    const cost = [
+      {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: { read: Money.USDPerMillionTokens.make(0.1), write: Money.USDPerMillionTokens.make(0.5) },
+      },
+    ]
+    const limit = { context: 100_000, output: 1_000 }
+    const primary = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "slow-last", provider: "openai", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    const other = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "other", provider: "anthropic", route: OpenAIChat.route }),
+      { capabilities, cost, limit },
+    )
+    let fallbackCalls = 0
+    const model = SessionRunnerModel.resolved(primary.model, {
+      capabilities,
+      cost,
+      limit,
+      routing: {
+        routeID: Model.ID.make("last-target"),
+        target: primary.ref,
+        attempts: 1,
+        policy: input.policy,
+        fallback: () => {
+          fallbackCalls++
+          const next = input.next === "target" ? other : undefined
+          return Effect.sleep(input.fallbackDelayMs ?? 0).pipe(Effect.as(next))
+        },
+      },
+    })
+    yield* llm.push(input.response)
+    const errors: string[] = []
+    const started = performance.now()
+    const result = yield* steps
+      .attempt({
+        isLocationClosed: () => false,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: ai.request({ model: model.model, prompt: "Take your time" }),
+          options: {},
+          executeTool: () => Effect.die("not used"),
+        },
+        retry: (cause) => {
+          errors.push(cause.message)
+          return Effect.succeed({ retry: false })
+        },
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.exit)
+    const elapsedMs = performance.now() - started
+    yield* llm.wait(1)
+    return { result, elapsedMs, fallbackCalls, errors, requests: (yield* llm.requests()).length }
+  })
+
+/** A response that stays silent for `ms`, then answers. */
+const answerAfter = (ms: number) =>
+  Stream.unwrap(Effect.sleep(ms).pipe(Effect.as(Stream.fromIterable(TestLLM.text("slow but valid", "late")))))
+
+it.live("the last target that can take a request keeps going past the first-output wait and answers", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-answers",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20 }),
+      response: answerAfter(150),
+      next: "none",
+    })
+    expect(Exit.isSuccess(run.result)).toBe(true)
+    if (Exit.isSuccess(run.result)) expect(run.result.value._tag).toBe("Completed")
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(140)
+    // One request: the slow one was waited for, not restarted.
+    expect(run.requests).toBe(1)
+    expect(run.errors).toEqual([])
+  }),
+)
+
+it.live("a target with another to move to still ends at the first-output wait", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-moves-on",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20 }),
+      response: answerAfter(150),
+      next: "target",
+    })
+    expect(Exit.isSuccess(run.result)).toBe(true)
+    if (Exit.isSuccess(run.result)) expect(run.result.value._tag).toBe("Failover")
+    expect(run.elapsedMs).toBeLessThan(140)
+  }),
+)
+
+it.live("the last target still ends at its own limit, never without one", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-limit",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20, lastTargetTimeoutMs: 90 }),
+      response: TestLLM.hangAfter(),
+      next: "none",
+    })
+    expect(Exit.isSuccess(run.result) && run.result.value._tag === "Completed").toBe(false)
+    expect(run.errors).toEqual(["No response output within 90ms"])
+    expect(run.elapsedMs).toBeGreaterThanOrEqual(85)
+    // Asked once at the wait (nowhere to move), once more by the failover check after the end.
+    expect(run.fallbackCalls).toBe(2)
+  }),
+)
+
+it.live("a last-target limit at or below the first-output wait ends the attempt at the wait, as before", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-off",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20, lastTargetTimeoutMs: 20 }),
+      response: answerAfter(150),
+      next: "none",
+    })
+    expect(run.errors).toEqual(["No response output within 20ms"])
+    expect(run.elapsedMs).toBeLessThan(140)
+    // Nothing is asked at the wait: the one lookup is the failover check after the attempt ended.
+    expect(run.fallbackCalls).toBe(1)
+  }),
+)
+
+it.live("output that arrives while the next target is being looked up keeps the attempt", () =>
+  Effect.gen(function* () {
+    const run = yield* lastTargetAttempt({
+      slug: "last-target-race",
+      policy: ModelRoute.policy({ firstTokenTimeoutMs: 20 }),
+      response: answerAfter(60),
+      next: "target",
+      fallbackDelayMs: 120,
+    })
+    expect(Exit.isSuccess(run.result)).toBe(true)
+    if (Exit.isSuccess(run.result)) expect(run.result.value._tag).toBe("Completed")
+    expect(run.requests).toBe(1)
   }),
 )
 
@@ -1715,7 +2028,7 @@ it.effect("records the failed attempt that fails over, with the exact error", ()
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -1827,7 +2140,7 @@ it.effect("records every failed attempt, including the ones that are retried", (
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -1936,7 +2249,7 @@ it.effect("does not fail over after routed output has started", () =>
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -2029,7 +2342,7 @@ it.effect("a rate limit moves the turn to the next target without retrying the s
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -2120,7 +2433,7 @@ it.effect("a target that has already given up twice recently is not retried", ()
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -2218,7 +2531,7 @@ it.live("a session that failed over hedges back to its origin, not the next fall
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -2228,7 +2541,7 @@ it.live("a session that failed over hedges back to its origin, not the next fall
         prepareFor: (next) =>
           Effect.succeed({
             retry: () => Effect.void,
-            request: LLM.request({ model: next.model, prompt: "Check the service" }),
+            request: ai.request({ model: next.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           }),
@@ -2329,7 +2642,7 @@ describe("escalation follows the route's autonomy", () => {
               model,
               prepared: {
                 retry: () => Effect.void,
-                request: LLM.request({ model: model.model, prompt: "Check the service" }),
+                request: ai.request({ model: model.model, prompt: "Check the service" }),
                 options: {},
                 executeTool: () => Effect.die("not used"),
               },
@@ -2339,7 +2652,7 @@ describe("escalation follows the route's autonomy", () => {
               prepareFor: (next) =>
                 Effect.succeed({
                   retry: () => Effect.void,
-                  request: LLM.request({ model: next.model, prompt: "Check the service" }),
+                  request: ai.request({ model: next.model, prompt: "Check the service" }),
                   options: {},
                   executeTool: () => Effect.die("not used"),
                 }),
@@ -2434,7 +2747,7 @@ it.live("an escalated route races its next target at once, without a configured 
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -2444,7 +2757,7 @@ it.live("an escalated route races its next target at once, without a configured 
         prepareFor: (next) =>
           Effect.succeed({
             retry: () => Effect.void,
-            request: LLM.request({ model: next.model, prompt: "Check the service" }),
+            request: ai.request({ model: next.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           }),
@@ -2542,7 +2855,7 @@ it.live("a capped primary races its next target at once on an escalated route, w
         model,
         prepared: {
           retry: () => Effect.void,
-          request: LLM.request({ model: model.model, prompt: "Check the service" }),
+          request: ai.request({ model: model.model, prompt: "Check the service" }),
           options: {},
           executeTool: () => Effect.die("not used"),
         },
@@ -2552,7 +2865,7 @@ it.live("a capped primary races its next target at once on an escalated route, w
         prepareFor: (next) =>
           Effect.succeed({
             retry: () => Effect.void,
-            request: LLM.request({ model: next.model, prompt: "Check the service" }),
+            request: ai.request({ model: next.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           }),
@@ -2668,7 +2981,7 @@ describe("the route log and pool health time the model's response, not the step 
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Build the project" }),
+            request: ai.request({ model: model.model, prompt: "Build the project" }),
             options: {},
             executeTool: () =>
               (input.tool ?? Effect.die("not used")).pipe(
@@ -2838,7 +3151,7 @@ describe("SessionStep failover classes (#1806)", () => {
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -2907,26 +3220,9 @@ describe("SessionStep failover classes (#1806)", () => {
     Effect.gen(function* () {
       const { result, fallbackCalls, fallback } = yield* attemptWith(
         new AIError({
-          reason: new UnsupportedOperationError({ message: "operation not supported by this route", operation: "request" }),
-        }),
-        true,
-      )
-      expect(Exit.isSuccess(result)).toBe(true)
-      if (Exit.isSuccess(result))
-        expect(result.value).toEqual(SessionStep.Outcome.Failover({ model: fallback, error: expect.anything() }))
-      expect(fallbackCalls).toBe(1)
-    }),
-  )
-
-  it.effect("fails over on a NoRoute failure (the route does not resolve)", () =>
-    Effect.gen(function* () {
-      const { result, fallbackCalls, fallback } = yield* attemptWith(
-        new AIError({
-          reason: new NoRouteError({
-            message: "no route to the target",
-            route: "route",
-            provider: ProviderID.make("openai"),
-            model: ModelID.make("primary"),
+          reason: new UnsupportedOperationError({
+            message: "operation not supported by this route",
+            operation: "request",
           }),
         }),
         true,
@@ -3060,7 +3356,7 @@ describe("SessionStep dead and walled legs (code#9549)", () => {
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -3131,7 +3427,6 @@ describe("SessionStep dead and walled legs (code#9549)", () => {
   )
 })
 
-
 // #1903: a provider that keeps completing with a few tokens and no message
 // (no text, no reasoning, no tool call) recorded every attempt as a success
 // and looped the session forever. Three in a row now count as a failed
@@ -3159,7 +3454,7 @@ describe("empty-completion streak (#1903)", () => {
     },
   } as const
 
-  const setup = (db: any, sessionID: Session.ID, slug: string) =>
+  const setup = (db: Database.Interface["db"], sessionID: Session.ID, slug: string) =>
     Effect.gen(function* () {
       yield* db
         .insert(ProjectTable)
@@ -3171,7 +3466,13 @@ describe("empty-completion streak (#1903)", () => {
         .run()
     })
 
-  const runAttempt = (steps: any, llm: any, sessionID: Session.ID, model: any, scripted: any) =>
+  const runAttempt = (
+    steps: Effect.Success<typeof SessionStep.make>,
+    llm: TestLLM.TestInterface,
+    sessionID: Session.ID,
+    model: any,
+    scripted: any,
+  ) =>
     Effect.gen(function* () {
       yield* llm.push(scripted)
       return yield* steps
@@ -3183,7 +3484,7 @@ describe("empty-completion streak (#1903)", () => {
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Continue the work" }),
+            request: ai.request({ model: model.model, prompt: "Continue the work" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -3242,7 +3543,8 @@ describe("empty-completion streak (#1903)", () => {
       const second = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
       expect(Exit.isSuccess(first)).toBe(true)
       expect(Exit.isSuccess(second)).toBe(true)
-      if (Exit.isSuccess(first)) expect(first.value).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
+      if (Exit.isSuccess(first))
+        expect(first.value).toEqual(SessionStep.Outcome.Completed({ needsContinuation: false }))
       expect(fallbackCalls).toBe(0)
 
       const third = yield* runAttempt(steps, llm, sessionID, model, TestLLM.complete(empty))
@@ -3365,3 +3667,276 @@ describe("empty-completion streak (#1903)", () => {
     }),
   )
 })
+
+it.effect("records the cost the endpoint reports instead of the catalog price", () =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({ id: sessionID, project_id: Project.ID.global, slug: "step", directory: "/project", version: "test" })
+      .run()
+    const model = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "test-model", provider: "test", route: OpenAIChat.route }),
+      {
+        capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 100_000, output: 1_000 },
+        cost: [
+          {
+            input: Money.USDPerMillionTokens.make(1),
+            output: Money.USDPerMillionTokens.make(2),
+            cache: { read: Money.USDPerMillionTokens.zero, write: Money.USDPerMillionTokens.zero },
+          },
+        ],
+      },
+    )
+    yield* llm.push(
+      TestLLM.complete({
+        reason: { normalized: "stop" },
+        usage: { inputTokens: 10, outputTokens: 4, nonCachedInputTokens: 10, cost: 0 },
+      }),
+    )
+    yield* steps.attempt({
+      isLocationClosed: () => false,
+      sessionID,
+      assistantMessageID,
+      agent: Agent.defaultID,
+      model,
+      prepared: {
+        retry: () => Effect.void,
+        request: ai.request({ model: model.model, prompt: "Hello" }),
+        options: {},
+        executeTool: () => Effect.die("no tools"),
+      },
+      retry: () => Effect.succeed({ retry: false }),
+      recoverContinuation: true,
+      recoverOverflow: Effect.succeed(false),
+    })
+
+    const message = yield* db
+      .select()
+      .from(SessionMessageTable)
+      .where(eq(SessionMessageTable.id, assistantMessageID))
+      .get()
+    expect(message?.data).toMatchObject({ finish: "stop", cost: 0 })
+    expect(yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()).toMatchObject({ cost: 0 })
+  }),
+)
+
+// Interrupts an attempt running a tool that stops on `cancel` and one that never does, and returns how the step and
+// its calls were recorded.
+const stopTwoTools = (how: {
+  reason: "user" | "shutdown" | undefined
+  locationClosed: boolean
+  handoffPrepared?: boolean
+  // What the cooperative tool does once asked to stop; by default it fails with its partial output.
+  stopped?: Effect.Effect<never, Permission.DeclinedError>
+}) =>
+  Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const llm = yield* TestLLM.Test
+    const sessionID = Session.ID.create()
+    const assistantMessageID = SessionMessage.ID.create()
+    const steps = yield* SessionStep.make.pipe(
+      Effect.provide(
+        Layer.mock(Snapshot.Service)({
+          capture: () => Effect.succeed(undefined),
+          files: () => Effect.succeed([]),
+        }),
+      ),
+    )
+    yield* db
+      .insert(ProjectTable)
+      .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+      .onConflictDoNothing()
+      .run()
+    yield* db
+      .insert(SessionTable)
+      .values({ id: sessionID, project_id: Project.ID.global, slug: "step", directory: "/project", version: "test" })
+      .run()
+    const model = SessionRunnerModel.resolved(
+      LanguageModel.make({ id: "test-model", provider: "test", route: OpenAIChat.route }),
+      {
+        capabilities: { tools: true, input: ["text"], output: ["text"] },
+        limit: { context: 100_000, output: 1_000 },
+        cost: [],
+      },
+    )
+    yield* llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "tool-calls" }, usage: { inputTokens: 1, outputTokens: 1 } },
+        LLMEvent.toolCall({ id: "call-cooperative", name: "test", input: {} }),
+        LLMEvent.toolCall({ id: "call-stuck", name: "test", input: {} }),
+      ),
+    )
+    const stopped: Effect.Effect<never, Permission.DeclinedError | Tool.Error> =
+      how.stopped ?? Effect.fail(new Tool.Error({ message: "partial output", metadata: { interrupted: true } }))
+    const listening = yield* Deferred.make<void>()
+    const stuck = yield* Deferred.make<void>()
+    let interrupted = false
+    const attempt = yield* steps
+      .attempt({
+        isLocationClosed: () => how.locationClosed,
+        interruption: () => how.reason,
+        handoffPrepared: () => how.handoffPrepared === true,
+        sessionID,
+        assistantMessageID,
+        agent: Agent.defaultID,
+        model,
+        prepared: {
+          retry: () => Effect.void,
+          request: ai.request({ model: model.model, prompt: "Run two tools" }),
+          options: {},
+          executeTool: (input) =>
+            input.call.id === "call-cooperative"
+              ? // Like the shell tool: stops on `cancel` and fails with what it has.
+                Deferred.succeed(listening, undefined).pipe(
+                  Effect.andThen(input.cancel ?? Effect.never),
+                  Effect.andThen(stopped),
+                )
+              : Deferred.succeed(stuck, undefined).pipe(
+                  Effect.andThen(Effect.never),
+                  Effect.onInterrupt(() =>
+                    Effect.sync(() => {
+                      interrupted = true
+                    }),
+                  ),
+                ),
+        },
+        retry: () => Effect.succeed({ retry: false }),
+        recoverContinuation: true,
+        recoverOverflow: Effect.succeed(false),
+      })
+      .pipe(Effect.forkChild({ startImmediately: true }))
+    yield* Deferred.await(listening)
+    yield* Deferred.await(stuck)
+    yield* Fiber.interrupt(attempt)
+    const exit = yield* Fiber.await(attempt)
+    const [message] = yield* SessionHistory.withParts(
+      db,
+      yield* db.select().from(SessionMessageTable).where(eq(SessionMessageTable.id, assistantMessageID)).all(),
+    )
+    return { exit, data: message?.data, requests: (yield* llm.requests()).length, interrupted }
+  })
+
+for (const locationClosed of [false, true])
+  it.live(
+    `lets a tool the user stopped fail with its own error and interrupts the others at once${locationClosed ? ", after a Location reload" : ""}`,
+    () =>
+      Effect.gen(function* () {
+        const started = Date.now()
+        const { exit, data, requests, interrupted } = yield* stopTwoTools({ reason: "user", locationClosed })
+        expect(Exit.hasInterrupts(exit)).toBe(true)
+        expect(requests).toBe(1)
+        expect(interrupted).toBe(true)
+        expect(Date.now() - started).toBeLessThan(2_000)
+        expect(data).toMatchObject({
+          error: { type: "aborted", message: "Step interrupted" },
+          content: [
+            {
+              type: "tool",
+              id: "call-cooperative",
+              state: {
+                status: "error",
+                error: { type: "tool.execution", message: "partial output" },
+                metadata: { interrupted: true },
+              },
+            },
+            {
+              type: "tool",
+              id: "call-stuck",
+              state: { status: "error", error: { type: "aborted", message: "Tool execution interrupted" } },
+            },
+          ],
+        })
+      }),
+  )
+
+// The provider stream has completed when the step is stopped, so the stop arrives while the step waits for its tools.
+it.live("classifies what a tool raises while the user's stop settles it: a decline", () =>
+  Effect.gen(function* () {
+    const { exit, data } = yield* stopTwoTools({
+      reason: "user",
+      locationClosed: false,
+      stopped: Effect.fail(new Permission.DeclinedError()),
+    })
+    expect(Exit.hasInterrupts(exit)).toBe(true)
+    expect(data).toMatchObject({
+      error: { type: "aborted", message: "Step interrupted" },
+      content: [
+        {
+          type: "tool",
+          id: "call-cooperative",
+          state: { status: "error", error: { type: "aborted", message: "The user declined this tool call" } },
+        },
+        {
+          type: "tool",
+          id: "call-stuck",
+          state: { status: "error", error: { type: "aborted", message: "Tool execution interrupted" } },
+        },
+      ],
+    })
+  }),
+)
+
+it.live("classifies what a tool raises while the user's stop settles it: a defect", () =>
+  Effect.gen(function* () {
+    const { exit } = yield* stopTwoTools({ reason: "user", locationClosed: false, stopped: Effect.die("tool broke") })
+    expect(Exit.isFailure(exit) && Cause.hasDies(exit.cause)).toBe(true)
+  }),
+)
+
+// Without a handoff nothing will take the calls over, so they settle here however the step was interrupted.
+for (const reason of ["shutdown", undefined] as const)
+  it.live(
+    `settles every call as interrupted on ${reason === "shutdown" ? "a server shutdown" : "an unexplained interrupt"} without a handoff`,
+    () =>
+      Effect.gen(function* () {
+        const { exit, data, requests, interrupted } = yield* stopTwoTools({ reason, locationClosed: false })
+        expect(Exit.hasInterrupts(exit)).toBe(true)
+        expect(requests).toBe(1)
+        expect(interrupted).toBe(true)
+        const generic = { status: "error", error: { type: "aborted", message: "Tool execution interrupted" } }
+        expect(data).toMatchObject({
+          error: { type: "aborted", message: "Step interrupted" },
+          content: [
+            { type: "tool", id: "call-cooperative", state: generic },
+            { type: "tool", id: "call-stuck", state: generic },
+          ],
+        })
+      }),
+  )
+
+it.live("leaves an interrupted step as a crash would while the server hands its daemon over", () =>
+  Effect.gen(function* () {
+    const { exit, data, requests } = yield* stopTwoTools({
+      reason: "shutdown",
+      locationClosed: false,
+      handoffPrepared: true,
+    })
+    expect(Exit.hasInterrupts(exit)).toBe(true)
+    expect(requests).toBe(1)
+    // No step end and no settled call: the next server finds the calls unsettled.
+    expect(data).not.toHaveProperty("error")
+    expect(data).toMatchObject({
+      content: [
+        { type: "tool", id: "call-cooperative", state: { status: "running" } },
+        { type: "tool", id: "call-stuck", state: { status: "running" } },
+      ],
+    })
+  }),
+)

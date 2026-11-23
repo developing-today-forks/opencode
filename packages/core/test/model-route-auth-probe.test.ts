@@ -111,6 +111,28 @@ describe("ModelRoute auth bench probe (code#9950)", () => {
     expect(ModelRoute.claimBenchProbe(target, undefined, now + 900_001)).toBe(true)
   })
 
+  test("an auth bench is planted with a real duration at every scope: until is strictly after plant time (#2555)", () => {
+    const now = 1_250_000_000
+    const scopes = [
+      { credentialID: undefined, variant: undefined },
+      { credentialID: "cred-zero", variant: undefined },
+      { credentialID: undefined, variant: "xhigh" },
+    ]
+    for (const [index, scope] of scopes.entries()) {
+      const plant = now + index
+      ModelRoute.failed(target, policy, plant, { auth: true }, scope.credentialID, undefined, undefined, scope.variant)
+      const until = ModelRoute.cooldownUntil(target, plant, undefined, scope.variant)
+      const credentialUntil = scope.credentialID
+        ? ModelRoute.credentialCooldownUntil(target, scope.credentialID, plant)
+        : until
+      expect(credentialUntil).toBeGreaterThan(plant)
+      expect(credentialUntil - plant).toBe(900_000)
+      const entry = entriesFor(plant).find((item) => item.variant === (scope.variant ?? "default"))
+      expect(entry?.until ?? plant + 1).toBeGreaterThan(plant)
+      ModelRoute.resetHealth()
+    }
+  })
+
   test("an ordinary failure never becomes probe-pending: its bench lapses outright", () => {
     const now = 1_300_000_000
     const ordinary = ModelRoute.ref({ providerID: "auth-probe-provider", model: "ordinary" })

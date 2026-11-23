@@ -108,11 +108,31 @@ jobs:
   # cancelled with zero steps - the macos-latest runner never started.
   # Recovery is workflow-level and bounded: exactly one recompute, on the
   # alternate macos-15 runner pool, and only when the primary leg left no
-  # hash artifact. This job has no continue-on-error: if it fails, the run fails.
-  compute-hash-darwin-fallback:
-    timeout-minutes: 20
+  # hash artifact.
+  # #2539: a cancelled needs-job skips dependents under the default
+  # success() gate, so without `if: always()` the fallback never engaged.
+  # #2544: run 43911677987 failed all-green because the always-engaged
+  # fallback queued ~15 min on macos-15 and was cancelled with zero steps
+  # by the platform (macOS arm64 acquisition failure - runner never
+  # assigned, under the 20 min job timeout, no competing run,
+  # cancel-in-progress is false). Run 43924963639 then proved that
+  # `continue-on-error: true` (#2547) does NOT save that case: it only
+  # converts step failure, not platform cancellation, and the cancelled
+  # no-op job still failed the run. So the no-op must never occupy a
+  # macos runner in the first place: the artifact check below runs on
+  # ubuntu (plentiful runners), and the macos-15 compute only starts when
+  # the primary hash is actually missing. A narrower `== 'cancelled'`
+  # fallback gate was also tried and proven dead: in runs 43920489996
+  # and 43923958538 the darwin leg was platform-cancelled yet the narrow
+  # fallback SKIPPED both times, so no recovery was possible. Key on the
+  # artifact (ground truth), not on the matrix result (masked).
+  fallback-decide:
+    timeout-minutes: 5
     needs: compute-hash
-    runs-on: macos-15
+    if: always() && needs.compute-hash.result != 'skipped'
+    runs-on: ubuntu-24.04
+    outputs:
+      needed: ${{ steps.decide.outputs.needed }}
 
     steps:
       - name: Checkout repository
@@ -129,19 +149,36 @@ jobs:
         id: decide
         run: |
           if [ -s primary-hash/hash.txt ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "needed=false" >> "$GITHUB_OUTPUT"
             echo "Primary aarch64-darwin leg produced its hash; fallback compute not needed."
           else
-            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "needed=true" >> "$GITHUB_OUTPUT"
             echo "::warning::Primary aarch64-darwin leg produced no hash artifact; computing it on macos-15 (see #1871)."
           fi
 
+  compute-hash-darwin-fallback:
+    timeout-minutes: 20
+    needs: [compute-hash, fallback-decide]
+    # Run ONLY when the primary hash is actually missing: on the all-green
+    # path this job skips and no macos runner is ever queued, so a
+    # platform acquisition failure cannot fail the run (#2544).
+    if: always() && needs.fallback-decide.outputs.needed == 'true'
+    # continue-on-error converts a *step* failure to success so the run
+    # still fails visibly downstream (update-hashes errors loudly on the
+    # absent artifact per #79130df612) instead of skipping silently. It
+    # does NOT cover platform cancellation: a cancelled job still fails
+    # the run, which is correct here - the hash is genuinely missing.
+    continue-on-error: true
+    runs-on: macos-15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
       - name: Setup Nix
-        if: steps.decide.outputs.present == 'false'
         uses: nixbuild/nix-quick-install-action@2c9db80fb984ceb1bcaa77cdda3fdf8cfba92035 # v34
 
       - name: Compute node_modules hash (aarch64-darwin fallback)
-        if: steps.decide.outputs.present == 'false'
         env:
           SYSTEM: aarch64-darwin
         run: |
@@ -176,7 +213,6 @@ jobs:
           echo "Computed hash for ${SYSTEM}: $HASH"
 
       - name: Upload hash
-        if: steps.decide.outputs.present == 'false'
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hash-aarch64-darwin
@@ -186,7 +222,21 @@ jobs:
   update-hashes:
     timeout-minutes: 15
     needs: [compute-hash, compute-hash-darwin-fallback]
-    if: github.event_name != 'pull_request'
+    # #2539: when a cancelled darwin leg yields a non-success aggregate,
+    # the default success() gate would skip the restamp even
+    # though the fallback recovered the hash. Gate explicitly.
+    # #2544: THIS gate (not the fallback's) carries the incident fix. Run
+    # 43911677987 failed all-green because update-hashes required the
+    # (no-op) fallback's success and the platform cancelled that no-op
+    # job. So: proceed when compute-hash succeeded, whatever the fallback
+    # did, or when the fallback recovered the hash. This gate is evaluated
+    # only after the fallback finishes or skips. A 'failure' (a linux
+    # leg failed) still blocks the restamp either way.
+    if: >
+      always() && github.event_name != 'pull_request'
+      && needs.compute-hash.result != 'failure'
+      && (needs.compute-hash.result == 'success'
+        || needs.compute-hash-darwin-fallback.result == 'success')
     # RUNNER-SWITCH: Blacksmith (commented out 2026-10-18): runs-on: blacksmith-4vcpu-ubuntu-2404
     runs-on: ubuntu-24.04
 
@@ -245,7 +295,11 @@ jobs:
               jq --arg sys "$SYSTEM" --arg h "$HASH" '.nodeModules[$sys] = $h' "$HASH_FILE" > tmp.json
               mv tmp.json "$HASH_FILE"
             else
-              echo "::warning::Missing hash for ${SYSTEM}"
+              # #2539 follow-up (CodeRabbit on #2540): the update-hashes gate
+              # accepts a 'cancelled' compute-hash result, so a cancelled
+              # linux leg must not silently commit a partial restamp.
+              echo "::error::Missing hash for ${SYSTEM}; refusing to commit a partial restamp"
+              exit 1
             fi
           done
 

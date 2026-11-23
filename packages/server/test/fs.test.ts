@@ -231,8 +231,10 @@ it.live(
       expect(mismatchIfNoneMatch.status).toBe(200)
       expect(yield* Effect.promise(() => mismatchIfNoneMatch.text())).toBe("0123456789")
 
-      // 7. If-Range matching -> 206; If-Range mismatch -> full 200
-      yield* Effect.forEach([etag, strongEtag, lastModified], (ifRange) =>
+      // 7. If-Range: only the date validator matches here -> 206. The emitted
+      // ETag is weak, so entity-tag If-Range (weak tag, or the strong-looking
+      // stripped tag) can never strong-match it -> full 200 (RFC 9110 13.1.5).
+      yield* Effect.forEach([lastModified], (ifRange) =>
         Effect.gen(function* () {
           const matchedRange = yield* request("clip.mp4", {
             headers: { Range: "bytes=1-4", "If-Range": ifRange },
@@ -243,16 +245,18 @@ it.live(
         }),
       )
 
-      yield* Effect.forEach(['W/"stale"', '"stale"', "Wed, 01 Jan 2020 00:00:00 GMT", "not-a-date"], (ifRange) =>
-        Effect.gen(function* () {
-          const mismatchedRange = yield* request("clip.mp4", {
-            headers: { Range: "bytes=1-4", "If-Range": ifRange },
-          })
-          expect(mismatchedRange.status).toBe(200)
-          expect(mismatchedRange.headers.get("content-range")).toBeNull()
-          expect(mismatchedRange.headers.get("content-length")).toBe("10")
-          expect(yield* Effect.promise(() => mismatchedRange.text())).toBe("0123456789")
-        }),
+      yield* Effect.forEach(
+        [etag, strongEtag, 'W/"stale"', '"stale"', "Wed, 01 Jan 2020 00:00:00 GMT", "not-a-date"],
+        (ifRange) =>
+          Effect.gen(function* () {
+            const mismatchedRange = yield* request("clip.mp4", {
+              headers: { Range: "bytes=1-4", "If-Range": ifRange },
+            })
+            expect(mismatchedRange.status).toBe(200)
+            expect(mismatchedRange.headers.get("content-range")).toBeNull()
+            expect(mismatchedRange.headers.get("content-length")).toBe("10")
+            expect(yield* Effect.promise(() => mismatchedRange.text())).toBe("0123456789")
+          }),
       )
 
       // 8. Confinement enforced (404 FileNotFoundError instead of 500)
@@ -295,6 +299,79 @@ it.live(
   15_000,
 )
 
+it.live("serves file reads as downloads with explicit content headers", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    yield* Effect.promise(async () => {
+      await fs.writeFile(path.join(tmp.path, "page.html"), "<!doctype html><script>document.title = 'x'</script>")
+      await fs.writeFile(path.join(tmp.path, "logo.svg"), '<svg xmlns="http://www.w3.org/2000/svg"/>')
+      await fs.writeFile(path.join(tmp.path, "feed.xml"), "<feed/>")
+      await fs.writeFile(path.join(tmp.path, "app.js"), "export {}")
+      await fs.writeFile(path.join(tmp.path, "photo.png"), "png")
+      await fs.writeFile(path.join(tmp.path, "clip.mp4"), "0123456789")
+      await fs.writeFile(path.join(tmp.path, "naïve 100% (1).txt"), "text")
+    })
+    const server = yield* startServer(path.join(tmp.path, "config"))
+    const request = (file: string, init?: BunFetchRequestInit) =>
+      Effect.promise(() => {
+        const url = new URL(`/api/fs/read/${encodeURIComponent(file)}`, server.base)
+        url.searchParams.set("location[directory]", tmp.path)
+        return fetch(url, { ...init, headers: { ...server.headers, ...init?.headers } })
+      })
+    const expectDownload = (response: Response, filename: string) => {
+      expect(response.headers.get("content-disposition")).toBe(
+        `attachment; filename="${filename}"; filename*=UTF-8''${filename}`,
+      )
+      expect(response.headers.get("content-security-policy")).toBe(
+        "default-src 'none'; img-src 'self'; media-src 'self'; sandbox",
+      )
+      expect(response.headers.get("x-content-type-options")).toBe("nosniff")
+    }
+
+    yield* Effect.forEach(
+      [
+        ["page.html", "text/plain; charset=utf-8"],
+        ["logo.svg", "text/plain; charset=utf-8"],
+        ["feed.xml", "text/plain; charset=utf-8"],
+        ["app.js", "text/plain; charset=utf-8"],
+        ["photo.png", "image/png"],
+        ["clip.mp4", "video/mp4"],
+      ] as const,
+      ([file, type]) =>
+        Effect.gen(function* () {
+          const full = yield* request(file)
+          expect({ file, status: full.status, type: full.headers.get("content-type") }).toEqual({
+            file,
+            status: 200,
+            type,
+          })
+          expectDownload(full, file)
+          const head = yield* request(file, { method: "HEAD" })
+          expect(head.headers.get("content-type")).toBe(type)
+          expectDownload(head, file)
+        }),
+    )
+
+    const html = yield* request("page.html")
+    expect(yield* Effect.promise(() => html.text())).toBe("<!doctype html><script>document.title = 'x'</script>")
+
+    const partial = yield* request("clip.mp4", { headers: { Range: "bytes=2-5" } })
+    expect(partial.status).toBe(206)
+    expect(partial.headers.get("content-type")).toBe("video/mp4")
+    expectDownload(partial, "clip.mp4")
+    expect(yield* Effect.promise(() => partial.text())).toBe("2345")
+
+    const cached = yield* request("clip.mp4", { headers: { "If-None-Match": "*" } })
+    expect(cached.status).toBe(304)
+    expectDownload(cached, "clip.mp4")
+
+    const named = yield* request("naïve 100% (1).txt")
+    expect(named.headers.get("content-disposition")).toBe(
+      `attachment; filename="na_ve 100_ (1).txt"; filename*=UTF-8''na%C3%AFve%20100%25%20%281%29.txt`,
+    )
+  }),
+)
+
 it.live("opens no file for HEAD and closes it when a download is aborted", () =>
   Effect.gen(function* () {
     if (process.platform !== "linux" && process.platform !== "darwin") return
@@ -333,5 +410,34 @@ it.live("opens no file for HEAD and closes it when a download is aborted", () =>
         Effect.timeout("5 seconds"),
       ),
     ).toBe(0)
+  }),
+)
+
+it.live("confines watch requests like read and reports a disabled watcher", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    const project = path.join(tmp.path, "project")
+    yield* Effect.promise(async () => {
+      await fs.mkdir(project)
+      await fs.writeFile(path.join(project, "a.ts"), "a")
+      await fs.writeFile(path.join(tmp.path, "outside.ts"), "outside")
+    })
+    const server = yield* startServer(path.join(tmp.path, "config"))
+    const watch = (method: string, file: string) =>
+      Effect.promise(async () => {
+        const url = new URL("/api/experimental/fs/watch", server.base)
+        url.searchParams.set("location[directory]", project)
+        const response = await fetch(url, {
+          method,
+          headers: { ...server.headers, "content-type": "application/json" },
+          body: JSON.stringify({ path: file }),
+        })
+        return response.status
+      })
+
+    expect(yield* watch("POST", "../outside.ts")).toBe(404)
+    expect(yield* watch("POST", "missing.ts")).toBe(404)
+    expect(yield* watch("POST", "a.ts")).toBe(503)
+    expect(yield* watch("DELETE", "a.ts")).toBe(204)
   }),
 )

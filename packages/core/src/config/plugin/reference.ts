@@ -18,7 +18,7 @@ export const Plugin = define({
     const config = yield* Config.Service
     const location = yield* Location.Service
     const global = yield* Global.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["references"], ctx.reference.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ctx.reference.reload(), ["references"])
     yield* ctx.reference.transform((editor) => {
       for (const doc of loaded.entries.filter((entry): entry is Document => entry.type === "document")) {
         const directory = doc.path ? path.dirname(doc.path) : location.directory

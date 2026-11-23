@@ -1,5 +1,5 @@
 import { Tool } from "@opencode/schema/tool"
-import { Effect, Option, Schema } from "effect"
+import { Effect, Option, Predicate, Schema, SchemaGetter, SchemaTransformation } from "effect"
 import { Headers, HttpClientRequest } from "effect/http"
 import { Media } from "../media.js"
 import {
@@ -7,15 +7,18 @@ import {
   InvalidRequestError,
   UnsupportedOperationError,
   AIError,
-  LLMRequest,
+  AssistantMessage,
+  type LLMRequest,
   Message,
   ToolDefinition,
+  ToolMessage,
   type ContentPart,
   type MediaPart,
   type OpenString,
   type ProviderID,
   type RequestEncoding,
   type TextPart,
+  type ToolCallPart,
   type ToolEntry,
   type ToolResultPart,
 } from "../schema/index.js"
@@ -27,11 +30,77 @@ const isJson = Schema.is(Schema.Json)
 export const JsonObject = Schema.Record(Schema.String, Schema.Unknown)
 export const optionalArray = <const S extends Schema.Top>(schema: S) => Schema.optional(Schema.Array(schema))
 export const optionalNull = <const S extends Schema.Top>(schema: S) => Schema.optional(Schema.NullOr(schema))
+/** Optional provider field where an explicit `null` means absent, so decoding never yields `null`. */
+export const optionalNullish = <const S extends Schema.Top>(schema: S) =>
+  Schema.optional(Schema.NullOr(schema)).pipe(
+    Schema.decodeTo(
+      Schema.optional(Schema.toType(schema)),
+      SchemaTransformation.transformOptional({
+        decode: Option.filter(Predicate.isNotNullish),
+        encode: (value) => value,
+      }),
+    ),
+  )
 /** Optional field whose malformed value decodes to `undefined` instead of failing the enclosing struct. */
 export const lenient = <const S extends Schema.Top>(schema: S) =>
   Schema.optionalKey(
     Schema.UndefinedOr(schema).pipe(Schema.catchDecoding(() => Effect.succeed(Option.some(undefined)))),
   )
+/** A billed amount in USD; a malformed or negative one decodes as absent. */
+const billedAmount = lenient(Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)))
+
+/** Billing an endpoint reports beside its token usage: `cost` is the USD it charged (OpenRouter, LiteLLM, OpenCode Zen). */
+export const ReportedBilling = Schema.Struct({
+  cost: billedAmount,
+})
+
+/**
+ * GitHub Copilot reports its charge beside usage on the frame that carries it, as `copilot_usage.total_nano_aiu`:
+ * billionths of an AI credit, which costs $0.01.
+ */
+const CopilotBilling = Schema.Struct({
+  copilot_usage: Schema.Struct({ total_nano_aiu: Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0)) }),
+})
+const decodeCopilotBilling = Schema.decodeUnknownOption(CopilotBilling)
+
+/**
+ * Reads `ReportedBilling` from a raw usage object, which provider metadata keeps as the endpoint sent it, or
+ * Copilot's billing from the frames that carry the usage.
+ */
+export const reportedBilling = (usage: unknown, ...frames: ReadonlyArray<unknown>) => {
+  const reported = Option.getOrUndefined(Schema.decodeUnknownOption(ReportedBilling)(usage))?.cost
+  if (reported !== undefined) return { cost: reported }
+  const nanoAiu = frames
+    .map((frame) => Option.getOrUndefined(decodeCopilotBilling(frame))?.copilot_usage.total_nano_aiu)
+    .find((value) => value !== undefined)
+  return nanoAiu === undefined ? {} : { cost: nanoAiu / 100_000_000_000 }
+}
+
+/**
+ * The filter that blocked a response, from maps keyed by filter name: Azure's `content_filter_results`
+ * (`{ hate: { filtered: true } }`) or GitHub Copilot's `copilot_annotations` (`{ TextCopyright: [...] }`).
+ */
+export const contentFilterCategory = (...sources: ReadonlyArray<unknown>) =>
+  sources
+    .flatMap((source) => (isRecord(source) ? Object.entries(source) : []))
+    .find(([, value]) => (isRecord(value) && "filtered" in value ? value.filtered === true : Boolean(value)))?.[0]
+
+/**
+ * Accepts stream frames that carry no `type`, alongside the typed event schema. Gateways inject such frames as
+ * keep-alives, so they decode as an ignored event; one with an `error` still decodes as an error event.
+ */
+export const withUntypedFrames = <const S extends Schema.Codec<{ readonly type: string }, { readonly type: string }>>(
+  event: S,
+) =>
+  Schema.Union([
+    event,
+    JsonObject.check(Schema.makeFilter((frame) => !("type" in frame))).pipe(
+      Schema.decodeTo(event, {
+        decode: SchemaGetter.transform((frame) => ({ ...frame, type: frame.error != null ? "error" : "ignored" })),
+        encode: SchemaGetter.forbidden(() => "Untyped stream frames are decode-only"),
+      }),
+    ),
+  ])
 /** Provider-defined string enum: known values for autocomplete, any string accepted at runtime. */
 export const knownString = <Known extends string>() =>
   Schema.declare<OpenString<Known>>((value): value is OpenString<Known> => typeof value === "string", {
@@ -43,7 +112,7 @@ export const OPENAI_PROMPT_CACHE_KEY_MAX_LENGTH = 64
 // Body-level `prompt_cache_key` is off when caching is disabled or the model
 // explicitly rejects the field. Header-based affinity is unaffected.
 export const sendsPromptCacheKey = (request: LLMRequest) =>
-  request.cache !== "none" && request.model.compatibility?.supportsPromptCacheKey !== false
+  request.cache !== "none" && request.model.capabilities?.promptCacheKey !== false
 
 // OpenAI limits `prompt_cache_key` to 64 chars; DeepSeek and Zai inherit the same
 // limit via their OpenAI-compatible APIs. Clamp with unicode-aware slicing.
@@ -160,10 +229,7 @@ export const wrapSystemUpdate = (parts: ReadonlyArray<{ readonly text: string }>
  * raw retrieved, tool, or web content into privileged updates: keep untrusted
  * data in ordinary user/tool messages instead.
  */
-export const systemUpdateText = Effect.fnUntraced(function* (
-  route: string,
-  message: LLMRequest["messages"][number],
-) {
+export const systemUpdateText = Effect.fnUntraced(function* (route: string, message: LLMRequest["messages"][number]) {
   const content: TextPart[] = []
   for (const part of message.content) {
     if (!supportsContent(part, ["text"])) return yield* unsupportedContent(route, "system", ["text"])
@@ -181,14 +247,84 @@ export const wrappedSystemUpdate = Effect.fnUntraced(function* (
   return { type: "text" as const, text: wrapSystemUpdate(content), cache: content.at(-1)?.cache }
 })
 
+/** Whether the bounded truncated-input repair in `parseToolInput` is on (#2227). Off by default. */
+export const toolInputRepairEnabled = () => process.env.OPENCODE_TOOL_INPUT_REPAIR === "1"
+
+const TOOL_INPUT_REPAIR_MAX_INPUT = 1_000_000
+const TOOL_INPUT_REPAIR_MAX_DEPTH = 1_000
+
+/**
+ * Bounded completion of a tool-input JSON document that was truncated
+ * mid-stream (#2227). The only repairs attempted: close an unterminated
+ * string, drop a trailing comma, and append the missing `}`/`]` closers for
+ * the containers still open. Anything else — a cut inside a literal or
+ * number, a dangling key or colon, mismatched closers, input past the size
+ * or depth bound — returns `undefined` and stays fatal; the caller accepts
+ * a candidate only when it parses to a JSON object, so a bad guess can
+ * never become tool input.
+ */
+export const repairTruncatedToolInput = (raw: string): string | undefined => {
+  if (raw.length === 0 || raw.length > TOOL_INPUT_REPAIR_MAX_INPUT) return undefined
+  const stack: Array<string> = []
+  let inString = false
+  let escaped = false
+  for (const char of raw) {
+    if (inString) {
+      if (escaped) escaped = false
+      else if (char === "\\") escaped = true
+      else if (char === '"') inString = false
+      continue
+    }
+    if (char === '"') inString = true
+    else if (char === "{") stack.push("}")
+    else if (char === "[") stack.push("]")
+    else if (char === "}" || char === "]") {
+      if (stack.pop() !== char) return undefined
+    }
+    if (stack.length > TOOL_INPUT_REPAIR_MAX_DEPTH) return undefined
+  }
+  let repaired = raw
+  if (inString) {
+    // A final lone backslash was left mid-escape; dropping it lets the
+    // closing quote terminate the string instead of being escaped by it.
+    if (escaped) repaired = repaired.slice(0, -1)
+    repaired += '"'
+  } else {
+    // A cut right after a comma (or in trailing whitespace) leaves a tail
+    // no closer can follow; drop it before completing the open containers.
+    repaired = repaired.replace(/[\s,]+$/, "")
+  }
+  for (let index = stack.length - 1; index >= 0; index--) repaired += stack[index]
+  return repaired === raw ? undefined : repaired
+}
+
 /**
  * Parse the streamed JSON input of a tool call. Treats an empty string as
  * `"{}"` — providers occasionally finish a tool call without ever emitting
  * input deltas (e.g. zero-arg tools). The error message is uniform across
  * routes: `Invalid JSON input for <route> tool call <name>`.
+ *
+ * With `OPENCODE_TOOL_INPUT_REPAIR=1`, a parse failure first tries the
+ * bounded completion in `repairTruncatedToolInput`; a candidate counts only
+ * when it parses to a JSON object. Every other failure — and every failure
+ * with the flag off — is the original error, whose body stays the raw
+ * input, so diagnostics never lose what the provider actually sent.
  */
-export const parseToolInput = (route: string, name: string, raw: string) =>
-  parseJson(route, raw || "{}", `Invalid JSON input for ${route} tool call ${name}`)
+export const parseToolInput = (route: string, name: string, raw: string) => {
+  const input = raw || "{}"
+  const message = `Invalid JSON input for ${route} tool call ${name}`
+  return parseJson(route, input, message).pipe(
+    Effect.catch((error) => {
+      if (!toolInputRepairEnabled()) return Effect.fail(error)
+      const repaired = repairTruncatedToolInput(input)
+      if (repaired === undefined) return Effect.fail(error)
+      return parseJson(route, repaired, message).pipe(
+        Effect.flatMap((value) => (isRecord(value) ? Effect.succeed(value) : Effect.fail(error))),
+        Effect.catch(() => Effect.fail(error)),
+      )
+    }),
+  )
+}
 
 /** Inline view or a typed `InvalidRequest` for routes that cannot fetch URLs or dereference provider refs. */
 export const requireInlineMedia = (route: string, asset: Media.Asset): Effect.Effect<Media.Inline, AIError> => {
@@ -228,14 +364,14 @@ export const mediaReference = (
 }
 
 /**
- * Lift a tool-result file into a `MediaPart`. Tool files carry either a data URL, an `http(s)` URL, or raw base64 in
+ * Lift a tool-result file into a `MediaPart`. Tool files carry either a data URL, a URI, or raw base64 in
  * `uri`; the declared `mime` wins over any data-URL prefix so tool authors control the type the model sees.
  */
 export const toolFileMedia = (item: Tool.FileContent): MediaPart => {
   const parsed = Media.parseDataUrl(item.uri)
   const asset = parsed
     ? Media.from({ ...parsed.source, mediaType: item.mime })
-    : /^https?:\/\//.test(item.uri)
+    : item.uri.includes("://")
       ? Media.url(item.uri, { mediaType: item.mime })
       : Media.base64(item.uri, item.mime)
   return Message.media(asset, { filename: item.name })
@@ -252,6 +388,15 @@ export const toolResultText = (part: ToolResultPart) => {
   }
   return encodeJson(part.result.value)
 }
+
+/**
+ * Stable wire prefix for failed tool results in protocols whose tool-result schema has no error field. Bracketed so it
+ * cannot be confused with error text a tool itself produced (`new Error("boom")` already stringifies to `Error: boom`).
+ */
+export const toolErrorMarker = "[tool_error] "
+
+export const markedToolResultText = (part: ToolResultPart) =>
+  part.result.type === "error" ? `${toolErrorMarker}${toolResultText(part)}` : toolResultText(part)
 
 export const errorText = (error: unknown) => {
   if (error instanceof Error) return error.message
@@ -308,22 +453,42 @@ export const flattenTools = (tools: ReadonlyArray<ToolEntry>, path: ReadonlyArra
 }
 
 export const flattenToolRequest = (request: LLMRequest) => {
+  const tools = flattenTools(request.tools)
+  const declared = new Set(tools.map((tool) => tool.name))
+  const flatten = <Part extends ToolCallPart | ToolResultPart>(part: Part) => flattenToolName(part, declared)
   const messages = request.messages.map((message) => {
-    const content = message.content.map((part) => {
-      if ((part.type !== "tool-call" && part.type !== "tool-result") || part.namespace === undefined) return part
-      return { ...part, name: `${part.namespace}_${part.name}`, namespace: undefined }
-    })
-    return content.every((part, index) => part === message.content[index])
-      ? message
-      : new Message({ ...message, content })
+    if (message.role === "assistant") {
+      const content = message.content.map((part) =>
+        part.type === "tool-call" || part.type === "tool-result" ? flatten(part) : part,
+      )
+      return sameParts(content, message.content) ? message : new AssistantMessage({ ...message, content })
+    }
+    if (message.role !== "tool") return message
+    const content = message.content.map(flatten)
+    return sameParts(content, message.content) ? message : new ToolMessage({ ...message, content })
   })
   return {
-    tools: flattenTools(request.tools),
+    tools,
     request: messages.every((message, index) => message === request.messages[index])
       ? request
-      : LLMRequest.update(request, { messages }),
+      : { ...request, messages },
   }
 }
+
+const flattenToolName = <Part extends ToolCallPart | ToolResultPart>(
+  part: Part,
+  declared: ReadonlySet<string>,
+): Part => {
+  const flat = part.namespace === undefined ? part.name : `${part.namespace}_${part.name}`
+  // Models sometimes call names no tool declares, such as a Code Mode path like `a.b.c`. Several providers (OpenAI
+  // Chat Completions, Bedrock Converse) reject those characters when the call is replayed, so replace them. A
+  // declared name is kept as is, so a provider that accepts it sees calls under the tool's own name.
+  const name = declared.has(flat) ? flat : flat.replace(/[^a-zA-Z0-9_-]/g, "_") || "_"
+  return name === part.name && part.namespace === undefined ? part : { ...part, name, namespace: undefined }
+}
+
+const sameParts = (next: ReadonlyArray<ContentPart>, previous: ReadonlyArray<ContentPart>) =>
+  next.every((part, index) => part === previous[index])
 
 export const matchToolChoice = <Auto, None, Required, Tool>(
   route: string,

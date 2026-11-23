@@ -15,18 +15,32 @@ import {
   toUsageWindow,
 } from "../src/quota/utils.js"
 import { parseCommandCodeCredits } from "../src/quota/providers/command-code.js"
-import { parseConsoleBillingBalance, parseConsoleGoUsage, parseOpenCodeGoUsage, fetchOpenCodeGoUsage } from "../src/quota/providers/opencode-go.js"
+import {
+  parseConsoleBillingBalance,
+  parseConsoleGoUsage,
+  parseOpenCodeGoUsage,
+  fetchOpenCodeGoUsage,
+} from "../src/quota/providers/opencode-go.js"
 import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
 import { provider as codexProvider } from "../src/quota/providers/openai.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
+import { provider as exaoneProvider, KEY_EXPIRES_AT as EXAONE_KEY_EXPIRES_AT } from "../src/quota/providers/exaone.js"
+import { provider as googleProvider } from "../src/quota/providers/google.js"
 import { provider as openrouterProvider, resolveResetAt } from "../src/quota/providers/openrouter.js"
 import { provider as mistralProvider } from "../src/quota/providers/mistral.js"
 import { parseBillingBanner } from "../src/quota/providers/meta.js"
 import { provider as metaProvider, teamIdOf } from "../src/quota/providers/meta.js"
 import { provider as claudeProvider, toClaudeUsage } from "../src/quota/providers/claude.js"
 import { normalizeOpenDesignCredential, parseCodingPlanWindows } from "../src/quota/providers/opendesign.js"
-import { fetchAllQuota, listConfiguredQuotaProviders, listConfiguredQuotaProvidersDetailed, quotaProbeFailureResult } from "../src/quota/index.js"
+import {
+  fetchAllQuota,
+  fetchQuotaForProviderInstances,
+  listConfiguredQuotaProviders,
+  listConfiguredQuotaProvidersDetailed,
+  quotaProbeFailureResult,
+  withQuotaLegDeadline,
+} from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
 
 describe("bounded quota JSON reader", () => {
@@ -132,18 +146,16 @@ describe("mistral budget label currency (#1805)", () => {
   // are the ones pool rotation actually reads.
   const fetchWith = (budget: Record<string, unknown>) =>
     mistralProvider.fetchQuota({
-      credentials: [
-        { id: "row-1", integrationID: "mistral", active: true, value: { type: "key", key: "sk-fixture" } },
-      ],
+      credentials: [{ id: "row-1", integrationID: "mistral", active: true, value: { type: "key", key: "sk-fixture" } }],
       disabledProviders: new Set<string>(),
       instances: new Map(),
       providerConfig: {},
       env: { MISTRAL_ADMIN_COOKIE: "fixture-cookie" },
       fetchImpl: async () =>
-        new Response(
-          JSON.stringify({ result: { data: { json: { api_budget: budget, vibe_budget: budget } } } }),
-          { status: 200, headers: { "content-type": "application/json" } },
-        ),
+        new Response(JSON.stringify({ result: { data: { json: { api_budget: budget, vibe_budget: budget } } } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
     } as never)
 
   test("a non-USD budget denominates both windows in the payload currency", async () => {
@@ -175,9 +187,7 @@ describe("meta key-endpoint subs_usage windows (#1907)", () => {
   // used_percent publishes no window.
   const fetchWith = (subsUsage: Record<string, unknown> | undefined, active?: boolean) =>
     metaProvider.fetchQuota({
-      credentials: [
-        { id: "row-1", integrationID: "meta", active: true, value: { type: "key", key: "tok-fixture" } },
-      ],
+      credentials: [{ id: "row-1", integrationID: "meta", active: true, value: { type: "key", key: "tok-fixture" } }],
       disabledProviders: new Set<string>(),
       instances: new Map(),
       providerConfig: {},
@@ -530,8 +540,26 @@ describe("turso org usage mapping", () => {
     // source of truth; matching is by plan name, case-insensitively.
     const plans = {
       plans: [
-        { name: "starter", quotas: { rowsRead: 500_000_000, rowsWritten: 10_000_000, databases: 100, storage: 5_000_000_000, bytesSynced: 3_000_000_000 } },
-        { name: "Scaler", quotas: { rowsRead: 100_000_000_000, rowsWritten: 100_000_000, databases: 1_000_000_000, storage: 24_000_000_000, bytesSynced: 24_000_000_000 } },
+        {
+          name: "starter",
+          quotas: {
+            rowsRead: 500_000_000,
+            rowsWritten: 10_000_000,
+            databases: 100,
+            storage: 5_000_000_000,
+            bytesSynced: 3_000_000_000,
+          },
+        },
+        {
+          name: "Scaler",
+          quotas: {
+            rowsRead: 100_000_000_000,
+            rowsWritten: 100_000_000,
+            databases: 1_000_000_000,
+            storage: 24_000_000_000,
+            bytesSynced: 24_000_000_000,
+          },
+        },
       ],
     }
     const usage = {
@@ -545,7 +573,11 @@ describe("turso org usage mapping", () => {
         },
       },
     }
-    const sub = { plan: "scaler", current_billing_period_start: "2026-11-01T00:00:00Z", current_billing_period_end: "2026-12-01T00:00:00Z" }
+    const sub = {
+      plan: "scaler",
+      current_billing_period_start: "2026-11-01T00:00:00Z",
+      current_billing_period_end: "2026-12-01T00:00:00Z",
+    }
     const mapped = tursoWindows(usage, sub, plans)
     expect(mapped?.planLabel).toBe("scaler")
     expect(mapped?.windows["rows-read"]?.usedPercent).toBe(1.18)
@@ -565,7 +597,11 @@ describe("turso org usage mapping", () => {
     expect(mapped?.windows.storage?.usedPercent).toBe(45)
     expect(mapped?.windows.storage?.valueLabel).toBe("10.8 GB / 24 GB")
     // Plans doc present but not matching the plan name: same fallback.
-    const unmatched = tursoWindows(usage, { plan: "scaler" }, { plans: [{ name: "starter", quotas: { rowsRead: 500_000_000 } }] })
+    const unmatched = tursoWindows(
+      usage,
+      { plan: "scaler" },
+      { plans: [{ name: "starter", quotas: { rowsRead: 500_000_000 } }] },
+    )
     expect(unmatched?.windows["rows-read"]?.usedPercent).toBe(1.18)
   })
 
@@ -743,7 +779,17 @@ describe("toTimestamp non-positive handling (#1845)", () => {
 
   test("turso: non-positive period bounds derive neither a reset nor a windowSeconds", () => {
     const mapped = tursoWindows(
-      { organization: { usage: { rows_read: 250_000_000, rows_written: 1_000_000, storage_bytes: 2_500_000_000, bytes_synced: 0, databases: 44 } } },
+      {
+        organization: {
+          usage: {
+            rows_read: 250_000_000,
+            rows_written: 1_000_000,
+            storage_bytes: 2_500_000_000,
+            bytes_synced: 0,
+            databases: 44,
+          },
+        },
+      },
       { plan: "scaler", current_period_start: -10000, current_period_end: -5000 },
     )
     const window = Object.values(mapped?.windows ?? {})[0]
@@ -805,7 +851,6 @@ describe("toNumber blank-string handling (#1741)", () => {
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: " " } })).toEqual({})
     expect(parseCommandCodeCredits({ credits: { monthlyCredits: 0 } }).monthly?.usedPercent).toBe(100)
   })
-
 
   test("an empty percent field mints no 0%-used opencode-go window", () => {
     // Rule 4: an entry with no usable percent publishes no window (a
@@ -1169,7 +1214,9 @@ describe("opendesign coding-plan windows (#1750)", () => {
   })
 
   test("a zero-limit entry publishes no window", () => {
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] }),
+    ).toBeNull()
     const windows = parseCodingPlanWindows({
       windows: [
         { durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 },
@@ -1188,7 +1235,9 @@ describe("opendesign coding-plan windows (#1750)", () => {
       ],
     })
     expect(windows?.["5h"]?.usedPercent).toBe(75)
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] }),
+    ).toBeNull()
     expect(parseCodingPlanWindows({})).toBeNull()
     expect(parseCodingPlanWindows({ windows: "nope" })).toBeNull()
     expect(parseCodingPlanWindows(null)).toBeNull()
@@ -1845,7 +1894,7 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       env: {},
     })
 
-  test("rule 7: the registry still holds exactly the 13 inventoried providers, in inventory order", () => {
+  test("rule 7: the registry still holds exactly the 15 inventoried providers, in inventory order", () => {
     // Read the registry source instead of importing index.js: the
     // index pulls every provider's runtime dependencies, which this
     // parser suite deliberately does not need. The variable-to-id
@@ -1859,6 +1908,8 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       openai: "_openai",
       commandCode: "_commandcode",
       deepseek: "deepseek",
+      exaone: "exaone",
+      google: "google",
       groq: "groq",
       meta: "meta",
       mistral: "mistral",
@@ -1879,6 +1930,8 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
       "_openai",
       "_commandcode",
       "deepseek",
+      "exaone",
+      "google",
       "groq",
       "meta",
       "mistral",
@@ -1972,7 +2025,9 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   })
 
   test("rule 4 (no figure, no window): opendesign zero-limit entry and command-code balance-only payload publish nothing", () => {
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 0, remainingCredits: 0 }] }),
+    ).toBeNull()
     expect(parseCommandCodeCredits({ credits: { purchasedCredits: 40, freeCredits: 15 } })).toEqual({})
   })
 
@@ -2050,7 +2105,9 @@ describe("quota window contract — shared probe matrix (#1795, design #1794 pha
   })
 
   test("rule 6 (unknown kinds skipped, not renamed): opendesign unknown duration publishes no familiar label", () => {
-    expect(parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] })).toBeNull()
+    expect(
+      parseCodingPlanWindows({ windows: [{ durationSeconds: 3600, limitCredits: 10, remainingCredits: 5 }] }),
+    ).toBeNull()
   })
 
   test("rule 6 (unknown kinds skipped, not renamed): cline-pass unknown limit type publishes no window", async () => {
@@ -2110,7 +2167,13 @@ describe("quota figure contract — shared figure probe matrix (#1943, design #1
   test("rule 1 (negative figure reads as absent): meta, opencode-go, turso, codex and deepseek negative figures publish nothing", async () => {
     expect(parseBillingBanner({ remaining_minor_units: -5, currency: "USD" })).toBeNull()
     expect(parseConsoleBillingBalance({ availableMicroCents: -1 })).toBeNull()
-    expect(parseConsoleGoUsage({ access: { meters: { fiveHour: { limitMicroCents: 100, usedMicroCents: -1, resetsAt: "2027-01-01T00:00:00Z" } } } })).toEqual({})
+    expect(
+      parseConsoleGoUsage({
+        access: {
+          meters: { fiveHour: { limitMicroCents: 100, usedMicroCents: -1, resetsAt: "2027-01-01T00:00:00Z" } },
+        },
+      }),
+    ).toEqual({})
     expect(tursoWindows({ usage: { databases: -1 } }, {})?.windows.databases).toBeUndefined()
     const codex = await codexFetchWith({ credits: { balance: -5, unlimited: false } })
     expect(codex.usage?.windows.credits_balance).toBeUndefined()
@@ -2138,10 +2201,14 @@ describe("quota figure contract — shared figure probe matrix (#1943, design #1
     const ccUnder = parseCommandCodeCredits({ windowLimits: { fiveHour: { used: -5, cap: 10 } } })
     expect(ccUnder["5h"]?.usedPercent).toBe(0)
     expect(ccUnder["5h"]?.valueLabel).toBe("0 / 10")
-    const odOver = parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }] })
+    const odOver = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: 150 }],
+    })
     expect(odOver?.["5h"]?.usedPercent).toBe(0)
     expect(odOver?.["5h"]?.valueLabel).toBe("100 / 100 credits")
-    const odUnder = parseCodingPlanWindows({ windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: -50 }] })
+    const odUnder = parseCodingPlanWindows({
+      windows: [{ durationSeconds: 18000, limitCredits: 100, remainingCredits: -50 }],
+    })
     expect(odUnder?.["5h"]?.usedPercent).toBe(100)
     expect(odUnder?.["5h"]?.valueLabel).toBe("0 / 100 credits")
     const codex = await codexFetchWith({ spend_control: { individual_limit: { used: 15, limit: 10 } } })
@@ -2383,25 +2450,19 @@ describe("antigravity quota summary figure check (#1917)", () => {
   })
 
   test("a summary group built only from figure-less buckets carries no windows", () => {
-    const groups = transformSummary(
-      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
-    )
+    const groups = transformSummary(summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never)
     expect(groups[0].windows).toEqual({})
     expect(groups[0].bucket5h).toBeNull()
   })
 
   test("a matched model inherits no window from a figure-less group", () => {
-    const groups = transformSummary(
-      summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never,
-    )
+    const groups = transformSummary(summaryWith([{ window: "5h", resetTime: "2026-12-01T00:00:00Z" }]) as never)
     const models = transformModels({ models: { "gemini-x": {} } } as never, groups)
     expect(models["gemini-x"]?.windows ?? {}).toEqual({})
   })
 
   test("a present remainingFraction still publishes its window (control)", () => {
-    const parsed = parseBucket(
-      { window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never,
-    )
+    const parsed = parseBucket({ window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never)
     expect(parsed?.window.usedPercent).toBe(50)
     expect(parsed?.window.remainingPercent).toBe(50)
   })
@@ -2422,10 +2483,7 @@ describe("antigravity quota transformModels fallback figure check (#1912)", () =
 
   test("a reset-only quotaInfo publishes no entry — no label is derived from a reset alone", () => {
     expect(
-      transformModels(
-        { models: { "gemini-x": { quotaInfo: { resetTime: "2027-01-01T00:00:00Z" } } } } as never,
-        [],
-      ),
+      transformModels({ models: { "gemini-x": { quotaInfo: { resetTime: "2027-01-01T00:00:00Z" } } } } as never, []),
     ).toEqual({})
   })
 
@@ -2499,18 +2557,18 @@ describe("antigravity quota float percents (#1941)", () => {
       [0.504, 49.6],
     ]
     for (const [fraction, used] of cases) {
-      const parsed = parseBucket(
-        { window: "5h", remainingFraction: fraction, resetTime: "2026-12-01T00:00:00Z" } as never,
-      )
+      const parsed = parseBucket({
+        window: "5h",
+        remainingFraction: fraction,
+        resetTime: "2026-12-01T00:00:00Z",
+      } as never)
       expect(parsed?.window.usedPercent).toBeCloseTo(used, 10)
       expect(parsed?.window.remainingPercent).toBeCloseTo(100 - used, 10)
       // The raw fraction retention (weekly-constrained ordering) is unchanged.
       expect(parsed?.remainingFraction).toBe(fraction)
     }
     // Round-fraction control stays exact.
-    const control = parseBucket(
-      { window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never,
-    )
+    const control = parseBucket({ window: "5h", remainingFraction: 0.5, resetTime: "2026-12-01T00:00:00Z" } as never)
     expect(control?.window.usedPercent).toBe(50)
     expect(control?.window.remainingPercent).toBe(50)
   })
@@ -2872,7 +2930,6 @@ describe("getAuthEntry reads own properties only (#2189)", () => {
   })
 })
 
-
 describe("opencode-go instance fold (popesdrew labelled row)", () => {
   // The popesdrew account's credential is a Console sign-in stored under its
   // OWN instance integration (opencode-go.popesdrew), not under the shared
@@ -2975,5 +3032,282 @@ describe("opencode-go instance fold (popesdrew labelled row)", () => {
     const listing = await listConfiguredQuotaProviders(goCtx())
     expect(listing).toContain("opencode-go.popesdrew")
     expect(listing).toContain("opencode-go.developing-today-0")
+  })
+})
+
+describe("exaone quota leg — no-quota-surface validity probe (R33)", () => {
+  // ORACLE: the EXAONE API Platform publishes no usage/quota figure
+  // an API key can read (docs.exaone.ai names no free-tier quota or
+  // rate limit), so the leg follows groq's #6125 disposition: the
+  // models-list read is a key-validity probe, a valid key publishes
+  // the explicit no-quota-surface class (never an invented figure),
+  // and the enrolled key's expiry rides as credentialExpiresAt.
+  const ctxWith = (fetchImpl: typeof fetch, key?: string) => ({
+    credentials: [
+      {
+        id: "row-1",
+        integrationID: "exaone",
+        active: true,
+        value: key === undefined ? { type: "key" } : { type: "key", key },
+      },
+    ],
+    disabledProviders: new Set<string>(),
+    instances: new Map(),
+    providerConfig: {},
+    fetchImpl,
+    env: {},
+  })
+  const okFetch = (async () =>
+    new Response(JSON.stringify({ object: "list", data: [{ id: "k-exaone_v2.5" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch
+
+  test("no credential is the not-configured contract", async () => {
+    const result = await exaoneProvider.fetchQuota({
+      credentials: [],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      fetchImpl: okFetch,
+      env: {},
+    })
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(false)
+    expect(result.error).toBe("Not configured")
+    expect(
+      exaoneProvider.isConfigured({
+        credentials: [],
+        disabledProviders: new Set(),
+        instances: new Map(),
+        providerConfig: {},
+      }),
+    ).toBe(false)
+  })
+
+  test("a valid key publishes no-quota-surface with the key expiry, never a window", async () => {
+    const result = await exaoneProvider.fetchQuota(ctxWith(okFetch, "fixture-key"))
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.errorKind).toBe("no-quota-surface")
+    expect(result.failureClass).toBe("no-quota-surface")
+    expect(result.usage).toBeNull()
+    expect(result.credentialExpiresAt).toBe(EXAONE_KEY_EXPIRES_AT)
+    expect(EXAONE_KEY_EXPIRES_AT).toBe("2026-12-16T09:34:42.000Z")
+    expect(result.error).toContain("no usage/quota endpoint")
+  })
+
+  test("a rejected key reads as invalid/expired and still carries the expiry", async () => {
+    const result = await exaoneProvider.fetchQuota(
+      ctxWith((async () => new Response("{}", { status: 401 })) as typeof fetch, "fixture-key"),
+    )
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.errorKind).toBeUndefined()
+    expect(result.error).toContain("Invalid or expired API key")
+    expect(result.error).toContain("2026-12-16")
+    expect(result.credentialExpiresAt).toBe(EXAONE_KEY_EXPIRES_AT)
+  })
+
+  test("a timeout reads as a timeout, not as data", async () => {
+    const result = await exaoneProvider.fetchQuota(
+      ctxWith(
+        (async () => {
+          throw new DOMException("timed out", "TimeoutError")
+        }) as typeof fetch,
+        "fixture-key",
+      ),
+    )
+    expect(result.ok).toBe(false)
+    expect(result.error).toBe("Request timed out")
+  })
+})
+
+describe("google quota leg — per-project no-quota-surface probe (R33)", () => {
+  // ORACLE: AI Studio free-tier limits are published only through
+  // the Cloud console / Cloud Quotas API (OAuth-gated); an API key
+  // reads project liveness only. Each google-free project instance
+  // reports individually under its own id — no combined figure.
+  const drewRow = {
+    id: "row-drew",
+    integrationID: "google.drew",
+    active: true,
+    value: { type: "key", key: "fixture-key" },
+  }
+  const baseCtx = (fetchImpl: typeof fetch) => ({
+    credentials: [drewRow],
+    disabledProviders: new Set<string>(["google"]),
+    instances: new Map([["google.drew", { base: "google", name: "Google AI Studio (Gemini Free - Drew project)" }]]),
+    providerConfig: {},
+    fetchImpl,
+    env: {},
+  })
+  const okFetch = (async () =>
+    new Response(JSON.stringify({ models: [{ name: "models/gemini-3.5-flash" }] }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    })) as typeof fetch
+
+  test("a valid project key publishes no-quota-surface, never a window", async () => {
+    const result = await googleProvider.fetchQuotaForCredential!(baseCtx(okFetch), drewRow)
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.errorKind).toBe("no-quota-surface")
+    expect(result.failureClass).toBe("no-quota-surface")
+    expect(result.usage).toBeNull()
+    expect(result.error).toContain("an API key cannot read them")
+  })
+
+  test("a rejected project key names the project instance", async () => {
+    const result = await googleProvider.fetchQuotaForCredential!(
+      baseCtx((async () => new Response("{}", { status: 403 })) as typeof fetch),
+      drewRow,
+    )
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.error).toContain("Invalid or revoked API key")
+    expect(result.error).toContain("google.drew")
+  })
+
+  test("the base provider has no combined reading of its own", async () => {
+    const result = await googleProvider.fetchQuota(baseCtx(okFetch))
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(false)
+    expect(result.error).toContain("per project")
+  })
+
+  test("isConfigured judges project rows, not unrelated or inactive rows", () => {
+    const base = { disabledProviders: new Set<string>(), instances: new Map(), providerConfig: {} }
+    expect(googleProvider.isConfigured({ ...base, credentials: [drewRow] })).toBe(true)
+    expect(googleProvider.isConfigured({ ...base, credentials: [{ ...drewRow, active: false }] })).toBe(false)
+    expect(
+      googleProvider.isConfigured({
+        ...base,
+        credentials: [{ id: "row-x", integrationID: "groq", active: true, value: { type: "key", key: "fixture-key" } }],
+      }),
+    ).toBe(false)
+    expect(
+      googleProvider.isConfigured({
+        ...base,
+        credentials: [{ id: "row-y", integrationID: "google.muse", active: true, value: { type: "key", key: "  " } }],
+      }),
+    ).toBe(false)
+  })
+
+  test("dispatch labels the instance result with the project id and credential", async () => {
+    const results = await fetchQuotaForProviderInstances(baseCtx(okFetch), "google.drew")
+    expect(results).toHaveLength(1)
+    expect(results[0]?.providerId).toBe("google.drew")
+    expect(results[0]?.credentialId).toBe("row-drew")
+    expect(results[0]?.errorKind).toBe("no-quota-surface")
+  })
+
+  test("an OAuth refresh-token row on a google instance still belongs to antigravity", async () => {
+    // Base "google" is claimed by _antigravity (OAuth rows) and by
+    // google (API-key rows); resolution breaks the tie by row shape.
+    const oauthRow = {
+      id: "row-oauth",
+      integrationID: "google.muse",
+      active: true,
+      value: {
+        type: "oauth",
+        access: "fixture-access",
+        refresh: "fixture-refresh|fixture-project|fixture-managed",
+        expires: 0,
+      },
+    }
+    const ctx = {
+      credentials: [oauthRow],
+      disabledProviders: new Set<string>(["google"]),
+      instances: new Map([["google.muse", { base: "google", name: "Google AI Studio (Gemini Free - Muse project)" }]]),
+      providerConfig: {},
+      fetchImpl: okFetch,
+      env: {},
+    }
+    const results = await fetchQuotaForProviderInstances(ctx, "google.muse")
+    expect(results).toHaveLength(1)
+    expect(results[0]?.providerId).toBe("google.muse")
+    expect(results[0]?.credentialId).toBe("row-oauth")
+    // Antigravity's leg answered (its refresh attempt against the
+    // stubbed endpoint), not the google leg's no-quota-surface.
+    expect(results[0]?.errorKind).toBeUndefined()
+    expect(results[0]?.error ?? "").not.toContain("an API key cannot read them")
+  })
+
+  test("the listing carries the project instance even though bare google is disabled", async () => {
+    const ids = await listConfiguredQuotaProviders(baseCtx(okFetch))
+    expect(ids).toContain("google.drew")
+    expect(ids).not.toContain("google")
+  })
+})
+
+describe("withQuotaLegDeadline", () => {
+  test("resolves with the leg result when it settles in time", async () => {
+    await expect(withQuotaLegDeadline("fast", Promise.resolve(42), 1_000)).resolves.toBe(42)
+  })
+
+  test("rejects with QuotaLegDeadlineError when the leg never settles", async () => {
+    const never = new Promise<number>(() => {})
+    const err = await withQuotaLegDeadline("wedged", never, 25).catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(Error)
+    expect((err as Error).name).toBe("QuotaLegDeadlineError")
+    expect((err as Error).message).toContain("wedged")
+  })
+
+  test("propagates a leg rejection unchanged", async () => {
+    const boom = new Error("boom")
+    const err = await withQuotaLegDeadline("throws", Promise.reject(boom), 1_000).catch((e: unknown) => e)
+    expect(err).toBe(boom)
+  })
+})
+
+describe("fetchAllQuota leg isolation (#2562)", () => {
+  // ORACLE: issue #2562, from the 2026-11-16 incident — one wedged
+  // provider leg froze every quota read. A leg that never settles
+  // must land as that provider's leg-timeout error row, the run
+  // must resolve, and every other provider's results must be
+  // present and unaffected. The leg deadline is injected short
+  // via fetchAllQuota's deadlineMs option so the suite never
+  // waits out the 60s production default.
+  const legCtx = (fetchImpl: unknown) =>
+    ({
+      credentials: [
+        { id: "row-deepseek", integrationID: "deepseek", active: true, value: { type: "key", key: "sk-fixture" } },
+        { id: "row-groq", integrationID: "groq", active: true, value: { type: "key", key: "sk-fixture" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: { TURSO_API_TOKEN: "fixture-token" },
+      homeDir: "/nonexistent-quota-leg-isolation",
+      fetchImpl,
+    }) as never
+
+  test("a never-settling leg becomes a leg-timeout row and the run completes", async () => {
+    const fetchImpl = async (url: unknown) => {
+      // The wedged leg: the DeepSeek read never settles (the
+      // locked-keyring shape — a stub that ignores the provider's
+      // own abort signal, like a parked Secret Service read).
+      if (String(url).includes("api.deepseek.com")) return new Promise<Response>(() => {})
+      return new Response("{}", { status: 401, headers: { "content-type": "application/json" } })
+    }
+    const started = Date.now()
+    const groups = await fetchAllQuota(legCtx(fetchImpl), { deadlineMs: 50 })
+    expect(Date.now() - started).toBeLessThan(10_000)
+
+    const deepseek = groups.filter((group) => group.providerId === "deepseek")
+    expect(deepseek).toHaveLength(1)
+    expect(deepseek[0]?.results).toHaveLength(1)
+    expect(deepseek[0]?.results[0]?.ok).toBe(false)
+    expect(deepseek[0]?.results[0]?.failureClass).toBe("leg-timeout")
+    expect(deepseek[0]?.results[0]?.error).toContain("leg deadline")
+
+    // The healthy provider is present and carries its own
+    // (internal) result — not a leg-isolation row.
+    const groq = groups.filter((group) => group.providerId === "groq")
+    expect(groq).toHaveLength(1)
+    expect(groq[0]?.results[0]?.ok).toBe(false)
+    expect(["leg-timeout", "leg-error"]).not.toContain(groq[0]?.results[0]?.failureClass)
+    expect(groq[0]?.results[0]?.error).toContain("Invalid or revoked API key")
   })
 })

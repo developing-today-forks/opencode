@@ -5,6 +5,7 @@ import { Event } from "@opencode/schema/event"
 import { Deferred, Effect, PubSub, Queue, Ref, Stream } from "effect"
 import { ConfigEntryObserver } from "../../src/config/plugin/entry-observer"
 import { it } from "../lib/effect"
+import { host } from "../plugin/host"
 
 describe("ConfigEntryObserver", () => {
   it.effect("closes the startup race and reloads later updates", () =>
@@ -17,16 +18,18 @@ describe("ConfigEntryObserver", () => {
         reload: () => Effect.void,
         changes: () => Stream.empty,
       })
-      const event = {
-        subscribe: () =>
-          Stream.unwrap(Ref.set(current, [document("raced")]).pipe(Effect.as(Stream.fromPubSub(updates)))),
-      }
+      const event = host({
+        event: {
+          subscribe: () =>
+            Stream.unwrap(Ref.set(current, [document("raced")]).pipe(Effect.as(Stream.fromPubSub(updates)))),
+        },
+      }).event
 
       const loaded = yield* ConfigEntryObserver.observe(
         config,
         event,
-        ["shell"],
         Deferred.succeed(reloaded, undefined).pipe(Effect.asVoid),
+        ["shell"],
       )
 
       expect(Config.latest(loaded.entries, "shell")).toBe("raced")
@@ -49,15 +52,15 @@ describe("ConfigEntryObserver", () => {
         reload: () => Effect.void,
         changes: () => Stream.empty,
       })
-      const event = { subscribe: () => Stream.fromPubSub(updates) }
+      const event = { subscribe: () => Stream.fromPubSub(updates) } as never
       const loaded = yield* ConfigEntryObserver.observe(
         config,
         event,
-        ["shell"],
         Ref.get(current).pipe(
           Effect.flatMap((entries) => Queue.offer(reloads, Config.latest(entries, "shell") ?? "")),
           Effect.asVoid,
         ),
+        ["shell"],
       )
 
       yield* Ref.set(current, [document("first", "plan")])
@@ -84,9 +87,9 @@ describe("ConfigEntryObserver", () => {
       })
       yield* ConfigEntryObserver.observe(
         config,
-        { subscribe: () => Stream.fromPubSub(updates) },
-        ["shell"],
+        { subscribe: () => Stream.fromPubSub(updates) } as never,
         Deferred.succeed(reloaded, undefined).pipe(Effect.asVoid),
+        ["shell"],
       )
 
       yield* PubSub.publish(updates, updated(["*"]))

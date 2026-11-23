@@ -248,6 +248,32 @@ describe("pool matching keys", () => {
     expect(result.diagnostics).toEqual(["pool p names opencode-route/nope, which is not a pool"])
   })
 
+  test("matching keys that select no models are reported, even when targets keep the pool alive", () => {
+    const routes = pools({
+      "dead-include": { include: ["*no-such-model*"] },
+      "dead-match": { match: "*no-such-model* and not *luna*" },
+      emptied: { include: ["*luna*"], exclude: ["*luna*"] },
+      "targets-plus-dead-key": { targets: ["openai/luna-6"], include: ["*no-such-model*"] },
+      alive: { include: ["*luna*"] },
+    })
+    expect(expand("dead-include", routes, catalog).diagnostics).toEqual([
+      "pool dead-include's matching keys select no models, so they add nothing",
+    ])
+    expect(expand("dead-include", routes, catalog).leaves).toEqual([])
+    expect(expand("dead-match", routes, catalog).diagnostics).toEqual([
+      "pool dead-match's matching keys select no models, so they add nothing",
+    ])
+    expect(expand("emptied", routes, catalog).diagnostics).toEqual([
+      "pool emptied's matching keys select no models, so they add nothing",
+    ])
+    const kept = expand("targets-plus-dead-key", routes, catalog)
+    expect(refs("targets-plus-dead-key", routes)).toEqual(["openai/luna-6"])
+    expect(kept.diagnostics).toEqual([
+      "pool targets-plus-dead-key's matching keys select no models, so they add nothing",
+    ])
+    expect(expand("alive", routes, catalog).diagnostics).toEqual([])
+  })
+
   test("a nested pool pinned to a variant brings only the matched models that have it, at that variant", () => {
     const routes = pools({ outer: { targets: ["opencode-route/lunas#xhigh"] }, lunas: { include: ["openai/luna-*"] } })
     expect(refs("outer", routes)).toEqual([

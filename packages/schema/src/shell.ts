@@ -68,6 +68,9 @@ export const CreateInput = Schema.Struct({
 })
 export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
 
+// Paging bounds live in the service (@opencode/core Shell, #2486): a page `limit` is
+// clamped to MAX_OUTPUT_PAGE_BYTES (1 MiB) so one request cannot allocate the whole
+// capture, and the capture itself is capped at MAX_OUTPUT_BYTES (10 MiB) per command.
 export const OutputInput = Schema.Struct({
   cursor: optional(NonNegativeInt),
   limit: optional(NonNegativeInt),
@@ -80,6 +83,8 @@ export const Output = Schema.Struct({
   cursor: NonNegativeInt,
   // Total bytes captured so far. A consumer has more to page while `cursor < size`.
   size: NonNegativeInt,
+  // True when the capture hit the total cap (MAX_OUTPUT_BYTES) and later output was
+  // discarded: `size` is then the cap, not the command's full output length.
   truncated: Schema.Boolean,
 })
 export interface Output extends Schema.Schema.Type<typeof Output> {}

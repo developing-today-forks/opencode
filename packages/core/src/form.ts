@@ -188,13 +188,19 @@ export const layer = Layer.effect(
           // visible message and the ask resolves with that terminal state, instead of
           // pending forever (a pending form's cache entry never expires). The cancel
           // settles the shared deferred, so the race returns that same state either way.
+          // The cancel is owner-only (#2445): a joined ask does not own the form, so
+          // its timeout never cancels the original asker's pending question. Instead
+          // the joiner resolves locally at its own deadline with the same
+          // cancelled-with-message outcome an owner's timeout produces (#2619): the
+          // shared form stays pending for the owner and other joiners, and a later
+          // reply still answers them.
+          const message = options?.timeoutMessage ?? "Form timed out without being answered"
           const timedOut = Effect.sleep(timeout).pipe(
             Effect.andThen(
-              cancel(form.id, {
-                message: options?.timeoutMessage ?? "Form timed out without being answered",
-              }).pipe(Effect.ignore),
+              existing
+                ? Effect.succeed<TerminalState>({ status: "cancelled", message })
+                : cancel(form.id, { message }).pipe(Effect.ignore, Effect.andThen(Deferred.await(entry.deferred))),
             ),
-            Effect.andThen(Deferred.await(entry.deferred)),
           )
           return yield* restore(awaited.pipe(Effect.race(timedOut)))
         }),
@@ -333,8 +339,7 @@ export function validateFields(fields: ReadonlyArray<Form.Field>) {
         return `Form field has minLength greater than maxLength: ${field.key}`
       // A required string needs at least one character: with maxLength 0 the
       // empty answer is missing-required and any non-empty answer is too long.
-      if (field.required && field.maxLength === 0)
-        return `Form field has maxLength 0 but is required: ${field.key}`
+      if (field.required && field.maxLength === 0) return `Form field has maxLength 0 but is required: ${field.key}`
       // A required string with a closed empty options list has no valid
       // answer: the empty answer is missing-required and any other value is
       // not one of the (zero) declared options.
@@ -371,8 +376,7 @@ export function validateFields(fields: ReadonlyArray<Form.Field>) {
         return `Form field has minItems greater than its number of options: ${field.key}`
       // A required multiselect needs at least one selection: with maxItems 0
       // the empty answer is missing-required and any selection is too many.
-      if (field.required && field.maxItems === 0)
-        return `Form field has maxItems 0 but is required: ${field.key}`
+      if (field.required && field.maxItems === 0) return `Form field has maxItems 0 but is required: ${field.key}`
       // A required closed multiselect with no options has no valid answer:
       // the empty answer is missing-required and any selection is not one of
       // the (zero) declared options.
@@ -440,8 +444,7 @@ function validateWhen(when: Form.When, target: Form.Field) {
     return "Form field condition value must be an email"
   if (target.format === "uri" && !URL.canParse(when.value)) return "Form field condition value must be a URI"
   if (target.format === "date" && !isDate(when.value)) return "Form field condition value must be a date"
-  if (target.format === "date-time" && !isDateTime(when.value))
-    return "Form field condition value must be a date-time"
+  if (target.format === "date-time" && !isDateTime(when.value)) return "Form field condition value must be a date-time"
 }
 
 function validateField(field: InputField, value: Form.Value): string | undefined {
@@ -507,7 +510,18 @@ function isDate(value: string) {
 }
 
 const MONTH_NUMBERS: Readonly<Record<string, number>> = {
-  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+  jan: 1,
+  feb: 2,
+  mar: 3,
+  apr: 4,
+  may: 5,
+  jun: 6,
+  jul: 7,
+  aug: 8,
+  sep: 9,
+  oct: 10,
+  nov: 11,
+  dec: 12,
 }
 
 /** Calendar components of a non-ISO date whose parts are named or ordered unambiguously
@@ -518,8 +532,7 @@ function namedDateParts(text: string): readonly [number, number, number] | undef
   if (ymd) return [Number(ymd[1]), Number(ymd[2]), Number(ymd[3])]
   const monthFirst =
     /(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})(?!\d)/i.exec(text)
-  if (monthFirst)
-    return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
+  if (monthFirst) return [Number(monthFirst[3]), MONTH_NUMBERS[monthFirst[1].toLowerCase()], Number(monthFirst[2])]
   const dayFirst =
     /(\d{1,2})(?:st|nd|rd|th)?\s+(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+(\d{4})(?!\d)/i.exec(text)
   if (dayFirst) return [Number(dayFirst[3]), MONTH_NUMBERS[dayFirst[2].toLowerCase()], Number(dayFirst[1])]
@@ -539,8 +552,7 @@ function isDateTime(value: string) {
     const [year, month, day] = parts
     const probe = new Date(0)
     probe.setUTCFullYear(year, month - 1, day)
-    if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day)
-      return false
+    if (probe.getUTCFullYear() !== year || probe.getUTCMonth() !== month - 1 || probe.getUTCDate() !== day) return false
   }
   // V8 rolls hour 24 into the next day instead of returning NaN (minutes/seconds 60+ are
   // Invalid), so a time part must not carry hour > 23 (RFC 3339 time-hour is 00-23).

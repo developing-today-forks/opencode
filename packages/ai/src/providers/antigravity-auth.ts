@@ -14,13 +14,14 @@ import { Auth, MissingCredentialError } from "../route/auth.js"
 
 const OAUTH_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 /**
- * The agy CLI's wire User-Agent, captured from the fleet's installed CLI
- * (~/.gemini/bin/agy 1.5.0) on 2026-11-06. The grammar (version and
- * changelist) is the CLI's own; keep this value aligned with that wire
- * identity without inspecting the installed executable.
+ * The agy CLI's wire User-Agent, MITM-captured from the latest upstream
+ * CLI (agy 1.5.9, scratch self-update) on 2026-11-16. The grammar (version
+ * and changelist) is the CLI's own; this stamp tracks the LATEST upstream
+ * wire identity (Drew 2026-11-16: the fork emulates the binary, it does
+ * not run it), not the version installed on the laptop.
  */
 export const FALLBACK_UA =
-  "antigravity/cli/1.5.0 (aidev_client; os_type=linux; arch=amd64; cl=1013440158; auth_method=consumer)"
+  "antigravity/cli/1.5.9 (aidev_client; os_type=linux; arch=amd64; cl=1021519450; auth_method=consumer)"
 
 /**
  * Deadline + size cap for the token-refresh exchange (#1469). The token
@@ -117,7 +118,8 @@ const readBoundedTokenResponse = (response: HttpClientResponse.HttpClientRespons
     const parsedSize = contentLength ? Number.parseInt(contentLength, 10) : undefined
     const declaredSize =
       parsedSize !== undefined && Number.isSafeInteger(parsedSize) && parsedSize >= 0 ? parsedSize : undefined
-    if (declaredSize !== undefined && declaredSize > TOKEN_REFRESH_MAX_RESPONSE_BYTES) return yield* Effect.fail(tooLarge())
+    if (declaredSize !== undefined && declaredSize > TOKEN_REFRESH_MAX_RESPONSE_BYTES)
+      return yield* Effect.fail(tooLarge())
 
     let body = Buffer.allocUnsafe(Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, declaredSize || 64 * 1024))
     let size = 0
@@ -125,7 +127,9 @@ const readBoundedTokenResponse = (response: HttpClientResponse.HttpClientRespons
       if (chunk.byteLength === 0) return Effect.void
       if (size + chunk.byteLength > TOKEN_REFRESH_MAX_RESPONSE_BYTES) return Effect.fail(tooLarge())
       if (size + chunk.byteLength > body.byteLength) {
-        const grown = Buffer.allocUnsafe(Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, Math.max(size + chunk.byteLength, body.byteLength * 2)))
+        const grown = Buffer.allocUnsafe(
+          Math.min(TOKEN_REFRESH_MAX_RESPONSE_BYTES, Math.max(size + chunk.byteLength, body.byteLength * 2)),
+        )
         body.copy(grown, 0, 0, size)
         body = grown
       }

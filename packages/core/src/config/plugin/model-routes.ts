@@ -25,6 +25,7 @@ import { ModelRouteLog } from "../../model-route-log.js"
 import { RouteAdjustTool } from "../../tool/plugin/route-adjust.js"
 import { RouteStatsTool } from "../../tool/plugin/route-stats.js"
 import { RouteUsageTool } from "../../tool/plugin/route-usage.js"
+import { ownValue } from "../../util/record.js"
 
 type SourceModel = {
   readonly ref: Model.Ref
@@ -41,6 +42,9 @@ type SourceModel = {
    * reached this leaf, including a nested-route reference's own limit. Undefined when no target on the
    * path declares one; the model's own limit applies on top of what is stored here. */
   readonly contextLimit?: number
+  /** The pools from the one being built down to the one that placed this leaf, a pool the leaf was
+   * matched from by name last. Decides the leaf's first-output wait under nestedTimeout own. */
+  readonly path?: readonly string[]
 }
 
 /** What the pools a pool is nested in hand down to its members. */
@@ -77,8 +81,8 @@ export const Plugin = define({
     const loaded = yield* ConfigEntryObserver.observe(
       config,
       ctx.event,
-      ["experimental"],
       ctx.provider.reload().pipe(Effect.andThen(ctx.tool.reload())),
+      ["experimental"],
     )
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)
@@ -160,7 +164,7 @@ export const Plugin = define({
         if (later.has(id)) return undefined
         const { leaves: expanded, nodes } = expand(id, routes, definitions, windows, providerRoutes)
         if (expanded.length === 0) return undefined
-        return routeModel(id, route, expanded, nodes, globalSchedules, ctx.location.directory)
+        return routeModel(id, route, routes, expanded, nodes, globalSchedules, ctx.location.directory)
       }).filter((model): model is Model.Info => model !== undefined)
       reportedByProviders = report(diagnostics, reportedByProviders)
 
@@ -331,12 +335,54 @@ export const Plugin = define({
         } = expand(id, routes, definitions, (providerID, modelID) => editor.get(providerID, modelID))
         found.forEach((message) => diagnostics.add(message))
         if (leaves.length === 0) return editor.remove(ModelRoute.PROVIDER_ID, id)
-        const info = routeModel(id, route, leaves, nodes, globalSchedules)
+        const info = routeModel(id, route, routes, leaves, nodes, globalSchedules)
         editor.update(ModelRoute.PROVIDER_ID, id, (model) => {
           Object.assign(model, info)
         })
+        // This build runs after the provider plugin's model transform, and the
+        // Object.assign above writes the whole route model over any configured
+        // overrides that transform did apply (#239): replay the configured
+        // opencode-route overrides here, exactly as for a route created in the
+        // retarget transform above, so disabled/name/limit hold for pools
+        // built in this transform too.
+        const routeProviderItems = configuredRouteProviderItems(loaded.entries)
+        const routeProviderBaseURL = routeProviderItems.some((item) => item.settings?.baseURL !== undefined)
+        for (const item of routeProviderItems) {
+          const config = item.models?.[id]
+          if (!config) continue
+          applyModelConfig(
+            editor,
+            item,
+            {
+              providerID: String(ModelRoute.PROVIDER_ID),
+              baseURL: routeProviderBaseURL,
+              models: new Map([[id, { inherit: false }]]),
+            },
+            String(ModelRoute.PROVIDER_ID),
+            id,
+            config,
+          )
+        }
       })
       reportedByModels = report(diagnostics, reportedByModels)
+    })
+
+    // The transforms above add pools in three passes, so a pool built late (matching or effort keys, or
+    // targets only a model transform creates) would land after the others. Pickers list pools in catalog
+    // order and users order them in config, so restore the config order last.
+    yield* ctx.model.transform((editor) => {
+      const current = editor.ids(ModelRoute.PROVIDER_ID).map(String)
+      const configured = [...configuredRoutes(loaded.entries).keys()].filter((id) => current.includes(id))
+      const wanted = [...configured, ...current.filter((id) => !configured.includes(id))]
+      if (wanted.every((id, index) => id === current[index])) return
+      // Each pool is taken out and put back in order: the model map keeps insertion order.
+      const models = wanted.flatMap((id) => editor.get(ModelRoute.PROVIDER_ID, Model.ID.make(id)) ?? [])
+      models.forEach((model) => editor.remove(ModelRoute.PROVIDER_ID, model.id))
+      models.forEach((model) =>
+        editor.update(ModelRoute.PROVIDER_ID, model.id, (draft) => {
+          Object.assign(draft, model)
+        }),
+      )
     })
   }),
 })
@@ -348,6 +394,7 @@ export const Plugin = define({
 function routeModel(
   id: string,
   route: ConfigModelRoutes.Route,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
   expanded: readonly SourceModel[],
   nodes: ModelRoute.Node[],
   globalSchedules: readonly ModelRoute.WeightRule[],
@@ -361,7 +408,11 @@ function routeModel(
   const leafCeiling = (target: (typeof expanded)[number]) =>
     Math.min(target.model.limit.context, target.contextLimit ?? Number.POSITIVE_INFINITY)
   const leafContext = Math.min(...expanded.map(leafCeiling))
-  const health = ModelRoute.policy(route.health, directory)
+  const health = ModelRoute.policy(
+    { ...route.health, firstTokenTimeoutMs: firstTokenTimeout(id, routes, route) },
+    directory,
+  )
+  const targetFirstTokenTimeouts = targetWaits(route, routes, expanded)
   const targetCacheFormats = expanded.map((target) => (target.cacheFormat ? { cacheFormat: target.cacheFormat } : {}))
   return Model.Info.make({
     ...Model.Info.default(direct?.providerID ?? ModelRoute.PROVIDER_ID, Model.ID.make(id)),
@@ -370,6 +421,7 @@ function routeModel(
       [ModelRoute.SETTING]: {
         id: Model.ID.make(direct?.routeID ?? id),
         ...(route.system ? { system: route.system } : {}),
+        ...(route.class ? { class: route.class } : {}),
         targets: expanded.map((target) => target.ref),
         targetVariants: expanded.map((target) => ({
           ...(target.defaultVariant ? { default: target.defaultVariant } : {}),
@@ -395,6 +447,7 @@ function routeModel(
             }
           : {}),
         ...(globalSchedules.length > 0 ? { schedules: globalSchedules } : {}),
+        ...(targetFirstTokenTimeouts ? { targetFirstTokenTimeouts } : {}),
       },
     },
     capabilities: {
@@ -465,6 +518,94 @@ function builtWithModels(routes: ReadonlyMap<string, ConfigModelRoutes.Route>) {
   return new Set([...routes.keys()].filter((id) => uses(id, new Set())))
 }
 
+type Wait = number | false
+
+/** How long a pool waits for a model's first output, for the models it does not hand to a nested pool:
+ * its own health.firstTokenTimeoutMs, kept under nestedTimeout own; for a pool that nests others, the
+ * longest of their waits (nestedTimeout longest, also when the pool names no wait) or the shortest;
+ * otherwise DEFAULT_FIRST_TOKEN_TIMEOUT_MS. `false` waits without a limit and counts as the longest.
+ * A pool met again on its own way in contributes the default, so the result never depends on a cycle. */
+export function firstTokenTimeout(
+  id: string,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  route = routes.get(id),
+  trail: ReadonlySet<string> = new Set(),
+): Wait {
+  if (!route || trail.has(id)) return ModelRoute.DEFAULT_FIRST_TOKEN_TIMEOUT_MS
+  const own = route.health?.firstTokenTimeoutMs
+  if (route.nestedTimeout === "own") return own ?? ModelRoute.DEFAULT_FIRST_TOKEN_TIMEOUT_MS
+  if (own !== undefined && route.nestedTimeout === undefined) return own
+  const nested = nestedPools(id, route, routes)
+  if (nested.length === 0) return own ?? ModelRoute.DEFAULT_FIRST_TOKEN_TIMEOUT_MS
+  const next = new Set(trail).add(id)
+  const waits = nested.flatMap((pool) => waitsOf(pool, routes, next))
+  const rank = (wait: Wait) => (wait === false ? Number.POSITIVE_INFINITY : wait)
+  const shortest = route.nestedTimeout === "shortest"
+  return waits.reduce((best, wait) => ((shortest ? rank(wait) < rank(best) : rank(wait) > rank(best)) ? wait : best))
+}
+
+/** Every wait a pool applies to the models it reaches: one, or under nestedTimeout own its own and each
+ * nested pool's, so a pool around it can wait as long as the slowest of them. */
+function waitsOf(id: string, routes: ReadonlyMap<string, ConfigModelRoutes.Route>, trail: ReadonlySet<string>): Wait[] {
+  const route = routes.get(id)
+  const wait = firstTokenTimeout(id, routes, route, trail)
+  if (!route || route.nestedTimeout !== "own" || trail.has(id)) return [wait]
+  const next = new Set(trail).add(id)
+  return [wait, ...nestedPools(id, route, routes).flatMap((pool) => waitsOf(pool, routes, next))]
+}
+
+/** The pools a pool nests: its opencode-route/<id> targets and the pools it names in include or in a
+ * match term that is not negated. A pool it only excludes adds nothing, so it does not count. */
+function nestedPools(id: string, route: ConfigModelRoutes.Route, routes: ReadonlyMap<string, ConfigModelRoutes.Route>) {
+  const targets = (route.targets ?? []).flatMap((target) => {
+    const ref = targetRef(targetSpec(target).model)
+    return ref.providerID === ModelRoute.PROVIDER_ID
+      ? [ModelRouteMatch.poolsNamed(routes.keys(), ref.id)[0] ?? String(ref.id)]
+      : []
+  })
+  return [...new Set([...targets, ...namedPools(route, routes)])].filter((pool) => pool !== id && routes.has(pool))
+}
+
+/** The pools a pool takes models from by name, as the matching keys read a term that names a pool. */
+function namedPools(route: ConfigModelRoutes.Route, routes: ReadonlyMap<string, ConfigModelRoutes.Route>) {
+  const named = (text: string) =>
+    ModelRouteMatch.poolsNamed(routes.keys(), text)[0] ??
+    (text.toLowerCase().startsWith(POOL_PREFIX)
+      ? ModelRouteMatch.poolsNamed(routes.keys(), text.slice(POOL_PREFIX.length))[0]
+      : undefined)
+  const parsed = route.match === undefined ? undefined : ModelRouteMatch.parse(route.match)
+  const terms = parsed !== undefined && Result.isSuccess(parsed) ? positiveTerms(parsed.success) : []
+  return [...new Set([...(route.include ?? []), ...terms].flatMap((text) => named(text) ?? []))]
+}
+
+const positiveTerms = (expression: ModelRouteMatch.Expression, negated = false): string[] => {
+  if (expression.type === "term") return negated ? [] : [expression.text]
+  if (expression.type === "not") return positiveTerms(expression.operand, !negated)
+  return [...positiveTerms(expression.left, negated), ...positiveTerms(expression.right, negated)]
+}
+
+/** Parallel to a pool's leaves under nestedTimeout own: the wait of the nested pool each leaf was reached
+ * through (the outermost below this pool, or deeper while that one is own too), or an empty object for the
+ * pool's own leaves. Undefined when the pool applies one wait to every leaf. */
+function targetWaits(
+  route: ConfigModelRoutes.Route,
+  routes: ReadonlyMap<string, ConfigModelRoutes.Route>,
+  leaves: readonly SourceModel[],
+) {
+  if (route.nestedTimeout !== "own") return undefined
+  const decides = (pools: readonly string[]): string | undefined => {
+    const [head, ...rest] = pools
+    if (head === undefined) return undefined
+    return routes.get(head)?.nestedTimeout === "own" && rest.length > 0 ? decides(rest) : head
+  }
+  const waits = leaves.map((leaf) => {
+    // Provider routes on the path are groups, not pools with a wait of their own.
+    const pool = decides((leaf.path ?? []).slice(1).filter((poolID) => routes.has(poolID)))
+    return pool === undefined ? {} : { firstTokenTimeoutMs: firstTokenTimeout(pool, routes) }
+  })
+  return waits.some((wait) => wait.firstTokenTimeoutMs !== undefined) ? waits : undefined
+}
+
 /** Direct-addressing models for configured provider routes (`<route>/<model>`, #1720).
  * Expansion only consumes a provider route when a model route seats it, so a session
  * addressing the route provider directly finds no catalog entry and dies as
@@ -507,7 +648,7 @@ export function buildProviderRouteModels(
       // the miss branch can diagnose no-eligible-member instead of serving a dead entry.
       if (expanded.length === 0) continue
       models.push(
-        routeModel(modelID, synthRoute, expanded, nodes, globalSchedules, directory, {
+        routeModel(modelID, synthRoute, routes, expanded, nodes, globalSchedules, directory, {
           providerID: Provider.ID.make(routeID),
           routeID: synthID,
         }),
@@ -536,9 +677,7 @@ function isDirectRouteProvider(
   routeIDs: Iterable<string>,
   record: { readonly provider: { readonly id: Provider.ID }; readonly models: ReadonlyMap<string, Model.Info> },
 ) {
-  return (
-    new Set(routeIDs).has(record.provider.id) && Array.from(record.models.values()).some(ModelRoute.definition)
-  )
+  return new Set(routeIDs).has(record.provider.id) && Array.from(record.models.values()).some(ModelRoute.definition)
 }
 
 function configuredTuning(entries: readonly Entry[]) {
@@ -610,9 +749,7 @@ function configuredSettings(entries: readonly Entry[]) {
 /** The machinery settings in the core's shape: only the fields config actually set, group by
  * group — a decoded settings block carries every unset field as undefined, and passing those
  * through would erase the defaults they sit over. */
-function settingsConfig(
-  settings: ConfigModelRoutes.Settings | undefined,
-): ModelRoute.SettingsConfig | undefined {
+function settingsConfig(settings: ConfigModelRoutes.Settings | undefined): ModelRoute.SettingsConfig | undefined {
   if (!settings) return undefined
   const group = <T extends object>(value: T | undefined): Partial<T> | undefined => {
     if (!value) return undefined
@@ -1055,13 +1192,12 @@ function expandCollected(
       node.children.push(child)
       // A nested pool's weight key names a pool, so it matches in any case.
       const weight =
-        current.weights?.[key] ??
+        (current.weights ? ownValue(current.weights, key) : undefined) ??
         (child.node === undefined
           ? undefined
           : Object.entries(current.weights ?? {}).find(
               ([name]) =>
-                name.toLowerCase() === key.toLowerCase() ||
-                name.toLowerCase().endsWith(`/${key.toLowerCase()}`),
+                name.toLowerCase() === key.toLowerCase() || name.toLowerCase().endsWith(`/${key.toLowerCase()}`),
             )?.[1])
       node.weights.push(ModelRouteAutonomy.usesRules(current.autonomy) ? (weight ?? 1) : 1)
     }
@@ -1112,7 +1248,14 @@ function expandCollected(
         const off = Object.entries(spec.variants ?? {}).flatMap(([level, to]) => (to === false ? [level] : []))
         const leaveOut = (at: Pin) => {
           const brought = expandCollected(
-            poolID, routes, definitions, windows, providerRoutes, candidate, nextTrail, shared,
+            poolID,
+            routes,
+            definitions,
+            windows,
+            providerRoutes,
+            candidate,
+            nextTrail,
+            shared,
             ref.variant === undefined
               ? []
               : [{ level: ref.variant, rules: [], leftOut: { targets: new Set(), models: new Set() } }],
@@ -1262,134 +1405,137 @@ function expandCollected(
           : [[ref.providerID, definitions.get(ref.providerID)]]
       for (const [door, doorModels] of doors) {
         for (const [id, defined] of ModelRouteExpansion.matchingModels(ref.id, doorModels)) {
-        const cand = { providerID: door, id: Model.ID.make(id) }
-        const requested = ref.variant ?? pin?.level ?? inheritedVariant
-        const named = `${door}/${id}${ref.variant ? `#${ref.variant}` : ""}`
-        if (pin?.leftOut.targets.has(named)) continue
-        const seenKey = `${door}/${id}${requested ? `#${requested}` : ""}`
-        if (seen.has(seenKey)) {
-          const prior = leafByKey.get(seenKey)
-          if (prior !== undefined) {
+          const cand = { providerID: door, id: Model.ID.make(id) }
+          const requested = ref.variant ?? pin?.level ?? inheritedVariant
+          const named = `${door}/${id}${ref.variant ? `#${ref.variant}` : ""}`
+          if (pin?.leftOut.targets.has(named)) continue
+          const seenKey = `${door}/${id}${requested ? `#${requested}` : ""}`
+          if (seen.has(seenKey)) {
+            const prior = leafByKey.get(seenKey)
+            if (prior !== undefined) {
+              if (
+                ceiling !== undefined &&
+                (result[prior].contextLimit === undefined || ceiling < result[prior].contextLimit)
+              )
+                result[prior] = { ...result[prior], contextLimit: ceiling }
+              // The leaf itself is shared, but when the same parent names the pool again
+              // this node still references it, so a pool referenced twice by one parent
+              // keeps both group nodes over the same leaf indexes.
+              if (reattach && !attached.has(seenKey)) {
+                attached.add(seenKey)
+                const gate = gateFor(
+                  "window" in spec ? spec.window : undefined,
+                  windows,
+                  `route ${JSON.stringify(routeID)}`,
+                )
+                attach({ leaf: prior, ...(gate ? { gate } : {}) }, `${door}/${id}`)
+              }
+            }
+            continue
+          }
+          const model = candidate(door, Model.ID.make(id)) ?? defined
+          if (!model.enabled || excluded(cand)) continue
+          if (pin !== undefined && sitsOutPin(cand, model, spec.variants ?? {})) {
+            pin.leftOut.targets.add(named)
+            pin.leftOut.models.add(`${door}/${id}`)
+            continue
+          }
+          // A pinned variant is producible natively or through the target's remap table, matching
+          // routeVariants and the resolver: a remap the model can produce wins, else the native
+          // variant, else the leaf is pruned. A variant the door's catalog exposes as a
+          // suffixed model id ("<model>-<variant>") also counts as producible: proxy
+          // catalogs enumerate effort levels that way (Antigravity's gemini-4-argon-high,
+          // claude-sonnet-5-5-high), and their definition-stage model info carries no
+          // variant list, so the native check alone silently pruned every pinned leaf
+          // on those providers (#985).
+          const producible = (candidate: string) =>
+            model.variants.some((item) => item.id === candidate) || (doorModels?.has(`${id}-${candidate}`) ?? false)
+          const remapped = requested ? spec.variants?.[requested] : undefined
+          const variant =
+            requested === undefined
+              ? undefined
+              : remapped !== undefined && remapped !== false && producible(remapped)
+                ? Model.VariantID.make(remapped)
+                : producible(requested)
+                  ? requested
+                  : undefined
+          if (requested && !variant) continue
+          const resolved = Model.Ref.make({
+            providerID: door,
+            id: Model.ID.make(id),
+            ...(variant ? { variant } : {}),
+          })
+          const key = `${resolved.providerID}/${resolved.id}${resolved.variant ? `#${resolved.variant}` : ""}`
+          if (attached.has(key)) {
+            // Already attached to this node, but a duplicate target can still tighten the leaf's
+            // ceiling: ceilings only ever tighten, whichever reach declares the smaller one.
+            const existing = leafByKey.get(key)
+            if (
+              existing !== undefined &&
+              ceiling !== undefined &&
+              (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
+            )
+              result[existing] = { ...result[existing], contextLimit: ceiling }
+            continue
+          }
+          attached.add(key)
+          const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
+          const leafKey = `${resolved.providerID}/${resolved.id}`
+          const existing = leafByKey.get(key)
+          if (existing !== undefined) {
+            // First reach wins for the leaf itself; a different node re-attaches it by index.
+            attach({ leaf: existing, ...(gate ? { gate } : {}) }, leafKey)
+            // Ceilings only ever tighten: a leaf reached through several references keeps the smallest
+            // per-target ceiling, so a cap cannot be bypassed through another path.
             if (
               ceiling !== undefined &&
-              (result[prior].contextLimit === undefined || ceiling < result[prior].contextLimit)
+              (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
             )
-              result[prior] = { ...result[prior], contextLimit: ceiling }
-            // The leaf itself is shared, but when the same parent names the pool again
-            // this node still references it, so a pool referenced twice by one parent
-            // keeps both group nodes over the same leaf indexes.
-            if (reattach && !attached.has(seenKey)) {
-              attached.add(seenKey)
-              const gate = gateFor(
-                "window" in spec ? spec.window : undefined,
-                windows,
-                `route ${JSON.stringify(routeID)}`,
-              )
-              attach({ leaf: prior, ...(gate ? { gate } : {}) }, `${door}/${id}`)
-            }
+              result[existing] = { ...result[existing], contextLimit: ceiling }
+            continue
           }
-          continue
-        }
-        const model = candidate(door, Model.ID.make(id)) ?? defined
-        if (!model.enabled || excluded(cand)) continue
-        if (pin !== undefined && sitsOutPin(cand, model, spec.variants ?? {})) {
-          pin.leftOut.targets.add(named)
-          pin.leftOut.models.add(`${door}/${id}`)
-          continue
-        }
-        // A pinned variant is producible natively or through the target's remap table, matching
-        // routeVariants and the resolver: a remap the model can produce wins, else the native
-        // variant, else the leaf is pruned. A variant the door's catalog exposes as a
-        // suffixed model id ("<model>-<variant>") also counts as producible: proxy
-        // catalogs enumerate effort levels that way (Antigravity's gemini-4-argon-high,
-        // claude-sonnet-5-5-high), and their definition-stage model info carries no
-        // variant list, so the native check alone silently pruned every pinned leaf
-        // on those providers (#985).
-        const producible = (candidate: string) =>
-          model.variants.some((item) => item.id === candidate) || (doorModels?.has(`${id}-${candidate}`) ?? false)
-        const remapped = requested ? spec.variants?.[requested] : undefined
-        const variant =
-          requested === undefined
-            ? undefined
-            : remapped !== undefined && remapped !== false && producible(remapped)
-              ? Model.VariantID.make(remapped)
-              : producible(requested)
-                ? requested
-                : undefined
-        if (requested && !variant) continue
-        const resolved = Model.Ref.make({
-          providerID: door,
-          id: Model.ID.make(id),
-          ...(variant ? { variant } : {}),
-        })
-        const key = `${resolved.providerID}/${resolved.id}${resolved.variant ? `#${resolved.variant}` : ""}`
-        if (attached.has(key)) {
-          // Already attached to this node, but a duplicate target can still tighten the leaf's
-          // ceiling: ceilings only ever tighten, whichever reach declares the smaller one.
-          const existing = leafByKey.get(key)
-          if (
-            existing !== undefined &&
-            ceiling !== undefined &&
-            (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
+          const defaultVariant =
+            spec.defaultVariant && model.variants.some((item) => item.id === spec.defaultVariant)
+              ? Model.VariantID.make(spec.defaultVariant)
+              : undefined
+          const variantMap = levelMap({ providerID: door, id: Model.ID.make(id) }, model, spec.variants ?? {})
+          seen.add(key)
+          seen.add(seenKey)
+          placed.add(leafKey)
+          leafByKey.set(key, result.length)
+          attach({ leaf: result.length, ...(gate ? { gate } : {}) }, leafKey)
+          // A leaf's own cache_format wins, then the route that declared it, then an enclosing
+          // route's. The first route to reach a shared model fixes it for that leaf.
+          const cacheFormat = spec.cache_format ?? current.cache_format ?? inheritedCacheFormat
+          // Budgets belong to the target: the outermost route that declares one wins, wherever the
+          // target was first reached.
+          const budget = plainBudget(
+            [...nextTrail]
+              .filter((id) => ModelRouteAutonomy.usesRules(routes.get(id)?.autonomy))
+              .map((id) => routes.get(id)?.budgets?.[leafKey])
+              .find((value) => value !== undefined),
           )
-            result[existing] = { ...result[existing], contextLimit: ceiling }
-          continue
-        }
-        attached.add(key)
-        const gate = gateFor("window" in spec ? spec.window : undefined, windows, `route ${JSON.stringify(routeID)}`)
-        const leafKey = `${resolved.providerID}/${resolved.id}`
-        const existing = leafByKey.get(key)
-        if (existing !== undefined) {
-          // First reach wins for the leaf itself; a different node re-attaches it by index.
-          attach({ leaf: existing, ...(gate ? { gate } : {}) }, leafKey)
-          // Ceilings only ever tighten: a leaf reached through several references keeps the smallest
-          // per-target ceiling, so a cap cannot be bypassed through another path.
-          if (
-            ceiling !== undefined &&
-            (result[existing].contextLimit === undefined || ceiling < result[existing].contextLimit)
-          )
-            result[existing] = { ...result[existing], contextLimit: ceiling }
-          continue
-        }
-        const defaultVariant =
-          spec.defaultVariant && model.variants.some((item) => item.id === spec.defaultVariant)
-            ? Model.VariantID.make(spec.defaultVariant)
-            : undefined
-        const variantMap = levelMap({ providerID: door, id: Model.ID.make(id) }, model, spec.variants ?? {})
-        seen.add(key)
-        seen.add(seenKey)
-        placed.add(leafKey)
-        leafByKey.set(key, result.length)
-        attach({ leaf: result.length, ...(gate ? { gate } : {}) }, leafKey)
-        // A leaf's own cache_format wins, then the route that declared it, then an enclosing
-        // route's. The first route to reach a shared model fixes it for that leaf.
-        const cacheFormat = spec.cache_format ?? current.cache_format ?? inheritedCacheFormat
-        // Budgets belong to the target: the outermost route that declares one wins, wherever the
-        // target was first reached.
-        const budget = plainBudget(
-          [...nextTrail]
-            .filter((id) => ModelRouteAutonomy.usesRules(routes.get(id)?.autonomy))
-            .map((id) => routes.get(id)?.budgets?.[leafKey])
-            .find((value) => value !== undefined),
-        )
-        result.push({
-          ...(budget ? { budget } : {}),
-          ref: resolved,
-          model,
-          fixedVariant: ref.variant !== undefined || inheritedVariant !== undefined,
-          ...(defaultVariant ? { defaultVariant } : {}),
-          ...(Object.keys(variantMap).length ? { variantMap } : {}),
-          ...(cacheFormat ? { cacheFormat } : {}),
-          ...(ceiling !== undefined ? { contextLimit: ceiling } : {}),
-        })
+          result.push({
+            ...(budget ? { budget } : {}),
+            ref: resolved,
+            model,
+            fixedVariant: ref.variant !== undefined || inheritedVariant !== undefined,
+            ...(defaultVariant ? { defaultVariant } : {}),
+            ...(Object.keys(variantMap).length ? { variantMap } : {}),
+            ...(cacheFormat ? { cacheFormat } : {}),
+            ...(ceiling !== undefined ? { contextLimit: ceiling } : {}),
+            path: [...nextTrail],
+          })
         }
       }
     }
     if (compiled.success.selects) {
+      // Pools this pool names in include or match: a model they hand in waits as long as they do.
+      const viaPools = namedPools(current, routes)
+      let matched = 0
       for (const entry of shared.models()) {
         const key = `${entry.providerID}/${entry.id}`
-        if (placed.has(key) || pin?.leftOut.models.has(key) || !compiled.success.selects(entry) || excluded(entry))
-          continue
+        if (pin?.leftOut.models.has(key) || !compiled.success.selects(entry) || excluded(entry)) continue
         const model = candidate(entry.providerID, entry.id)
         if (!model?.enabled) continue
         if (pin !== undefined && sitsOutPin(entry, model)) {
@@ -1404,8 +1550,9 @@ function expandCollected(
         const viaPinRules =
           pin !== undefined ? effort(model, [...applying(pins.at(-1)?.rules ?? [], entry)])[pin.level] : undefined
         const mapped = viaPinRules !== undefined ? viaPinRules : pin !== undefined ? levelMapped[pin.level] : undefined
-        if (pin !== undefined && mapped === undefined && !model.variants.some((item) => item.id === pin.level))
-          continue
+        if (pin !== undefined && mapped === undefined && !model.variants.some((item) => item.id === pin.level)) continue
+        matched++
+        if (placed.has(key)) continue
         const variantMap =
           pin !== undefined && viaPinRules !== undefined && viaPinRules !== false
             ? { ...levelMapped, [pin.level]: viaPinRules }
@@ -1422,6 +1569,7 @@ function expandCollected(
         leafByKey.set(seenKey, result.length)
         attach({ leaf: result.length }, key)
         const cacheFormat = current.cache_format ?? inheritedCacheFormat
+        const viaPool = viaPools.find((poolID) => shared.members.get(poolID)?.has(key))
         result.push({
           ...(budget ? { budget } : {}),
           ref: Model.Ref.make({
@@ -1433,8 +1581,10 @@ function expandCollected(
           fixedVariant: pin !== undefined,
           ...(Object.keys(variantMap).length ? { variantMap } : {}),
           ...(cacheFormat ? { cacheFormat } : {}),
+          path: viaPool === undefined ? [...nextTrail] : [...nextTrail, viaPool],
         })
       }
+      if (matched === 0) diagnostics.push(`pool ${routeID}'s matching keys select no models, so they add nothing`)
     }
     const declared = current.levels
     if (declared !== undefined && routeID !== id && pin === undefined)
@@ -1502,7 +1652,16 @@ export function expand(
         [...models.keys()].map((modelID) => ({ providerID, id: Model.ID.make(modelID) })),
       )),
   }
-  const collected = expandCollected(id, routes, definitions, windows, providerRoutes, shared.candidate, trailArg, shared)
+  const collected = expandCollected(
+    id,
+    routes,
+    definitions,
+    windows,
+    providerRoutes,
+    shared.candidate,
+    trailArg,
+    shared,
+  )
   const levels = routes.get(id)?.levels
   const asked = [
     ...new Set([
@@ -1515,7 +1674,12 @@ export function expand(
   ]
   const opened = collected.leaves.map((leaf, index) => {
     const allowedLevels = collected.allowed.get(index)
-    return allowedLevels === undefined ? leaf : sitOut(leaf, asked.filter((level) => !allowedLevels.has(level)))
+    return allowedLevels === undefined
+      ? leaf
+      : sitOut(
+          leaf,
+          asked.filter((level) => !allowedLevels.has(level)),
+        )
   })
   if (levels === undefined || opened.length === 0)
     return { leaves: opened, nodes: collected.nodes, diagnostics: collected.diagnostics }
@@ -1527,9 +1691,7 @@ export function expand(
       ...collected.diagnostics,
       ...[...new Set(levels)]
         .filter((level) => !leaves.some((leaf) => runs(leaf, level)))
-        .map(
-          (level) => `pool ${id} declares level ${level}, but none of its models can run it, so it is not offered`,
-        ),
+        .map((level) => `pool ${id} declares level ${level}, but none of its models can run it, so it is not offered`),
     ],
   }
 }
@@ -1645,7 +1807,7 @@ export function createRouteModel(
     providerRoutes,
   )
   if (leaves.length === 0) return undefined
-  return routeModel(id, route, leaves, nodes, globalSchedules, directory)
+  return routeModel(id, route, routes, leaves, nodes, globalSchedules, directory)
 }
 
 /** Re-expands one route's stored definition against the models that exist after model
@@ -1710,7 +1872,14 @@ export function retargetDefinition(
           context: Math.min(leaf.model.limit.context, leaf.contextLimit ?? Number.POSITIVE_INFINITY),
         }))
       : undefined
-  const { targetCacheFormats: _stored, targetLimits: _storedLimits, ...rest } = current
+  const route = routes.get(String(current.id))
+  const targetFirstTokenTimeouts = route ? targetWaits(route, routes, leaves) : undefined
+  const {
+    targetCacheFormats: _stored,
+    targetLimits: _storedLimits,
+    targetFirstTokenTimeouts: _storedWaits,
+    ...rest
+  } = current
   const next: ModelRoute.Definition = {
     ...rest,
     targets,
@@ -1719,6 +1888,7 @@ export function retargetDefinition(
     ...(targetLimits === undefined ? {} : { targetLimits }),
     nodes,
     ...(targetCacheFormats.some((item) => item.cacheFormat !== undefined) ? { targetCacheFormats } : {}),
+    ...(targetFirstTokenTimeouts ? { targetFirstTokenTimeouts } : {}),
   }
   return { definition: next, variants }
 }

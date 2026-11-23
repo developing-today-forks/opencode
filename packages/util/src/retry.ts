@@ -15,6 +15,7 @@ const transientMessages = [
   "econnrefused",
   // Bun names a refused connection ConnectionRefused rather than ECONNREFUSED.
   "connectionrefused",
+  "epipe",
   "etimedout",
   "socket hang up",
 ]

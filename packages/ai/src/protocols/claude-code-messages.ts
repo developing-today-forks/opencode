@@ -23,7 +23,7 @@
 //     every other provider keeps the full env block;
 //   * the CLI's client headers (`x-app: cli`, `claude-cli/<version>`
 //     User-Agent; version tracks the release this emulation was verified
-//     against - Claude Code 2.1.306, the fleet's installed CLI). The
+//     against - Claude Code 2.1.325, the latest upstream CLI release (wire-verified 2026-11-16; stamps track latest upstream, not the laptop install — Drew 2026-11-16)). The
 //     route's static User-Agent below is only the default: session
 //     requests carry the harness's own UA in `request.http.headers`,
 //     which the transport merges over route headers, so
@@ -42,7 +42,7 @@ import { Route } from "../route/client.js"
 import { Auth } from "../route/auth.js"
 import { Endpoint } from "../route/endpoint.js"
 import { Protocol } from "../route/protocol.js"
-import { LLMRequest, SystemPart } from "../schema/index.js"
+import { type LLMRequest, SystemPart } from "../schema/index.js"
 import { AnthropicMessages } from "./anthropic-messages.js"
 
 const ADAPTER = "claude-code-messages"
@@ -54,7 +54,7 @@ export const IDENTITY_SYSTEM_TEXT = "You are Claude Code, Anthropic's official C
 export const OAUTH_BETA_HEADER = "claude-code-20250219,oauth-2025-04-20"
 
 /** The CLI's User-Agent grammar: `claude-cli/<version> (external, cli)`. Version = the verified CLI release. */
-export const CLI_USER_AGENT = "claude-cli/2.1.306 (external, cli)"
+export const CLI_USER_AGENT = "claude-cli/2.1.325 (external, cli)"
 
 export type OptionsInput = AnthropicMessages.OptionsInput
 export type ProviderOptionsInput = AnthropicMessages.ProviderOptionsInput
@@ -93,11 +93,8 @@ const fromRequest = Effect.fn("ClaudeCodeMessages.fromRequest")(function* (reque
   // The identity block must be the first system block; a caller that
   // already leads with it (a façade replaying a captured Claude Code
   // request) is not double-stamped.
-  const system =
-    shaped[0]?.text === IDENTITY_SYSTEM_TEXT
-      ? shaped
-      : [SystemPart.make(IDENTITY_SYSTEM_TEXT), ...shaped]
-  return yield* AnthropicMessages.protocol.body.from(LLMRequest.update(request, { system }))
+  const system = shaped[0]?.text === IDENTITY_SYSTEM_TEXT ? shaped : [SystemPart.make(IDENTITY_SYSTEM_TEXT), ...shaped]
+  return yield* AnthropicMessages.protocol.body.from({ ...request, system })
 })
 
 export const protocol = Protocol.make({

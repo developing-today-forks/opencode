@@ -1,10 +1,11 @@
 export * as ModalModels from "./models.js"
 
 import { Money } from "@opencode/schema/money"
-import { Option, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
+import { HttpClient, HttpClientRequest } from "effect/http"
 import { Model } from "../model.js"
 import { Provider } from "../provider.js"
-import { readBoundedResponseText } from "../tool/http-body.js"
+import { collectBoundedResponseBody } from "../tool/http-body.js"
 
 const providerID = Provider.ID.make("modal")
 
@@ -43,13 +44,12 @@ const RemoteModel = Schema.Struct({
 })
 
 const Response = Schema.Struct({ data: Schema.Array(Schema.Unknown) })
-const decodeResponse = Schema.decodeUnknownSync(Response)
 const decodeModel = Schema.decodeUnknownOption(RemoteModel)
 
 type RemoteModel = typeof RemoteModel.Type
 
-export async function get(baseURL: string, apiKey: string, existing: readonly Model.Info[]) {
-  return derive(baseURL, await load(baseURL, apiKey), existing)
+export function get(http: HttpClient.HttpClient, baseURL: string, apiKey: string, existing: readonly Model.Info[]) {
+  return load(http, baseURL, apiKey).pipe(Effect.map((remote) => derive(baseURL, remote, existing)))
 }
 
 export type Snapshot = readonly RemoteModel[]
@@ -61,28 +61,32 @@ export type Snapshot = readonly RemoteModel[]
 // in #1007).
 export const modelsMaxResponseBytes = 4 * 1024 * 1024
 
-export async function load(baseURL: string, apiKey: string): Promise<Snapshot> {
+export const load = Effect.fn("ModalModels.load")(function* (
+  http: HttpClient.HttpClient,
+  baseURL: string,
+  apiKey: string,
+) {
   const url = `${baseURL.replace(/\/+$/, "")}/models`
-  const response = await fetch(url, {
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
-    signal: AbortSignal.timeout(3_000),
-  })
-  if (!response.ok) throw new Error(`Failed to fetch Modal models: ${response.status}`)
-
-  const text = await readBoundedResponseText(
-    response,
-    modelsMaxResponseBytes,
-    () => new Error(`Modal models response from ${url} exceeded ${modelsMaxResponseBytes} bytes`),
-  )
+  const response = yield* HttpClient.filterStatusOk(http)
+    .execute(HttpClientRequest.get(url).pipe(HttpClientRequest.bearerToken(apiKey)))
+    .pipe(
+      Effect.flatMap((response) =>
+        collectBoundedResponseBody(
+          response,
+          modelsMaxResponseBytes,
+          () => new Error(`Modal models response from ${url} exceeded ${modelsMaxResponseBytes} bytes`),
+        ),
+      ),
+      Effect.flatMap((body) => Schema.decodeUnknownEffect(Schema.fromJsonString(Response))(new TextDecoder().decode(body))),
+      Effect.timeout("3 seconds"),
+    )
   // Decode each item tolerantly so one malformed entry cannot discard the
   // whole inventory. A malformed envelope still fails the fetch.
-  return decodeResponse(JSON.parse(text)).data.flatMap((raw) => {
+  return response.data.flatMap((raw) => {
     const model = Option.getOrUndefined(decodeModel(raw))
     return model ? [model] : []
   })
-}
+})
 
 /** Combine remote facts with source templates, never a previously transformed model result. */
 export function derive(baseURL: string, remote: Snapshot, existing: readonly Model.Info[]) {

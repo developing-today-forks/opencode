@@ -640,15 +640,47 @@ const readLocal = (file: string) =>
       }),
   })
 
-const readBytes = (file: string) =>
+/**
+ * Reads a file for upload, enforcing the size limit during the read itself. The `readLocal` size is only a
+ * pre-check: the file can grow or be replaced before this runs, so the opened handle is re-checked and the read
+ * stops as soon as the total passes `max`. The bytes read must also match the authorized size exactly, so what
+ * gets uploaded is always what was approved.
+ */
+const readBytes = (file: string, max: number, authorized: number) =>
   Effect.tryPromise({
-    try: () => fs.readFile(file),
+    try: async () => {
+      const handle = await fs.open(file, "r")
+      try {
+        const stat = await handle.stat()
+        if (!stat.isFile()) throw new globalThis.Error(`${file} is not a file`)
+        if (stat.size > max)
+          throw new globalThis.Error(`${file} grew to ${stat.size} bytes, over the ${max}-byte upload limit`)
+        const chunks: Buffer[] = []
+        let total = 0
+        const scratch = Buffer.allocUnsafe(64 * 1024)
+        for (;;) {
+          const { bytesRead } = await handle.read(scratch, 0, scratch.byteLength, null)
+          if (bytesRead === 0) break
+          total += bytesRead
+          if (total > max)
+            throw new globalThis.Error(`${file} grew past the ${max}-byte upload limit while being read`)
+          chunks.push(Buffer.from(scratch.subarray(0, bytesRead)))
+        }
+        if (total !== authorized)
+          throw new globalThis.Error(
+            `${file} changed while being read: ${authorized} bytes were authorized but ${total} bytes were read`,
+          )
+        return new Uint8Array(Buffer.concat(chunks, total))
+      } finally {
+        await handle.close()
+      }
+    },
     catch: (error) =>
       new GitHubClient.Error({
         kind: "validation",
         message: `Cannot read ${file}: ${error instanceof globalThis.Error ? error.message : String(error)}`,
       }),
-  }).pipe(Effect.map((buffer) => new Uint8Array(buffer)))
+  })
 
 // ---------------------------------------------------------------------------------------------------------------
 // api
@@ -1452,7 +1484,7 @@ export function tools(deps: Deps): Tool.Info[] {
         if (size === 0) return yield* new GitHubClient.Error({ kind: "validation", message: `${name} is empty.` })
         yield* GitHubShared.authorize(deps, context, "upload", resolved.repo, { path: file, bytes: size })
         const info = yield* api.json<{ id: number }>("GET", `/repos/${GitHubRepo.slug(resolved.repo)}`)
-        const bytes = yield* readBytes(file)
+        const bytes = yield* readBytes(file, max, size)
         const params = new URLSearchParams({ name, content_type: media.type, repository_id: String(info.id) })
         const result = yield* api
           .upload({
@@ -1483,7 +1515,7 @@ export function tools(deps: Deps): Tool.Info[] {
             message: "GitHub accepted the upload but returned no URL.",
           })
         const alt = (input.alt ?? name).replace(/[[\]]/g, "")
-        return { url, markdown: media.video ? url : `![${alt}](${url})`, name, bytes: size, content_type: media.type }
+        return { url, markdown: media.video ? url : `![${alt}](${url})`, name, bytes: bytes.byteLength, content_type: media.type }
       }),
   })
 

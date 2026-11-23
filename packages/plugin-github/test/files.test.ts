@@ -1,4 +1,6 @@
 import { describe, expect } from "bun:test"
+import fs from "node:fs"
+import os from "node:os"
 import path from "node:path"
 import { Agent } from "@opencode/schema/agent"
 import { Location } from "@opencode/schema/location"
@@ -101,4 +103,96 @@ describe("GitHubProcess.run", () => {
       expect(missing.stderr).toContain("opencode-no-such-program")
     }),
   )
+})
+
+describe("GitHubFiles canonical classification", () => {
+  const makeAt = (directory: string, projectDirectory: string) => {
+    const asserted: Array<{ action: string; resources: ReadonlyArray<string> }> = []
+    const files = GitHubFiles.make({
+      location: new Location.Info({
+        directory: AbsolutePath.make(directory),
+        project: {
+          id: Project.ID.global,
+          directory: AbsolutePath.make(projectDirectory),
+          canonical: AbsolutePath.make(projectDirectory),
+        },
+      }),
+      permission: {
+        assert: (input) => Effect.sync(() => void asserted.push({ action: input.action, resources: input.resources })),
+      },
+    })
+    return { files, asserted }
+  }
+
+  // Real fixture tree under a canonicalized temp root: <base>/project/app is
+  // the working directory, <base>/outside holds what the symlinks name.
+  const fixture = () => {
+    const base = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "github-files-")))
+    const app = path.join(base, "project", "app")
+    const outside = path.join(base, "outside")
+    fs.mkdirSync(app, { recursive: true })
+    fs.mkdirSync(outside)
+    return { base, app, project: path.join(base, "project"), outside }
+  }
+  const cleanup = (base: string) => Effect.sync(() => fs.rmSync(base, { recursive: true, force: true }))
+
+  it.live(
+    "an in-project symlink to an outside file needs external-directory approval for the canonical directory",
+    () => {
+      const { base, app, project, outside } = fixture()
+      return Effect.gen(function* () {
+        const secret = path.join(outside, "secret.txt")
+        fs.writeFileSync(secret, "secret\n")
+        fs.symlinkSync(secret, path.join(app, "link.txt"))
+        const { files, asserted } = makeAt(app, project)
+        const target = yield* files.authorizeRead("link.txt", context)
+        expect(target).toEqual({
+          absolute: secret,
+          resource: secret.replaceAll("\\", "/"),
+          external: outside,
+        })
+        expect(asserted).toEqual([
+          { action: "external_directory", resources: [`${outside.replaceAll("\\", "/")}/*`] },
+          { action: "read", resources: [secret.replaceAll("\\", "/")] },
+        ])
+      }).pipe(Effect.ensuring(cleanup(base)))
+    },
+  )
+
+  it.live("an in-project symlink to an in-project file stays internal", () => {
+    const { base, app, project } = fixture()
+    return Effect.gen(function* () {
+      const real = path.join(app, "real.txt")
+      fs.writeFileSync(real, "real\n")
+      fs.symlinkSync(real, path.join(app, "alias.txt"))
+      const { files, asserted } = makeAt(app, project)
+      const target = yield* files.authorizeRead("alias.txt", context)
+      expect(target).toEqual({ absolute: real, resource: "alias.txt" })
+      expect(asserted).toEqual([{ action: "read", resources: ["alias.txt"] }])
+    }).pipe(Effect.ensuring(cleanup(base)))
+  })
+
+  it.live("authorizeRead returns a not-yet-existing target unchanged", () => {
+    const { base, app, project } = fixture()
+    return Effect.gen(function* () {
+      const { files, asserted } = makeAt(app, project)
+      const target = yield* files.authorizeRead("new.txt", context)
+      expect(target).toEqual({ absolute: path.join(app, "new.txt"), resource: "new.txt" })
+      expect(asserted).toEqual([{ action: "read", resources: ["new.txt"] }])
+    }).pipe(Effect.ensuring(cleanup(base)))
+  })
+
+  it.live("a not-yet-existing file under a symlinked in-project directory is classified by the ancestor", () => {
+    const { base, app, project, outside } = fixture()
+    return Effect.gen(function* () {
+      fs.symlinkSync(outside, path.join(app, "linked-dir"), "dir")
+      const { files } = makeAt(app, project)
+      const target = yield* files.resolve({ path: "linked-dir/new.txt", kind: "file" })
+      expect(target).toEqual({
+        absolute: path.join(outside, "new.txt"),
+        resource: path.join(outside, "new.txt").replaceAll("\\", "/"),
+        external: outside,
+      })
+    }).pipe(Effect.ensuring(cleanup(base)))
+  })
 })

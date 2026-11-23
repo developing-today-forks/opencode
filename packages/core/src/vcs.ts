@@ -5,7 +5,7 @@ import { Cause, Context, Effect, FiberSet, Layer, Schema, Semaphore, Stream } fr
 import type { VcsDefinition, VcsEditor } from "@opencode/plugin/effect/vcs"
 import { FileDiff } from "@opencode/schema/file-diff"
 import { FileSystem } from "@opencode/schema/filesystem"
-import { Base, BranchList, FileStatus, Info, Mode } from "@opencode/schema/vcs"
+import { Base, BranchList, FileStatus, Info, Mode, Untracked } from "@opencode/schema/vcs"
 import { VcsEvent } from "@opencode/schema/vcs-event"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
@@ -14,10 +14,11 @@ import { Project } from "./project.js"
 import { Bus } from "./bus.js"
 import { State } from "./state.js"
 import { diffContext, emptyPatch, MAX_TOTAL_PATCH_BYTES } from "./vcs/patch.js"
+import { pageLimit } from "./util/number.js"
 
 export { diffContext }
 
-export { Base, BranchList, FileStatus, Info, Mode }
+export { Base, BranchList, FileStatus, Info, Mode, Untracked }
 
 export class DiffError extends Schema.TaggedError<DiffError>()("Vcs.DiffError", {
   message: Schema.String,
@@ -30,6 +31,7 @@ export class InitializeError extends Schema.TaggedError<InitializeError>()("Vcs.
 export interface DiffOptions {
   readonly context?: number
   readonly base?: string
+  readonly untracked?: Untracked
 }
 
 /**
@@ -53,11 +55,43 @@ export interface BranchOptions {
   readonly limit?: number
 }
 
+export interface StatusOptions {
+  readonly limit?: number
+}
+
+/**
+ * A caller-supplied status limit is normalised before it reaches an adapter:
+ * a missing or non-finite value becomes the default page (200), and zero,
+ * negative or fractional values are clamped to a positive integer capped at
+ * 1000 instead of returning every changed file in the working copy. This
+ * mirrors `statusListLimit` in the plugin wrapper, which the plugin and HTTP
+ * call sites already apply; normalising here covers direct service callers
+ * as well.
+ */
+export function statusLimit(limit?: number): number {
+  return pageLimit(limit, { default: 200, max: 1000 })
+}
+
+/**
+ * The enforced page bound for status results: a provider that returns more
+ * rows than the page keeps only the first page, with the last row marked
+ * `more` so clients can tell further changes exist. Providers that page
+ * internally mark the row themselves; this covers providers that ignore the
+ * limit, so the bound holds for every provider.
+ */
+function boundStatus(rows: FileStatus[], limit: number): FileStatus[] {
+  if (rows.length <= limit) return rows
+  const page = rows.slice(0, limit)
+  const last = page[page.length - 1]
+  if (last) page[page.length - 1] = { ...last, more: true }
+  return page
+}
+
 export interface Adapter {
   readonly info: () => Effect.Effect<Info>
   readonly base?: () => Effect.Effect<Base | null, DiffError>
   readonly branches: (options?: BranchOptions) => Effect.Effect<BranchList>
-  readonly status: () => Effect.Effect<FileStatus[]>
+  readonly status: (options?: StatusOptions) => Effect.Effect<FileStatus[]>
   readonly diff: (mode: Mode, options?: DiffOptions) => Effect.Effect<FileDiff.Info[], DiffError>
 }
 
@@ -231,18 +265,20 @@ const layer = Layer.effect(
           )
         return []
       }),
-      status: Effect.fn("Vcs.status")(function* () {
+      status: Effect.fn("Vcs.status")(function* (options?: StatusOptions) {
         const provider = selected()
-        if (provider)
+        if (provider) {
+          const limit = statusLimit(options?.limit)
           return yield* protect(
             provider,
             "status",
-            provider.status(scope).pipe(
+            provider.status({ ...scope, limit }).pipe(
               Effect.flatMap(decodeStatus),
-              Effect.map((rows) => Array.from(rows)),
+              Effect.map((rows) => boundStatus(Array.from(rows), limit)),
             ),
             [],
           )
+        }
         return []
       }),
       diff: Effect.fn("Vcs.diff")(function* (mode: Mode, options?: DiffOptions) {
@@ -256,6 +292,7 @@ const layer = Layer.effect(
               ...scope,
               mode,
               ...(options?.base !== undefined ? { base: options.base } : {}),
+              ...(options?.untracked !== undefined ? { untracked: options.untracked } : {}),
               context: diffContext(options?.context),
               maxOutputBytes: MAX_TOTAL_PATCH_BYTES,
             })

@@ -154,7 +154,7 @@ describe("claudeCodeAuth — fail-closed credential behavior (#6117)", () => {
     )
 
   test("a live credential becomes the Bearer header (never x-api-key)", async () => {
-    const headers = await apply({ readFile: () => blob("tok-live", Date.now() + 4 * 3_600_000), env: {} })
+    const headers = await apply({ readFile: () => blob("tok-live", Date.now() + RENEWAL_LEAD_MS + 3_600_000), env: {} })
     expect(headers.authorization).toBe("Bearer " + "tok-live")
     expect(headers["x-api-key"]).toBeUndefined()
   })
@@ -217,13 +217,15 @@ describe("claudeCodeAuth - the CLI's User-Agent, re-stamped after the transport 
   // the CLI UA reaches the wire only because auth re-stamps it here.
   const sessionHeaders = () => Headers.fromInput({ "User-Agent": "opencode/prod/test/cli" })
 
-  test("CLI_USER_AGENT is the audited binary's value (claude 2.1.306)", () => {
-    expect(ClaudeCodeMessages.CLI_USER_AGENT).toBe("claude-cli/2.1.306 (external, cli)")
+  test("CLI_USER_AGENT is the audited binary's value (claude 2.1.325)", () => {
+    expect(ClaudeCodeMessages.CLI_USER_AGENT).toBe("claude-cli/2.1.325 (external, cli)")
   })
 
   test("the credentials-file path stamps the CLI UA over the session UA", async () => {
     const headers = await Effect.runPromise(
-      claudeCodeAuth({ sources: { readFile: () => blob("tok-live", Date.now() + 4 * 3_600_000), env: {} } }).apply({
+      claudeCodeAuth({
+        sources: { readFile: () => blob("tok-live", Date.now() + RENEWAL_LEAD_MS + 3_600_000), env: {} },
+      }).apply({
         request: {},
         method: "POST",
         url: "https://api.anthropic.com/v1/messages",
@@ -782,7 +784,12 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
 
   const rotated = () =>
     new Response(
-      JSON.stringify({ access_token: "tok-new", refresh_token: "ref-new", expires_in: 28_800, scope: "user:inference" }),
+      JSON.stringify({
+        access_token: "tok-new",
+        refresh_token: "ref-new",
+        expires_in: 28_800,
+        scope: "user:inference",
+      }),
       { status: 200, headers: { "Content-Type": "application/json" } },
     )
 
@@ -805,9 +812,7 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
 
   test("a 429 with Retry-After is waited out and the renewal then lands", async () => {
     const { sources, store, calls, sleeps } = harness((call) =>
-      call < 3
-        ? new Response("rate limited", { status: 429, headers: { "Retry-After": "7" } })
-        : rotated(),
+      call < 3 ? new Response("rate limited", { status: 429, headers: { "Retry-After": "7" } }) : rotated(),
     )
     const headers = await apply(sources)
     expect(headers.authorization).toBe("Bearer tok-new")
@@ -854,10 +859,9 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
   })
 
   test("a custom wait budget bounds the retries", async () => {
-    const { sources, calls } = harness(
-      () => new Response("rate limited", { status: 429 }),
-      { renewalWaitBudgetMs: 16_000 },
-    )
+    const { sources, calls } = harness(() => new Response("rate limited", { status: 429 }), {
+      renewalWaitBudgetMs: 16_000,
+    })
     const error = await apply(sources).catch((cause: unknown) => cause)
     expect(JSON.stringify(error)).toContain("RateLimit")
     expect(calls).toHaveLength(3)
@@ -1117,6 +1121,45 @@ describe("claudeCodeAuth — renewal adopts another writer's rotation (code#9549
     expect(JSON.parse(store.get(CREDENTIALS_PATH)!).claudeAiOauth.accessToken).toBe("tok-other")
   })
 
+  test("a concurrent load joins an adopting renewal instead of exchanging the adopted token a second time (#2623)", async () => {
+    // The renewal's first exchange is rate-limited; during the wait
+    // another writer rotates the file to a pair that still needs
+    // renewal, so the renewal adopts the new token and exchanges IT.
+    // A load that starts while that exchange is in flight reads the
+    // rotated file and computes its coordination key from the adopted
+    // token: single-flight ownership must be findable under that key,
+    // or the load starts a second exchange of the same single-use
+    // token.
+    let release: ((response: Response) => void) | undefined
+    const gate = new Promise<Response>((resolve) => {
+      release = resolve
+    })
+    const { sources, calls } = harness((call, store) => {
+      if (call === 1) {
+        store.set(CREDENTIALS_PATH, blob("tok-other", "ref-adopted-2623", 1_500))
+        return rateLimited()
+      }
+      return gate
+    })
+    const first = apply(sources)
+    // Let the first load reach its gated second exchange (the one
+    // presenting the adopted token).
+    for (let i = 0; i < 200 && calls.length < 2; i++) await new Promise((r) => setTimeout(r, 5))
+    expect(calls).toHaveLength(2)
+    expect(calls[1]!.body).toContain("ref-adopted-2623")
+    const second = apply(sources)
+    // Give a competing exchange every chance to start; it must not.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(calls).toHaveLength(2)
+    release!(rotated())
+    const [firstHeaders, secondHeaders] = await Promise.all([first, second])
+    // Both loads were served by the single exchange of the adopted
+    // token: identical authorization, and still exactly two calls.
+    expect(firstHeaders.authorization).toContain("Bearer ")
+    expect(secondHeaders.authorization).toBe(firstHeaders.authorization)
+    expect(calls).toHaveLength(2)
+  })
+
   test("a grant rejection for a token another writer already replaced is adopted, not declared a dead login", async () => {
     const { sources, store, calls } = harness((_call, store) => {
       store.set(CREDENTIALS_PATH, blob("tok-other", "ref-other-2", NOW + 8 * 3_600_000))
@@ -1280,7 +1323,9 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
         exchanges += 1
         // 429 through the request's wait AND the first two standing
         // rounds; the endpoint relents on the third.
-        return exchanges <= 3 ? new Response("rate limited", { status: 429 }) : rotated("tok-standing", "ref-standing-b")
+        return exchanges <= 3
+          ? new Response("rate limited", { status: 429 })
+          : rotated("tok-standing", "ref-standing-b")
       },
     }
     // The request itself surfaces the spent wait as RateLimit.
@@ -1422,9 +1467,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
         // The first request's exchange is walled (its tiny budget
         // retires the renewal to the standing retry); the standing
         // round's exchange lands the rotation.
-        return exchanges === 1
-          ? new Response("rate limited", { status: 429 })
-          : rotated("tok-joined-a", "ref-join-b")
+        return exchanges === 1 ? new Response("rate limited", { status: 429 }) : rotated("tok-joined-a", "ref-join-b")
       },
     }
     // The first request spends its budget and surfaces the wait.
@@ -1557,9 +1600,7 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
   })
 
   test("the lifecycle is reconstructible from the default log lines alone", async () => {
-    const store = new Map<string, string>([
-      [CREDENTIALS_PATH, blobWith(NOW - 1_000, "ref-standing-h")],
-    ])
+    const store = new Map<string, string>([[CREDENTIALS_PATH, blobWith(NOW - 1_000, "ref-standing-h")]])
     const logged: Array<string> = []
     const original = { log: console.log, info: console.info, warn: console.warn, error: console.error }
     console.log = (...args: Array<unknown>) => logged.push(args.join(" "))
@@ -1585,7 +1626,9 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
         renewalWaitBudgetMs: 1_000,
         fetchFn: async () => {
           exchanges += 1
-          return exchanges === 1 ? new Response("rate limited", { status: 429 }) : rotated("tok-logged", "ref-standing-i")
+          return exchanges === 1
+            ? new Response("rate limited", { status: 429 })
+            : rotated("tok-logged", "ref-standing-i")
         },
       }
       await apply(sources).catch(() => {})

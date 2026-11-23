@@ -9,6 +9,7 @@ import { Session } from "./session.js"
 export const Info = Schema.Struct({
   ...Pty.Info.fields,
   sessionID: Session.ID,
+  userTitle: Schema.NullOr(Schema.String),
   foregroundProcess: Schema.NullOr(Schema.String),
   size: Schema.Struct({ cols: PositiveInt, rows: PositiveInt }),
   output: Schema.Struct({ head: NonNegativeInt, tail: NonNegativeInt }),
@@ -33,9 +34,23 @@ export const CreateInput = Schema.Struct({
 }).annotate({ identifier: "PersistentPty.CreateInput" })
 export interface CreateInput extends Schema.Schema.Type<typeof CreateInput> {}
 
+/**
+ * Client-supplied attachment identity for a persistent PTY connection.
+ * Server-generated ids are UUIDs; a client may supply its own only in this
+ * bounded token shape (1-128 chars, alphanumeric start, then
+ * alphanumeric / `.` / `_` / `-`) so the value can be echoed in protocol
+ * frames and retained as attachment state without size or charset abuse.
+ * The connect handler rejects anything else with a 400 (#2465).
+ */
+export const AttachmentID = Schema.String.check(Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u)).annotate({
+  identifier: "PersistentPty.AttachmentID",
+})
+export type AttachmentID = typeof AttachmentID.Type
+
 export const UpdateInput = Schema.Struct({
-  attachmentID: optional(Schema.String),
-  size: Schema.Struct({ cols: PositiveInt, rows: PositiveInt }),
+  attachmentID: optional(AttachmentID),
+  size: optional(Schema.Struct({ cols: PositiveInt, rows: PositiveInt })),
+  title: optional(Schema.NullOr(Schema.String)),
 }).annotate({ identifier: "PersistentPty.UpdateInput" })
 export interface UpdateInput extends Schema.Schema.Type<typeof UpdateInput> {}
 
@@ -67,4 +82,5 @@ export interface ReadResult extends Schema.Schema.Type<typeof ReadResult> {}
 
 export const Added = ephemeral({ type: "persistent-pty.added", schema: { sessionID: Session.ID, terminal: Info } })
 export const Removed = ephemeral({ type: "persistent-pty.removed", schema: { sessionID: Session.ID, ptyID: Pty.ID } })
-export const Event = { Added, Removed, Definitions: inventory(Added, Removed) }
+export const Updated = ephemeral({ type: "persistent-pty.updated", schema: { sessionID: Session.ID, terminal: Info } })
+export const Event = { Added, Removed, Updated, Definitions: inventory(Added, Removed, Updated) }

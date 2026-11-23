@@ -4,6 +4,7 @@ import { Model } from "@opencode/schema/model"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Provider } from "@opencode/schema/provider"
+import { DEFAULT_CHUNK_TIMEOUT_MS } from "./provider.js"
 import { Schema } from "effect"
 import { ModelRouteLimits } from "./model-route-limits.js"
 import { ownValue } from "./util/record.js"
@@ -21,6 +22,9 @@ export const SETTING = "opencodeRoute"
 
 const Policy = Schema.Struct({
   firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]),
+  /** How long the last target that can take a request may stay silent once firstTokenTimeoutMs has
+   * passed (see lastTargetTimeout). Optional so a policy written without it keeps decoding. */
+  lastTargetTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
   maxResponseTimeMs: PositiveInt.pipe(optional),
   minOutputTokensPerSecond: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
   sampleWindow: PositiveInt,
@@ -147,6 +151,9 @@ const Definition = Schema.Struct({
   id: Model.ID,
   /** The route's carried system prompt (config `system`, #1413), when one is declared. */
   system: Schema.String.pipe(optional),
+  /** The route's cost/capability class (config `class`), when one is declared. Cross-route
+   * failover substitutes only within a class (#12228); a route without one takes no part. */
+  class: Schema.String.pipe(optional),
   targets: Schema.Array(Model.Ref),
   targetVariants: Schema.Array(TargetVariant),
   /** Parallel to `targets`; the resolved prompt-cache format for each leaf, an empty object when unset. */
@@ -170,6 +177,13 @@ const Definition = Schema.Struct({
   ).pipe(optional),
   /** Weight changes in force across every route, from experimental.routes.schedules. */
   schedules: Schema.Array(WeightRule).pipe(optional),
+  /** Parallel to `targets`, stored only for a route with `nestedTimeout: "own"`: the first-output wait of
+   * the nested route a leaf was reached through, or an empty object for the route's own leaves. */
+  targetFirstTokenTimeouts: Schema.Array(
+    Schema.Struct({
+      firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
+    }),
+  ).pipe(optional),
   nodes: Schema.Array(Node),
 })
 
@@ -197,27 +211,42 @@ export type Node = typeof Node.Type
 export type Policy = typeof Policy.Type
 export type Definition = typeof Definition.Type
 
+/** How long a target may take to produce its first output before the route fails over, when
+ * neither the route nor its nested routes name a wait. Long enough for a model that reasons
+ * before it answers; a nested route's longer wait wins by default (config plugin firstTokenTimeout). */
+export const DEFAULT_FIRST_TOKEN_TIMEOUT_MS = 30_000
+
+/** How long the last target that can take a request may go without output. The first-output wait only
+ * moves a request to another target; with none left, ending the attempt would only turn a slow answer
+ * into an error, so the target gets the silence the transport allows any streaming response. */
+export const DEFAULT_LAST_TARGET_TIMEOUT_MS = DEFAULT_CHUNK_TIMEOUT_MS
+
 const DEFAULT_POLICY: Policy = {
-  firstTokenTimeoutMs: 10_000,
+  firstTokenTimeoutMs: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
   sampleWindow: 5,
   slowThreshold: 3,
   cooldownMs: 60_000,
   quotaCooldownMs: 900_000,
 }
 
-export const policy = (input?: {
-  readonly firstTokenTimeoutMs?: number | false
-  readonly maxResponseTimeMs?: number
-  readonly minOutputTokensPerSecond?: number
-  readonly sampleWindow?: number
-  readonly slowThreshold?: number
-  readonly cooldownMs?: number
-  readonly quotaCooldownMs?: number
-}, location?: string): Policy => {
+export const policy = (
+  input?: {
+    readonly firstTokenTimeoutMs?: number | false
+    readonly lastTargetTimeoutMs?: number | false
+    readonly maxResponseTimeMs?: number
+    readonly minOutputTokensPerSecond?: number
+    readonly sampleWindow?: number
+    readonly slowThreshold?: number
+    readonly cooldownMs?: number
+    readonly quotaCooldownMs?: number
+  },
+  location?: string,
+): Policy => {
   const sampleWindow = Math.min(input?.sampleWindow ?? DEFAULT_POLICY.sampleWindow, 50)
   const ladder = currentConstants(location).bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
+    lastTargetTimeoutMs: input?.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
     ...(input?.maxResponseTimeMs !== undefined ? { maxResponseTimeMs: input.maxResponseTimeMs } : {}),
     ...(input?.minOutputTokensPerSecond !== undefined
@@ -228,6 +257,30 @@ export const policy = (input?: {
     cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, ladder.cooldownCapMs),
     quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, ladder.quotaCooldownCapMs),
   }
+}
+
+/** How long the last target that can take a request may go without output, from the request's start.
+ * Never shorter than the first-output wait itself, so a value at or below it changes nothing. */
+export const lastTargetTimeout = (policy: Policy): number | false => {
+  const last = policy.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS
+  const first = policy.firstTokenTimeoutMs
+  if (last === false || first === false) return false
+  return Math.max(last, first)
+}
+
+/** The policy an attempt on one target runs under: the route's, with the target's own first-output
+ * wait when the route lets nested routes keep theirs (`nestedTimeout: "own"`). */
+export const targetPolicy = (definition: Definition, index: number): Policy => {
+  const wait = definition.targetFirstTokenTimeouts?.[index]?.firstTokenTimeoutMs
+  return wait === undefined ? definition.health : { ...definition.health, firstTokenTimeoutMs: wait }
+}
+
+/** The cost/capability class a route declares, normalized for comparison: class names match
+ * in any case, as route references do throughout route config. Undefined when the route
+ * declares none — such a route neither substitutes nor is substituted into (#12228). */
+export const routeClass = (definition: Definition): string | undefined => {
+  const name = definition.class?.trim().toLowerCase()
+  return name ? name : undefined
 }
 
 /** The route definition a model carries. Route models under the routes provider carry one, and so
@@ -270,7 +323,7 @@ interface HealthState {
   probePending?: boolean
   /** The bench class that converted to probe-pending, kept after benchReason is
    * cleared by the conversion so diagnostics can still name the stop's class
-   * ("auth" or "retry-after"). */
+   * ("auth", "retry-after" or "plan-wall"). */
   probePendingReason?: string
   /** The bench this state carries was planted at window length (at or beyond the long
    * ladder's base, bench.longBenchMs) rather than at grace length. Only meaningful for
@@ -369,7 +422,12 @@ const trafficEntry = (target: Model.Ref, variant?: string) => {
 
 const trafficCredentialEntry = (target: Model.Ref, credentialID: string, variant?: string) => {
   const id = trafficCredentialKey(target, credentialID, variant)
-  const current = trafficCredentialHealth.get(id) ?? { samples: [], outcomes: [], cooldownUntil: 0, consecutiveFailures: 0 }
+  const current = trafficCredentialHealth.get(id) ?? {
+    samples: [],
+    outcomes: [],
+    cooldownUntil: 0,
+    consecutiveFailures: 0,
+  }
   current.variant = variant ?? "default"
   trafficCredentialHealth.delete(id)
   trafficCredentialHealth.set(id, current)
@@ -405,7 +463,8 @@ const scopeStates = (
     // consumer that never attempted the model), and the token names the scope by
     // itself — enumerate the leg's traffic scopes across efforts.
     const prefix = `${key(target)}@`
-    for (const [id, state] of trafficHealth) if (id.startsWith(prefix)) out.push({ state, variant: id.slice(prefix.length) })
+    for (const [id, state] of trafficHealth)
+      if (id.startsWith(prefix)) out.push({ state, variant: id.slice(prefix.length) })
   }
   if (credentialID) {
     const credential = credentialHealth.get(credentialKey(target, credentialID))
@@ -425,7 +484,12 @@ const scopeStates = (
 /** Until when one credential of a target is benched; 0 when it is not. Reading an expired bench
  * clears it, exactly like `cooldownUntil` for targets. A named effort's traffic bench
  * on the credential counts too: the credential is held out at that effort while it stands. */
-export const credentialCooldownUntil = (target: Model.Ref, credentialID: string, now = Date.now(), variant?: string) => {
+export const credentialCooldownUntil = (
+  target: Model.Ref,
+  credentialID: string,
+  now = Date.now(),
+  variant?: string,
+) => {
   const state = credentialHealth.get(credentialKey(target, credentialID))
   if (state) recover(target, state, now, credentialID)
   // An unnamed effort reads as the default effort: attempts that served without
@@ -492,8 +556,7 @@ const retainedOutcomeWindow = () => {
   return window
 }
 
-const pushOutcome = (outcomes: boolean[], answered: boolean) =>
-  [...outcomes, answered].slice(-retainedOutcomeWindow())
+const pushOutcome = (outcomes: boolean[], answered: boolean) => [...outcomes, answered].slice(-retainedOutcomeWindow())
 
 const entry = (target: Model.Ref) => {
   const id = key(target)
@@ -513,6 +576,7 @@ const logHealth = (
     | "rate-limit-window"
     | "quota-gated"
     | "quota-readmitted"
+    | "quota-walled-below-1pct"
     | "bench-probe"
     | "bench-probe-release"
     | "infra-hold"
@@ -534,12 +598,7 @@ const logHealth = (
     },
   })
 
-const recover = (
-  target: Model.Ref,
-  state: HealthState,
-  now: number,
-  credentialID?: string,
-) => {
+const recover = (target: Model.Ref, state: HealthState, now: number, credentialID?: string) => {
   if (state.cooldownUntil === 0 || state.cooldownUntil > now) return
   // An expired auth bench converts to a half-open probe instead of lapsing outright
   // (code#9950): the refusal cannot heal by itself, so before the door is a candidate
@@ -551,9 +610,14 @@ const recover = (
   // leg at once (the Go beam-free doors' midnight pile-up, 2026-11-14). A short
   // retry-after bench keeps the ordinary lapse: its grace was the whole point. The
   // failure count is what separates conversion from a settle: completed() zeroes it
-  // before endBench() lands here, so a probe success never re-converts.
+  // before endBench() lands here, so a probe success never re-converts. A plan-wall
+  // bench converts on the same terms: the wall states no reset to probe at, so its
+  // expiry is the probe moment, and only a served probe — the plan upgraded, the
+  // tier restored — reseats the leaf.
   const authProbe =
-    (state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
+    (state.benchReason === "auth" ||
+      state.benchReason === "plan-wall" ||
+      (state.benchReason === "retry-after" && state.benchLong === true)) &&
     state.consecutiveFailures > 0
   const converting = authProbe ? state.benchReason : undefined
   state.cooldownUntil = 0
@@ -680,6 +744,14 @@ export interface FailureHint {
   /** An authentication refusal (401/403, an org-disabled credential): it cannot heal by itself,
    * so its first bench is the long quota-length one. */
   readonly auth?: boolean
+  /** A permanent plan/tier refusal (code#10128): the provider states the account's plan
+   * does not entitle this model — a tier that has ended, a model outside the plan — so
+   * the refusal is a property of the plan, not of the credential or of one effort's
+   * traffic. The leaf benches at pool scope as a wall: dead to last-resort dealing
+   * while the bench stands, and reopened only by the bench's own half-open probe at
+   * expiry (a served probe is the plan having changed). Deliberately not the quota
+   * class: no window reset bounds it and no balance increase may lift it. */
+  readonly planWall?: boolean
 }
 
 /** Benches one health state (a target's, or one credential's of a target) after a failure.
@@ -705,7 +777,7 @@ const bench = (
   state.outcomes = pushOutcome(state.outcomes, false)
   state.consecutiveFailures += 1
   if (hint?.rateLimit) state.consecutiveRateLimits = (state.consecutiveRateLimits ?? 0) + 1
-  const base = hint?.quota || hint?.auth ? policy.quotaCooldownMs : policy.cooldownMs
+  const base = hint?.quota || hint?.auth || hint?.planWall ? policy.quotaCooldownMs : policy.cooldownMs
   const ladder = currentConstants(location).bench
   const escalated = base * ladder.multiplier ** (state.consecutiveFailures - 1)
   // Drew's failover spec (2026-11-08, #2212): when a leg errors the route moves to the next
@@ -716,7 +788,8 @@ const bench = (
   // ran out of eligible candidates, and sessions died on the last error they saw. Quota and
   // auth keep the long ladder: the provider stated the window, or the refusal cannot heal
   // by itself. A stated retry-after is believed as-is, as before.
-  const graced = hint?.quota || hint?.auth ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
+  const graced =
+    hint?.quota || hint?.auth || hint?.planWall ? escalated : Math.min(escalated, Math.max(base, ladder.failureCapMs))
   // A rate limit with no stated retry-after starts on the ordinary ladder above — one
   // scattered 429 is a transient, and its grace stays short. But a provider that keeps
   // answering 429 has stated a throttle in the only language it used: at
@@ -746,11 +819,13 @@ const bench = (
     ? hint.retryAfterMs
       ? "quota retry-after"
       : "quota"
-    : hint?.retryAfterMs || hint?.rateLimit
-      ? "retry-after"
-      : hint?.auth
-        ? "auth"
-        : "failure"
+    : hint?.planWall
+      ? "plan-wall"
+      : hint?.retryAfterMs || hint?.rateLimit
+        ? "retry-after"
+        : hint?.auth
+          ? "auth"
+          : "failure"
   state.benchReason = reason
   state.benchLong = cooldown >= ladder.longBenchMs
   state.benchQuotaResetAt = hint?.quota ? quotaResetAt : undefined
@@ -829,23 +904,22 @@ const releaseQuotaBenches = (inScope: (id: string) => boolean, now: number) => {
     )
   }
   for (const [id, state] of health) if (inScope(id)) release(id, state)
-  for (const [id, state] of credentialHealth)
-    if (inScope(id)) release(id, state, id.slice(id.lastIndexOf("#") + 1))
+  for (const [id, state] of credentialHealth) if (inScope(id)) release(id, state, id.slice(id.lastIndexOf("#") + 1))
 }
 
 const probeDueState = (state: HealthState | undefined, now: number) =>
   state !== undefined &&
   !probeClaimLive(state, now) &&
-  ((state.cooldownUntil > now &&
-    state.benchQuotaResetAt !== undefined &&
-    state.benchQuotaResetAt <= now) ||
+  ((state.cooldownUntil > now && state.benchQuotaResetAt !== undefined && state.benchQuotaResetAt <= now) ||
     // An auth bench past its cooldown holds as probe-pending (code#9950): its probe is
     // due immediately and stays due until a claim settles it. The raw form — bench
     // still standing in the map, cooldown lapsed, no candidacy read has converted it
     // yet — is due on the same terms recover() converts it by. A long retry-after
     // bench (benchLong) is due on the same terms, for the same reason.
     state.probePending === true ||
-    ((state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
+    ((state.benchReason === "auth" ||
+      state.benchReason === "plan-wall" ||
+      (state.benchReason === "retry-after" && state.benchLong === true)) &&
       state.cooldownUntil > 0 &&
       state.cooldownUntil <= now &&
       state.consecutiveFailures > 0))
@@ -906,7 +980,7 @@ export const claimBenchProbe = (
     const was = state.benchReason
     if (
       state.probePending !== true &&
-      (was === "auth" || (was === "retry-after" && state.benchLong === true))
+      (was === "auth" || was === "plan-wall" || (was === "retry-after" && state.benchLong === true))
     ) {
       // Claiming the raw expired form: materialize the conversion recover() performs on
       // candidacy reads (code#9950), so the claimed state is the canonical probe-pending
@@ -924,7 +998,7 @@ export const claimBenchProbe = (
       target,
       "bench-probe",
       state.probePending
-        ? `probe after ${was === "retry-after" ? "rate-limit" : "auth"} bench${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`
+        ? `probe after ${was === "retry-after" ? "rate-limit" : was === "plan-wall" ? "plan-wall" : "auth"} bench${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`
         : `probe at quota reset${credentialID ? ` credential:${credentialID}` : ""}${scope.variant !== undefined ? ` variant:${scope.variant}` : ""}`,
       state.benchQuotaResetAt,
       credentialID,
@@ -941,12 +1015,15 @@ export const claimBenchProbe = (
  * benches (code#9950), whose cooldown has already lapsed, so candidacy must consult
  * the claim itself. A claim older than PROBE_CLAIM_MAX_AGE_MS no longer counts (#2455):
  * its owner is gone, so the scope reads as not in flight and the probe is due again. */
-export const probeInFlight = (target: Model.Ref, credentialID: string | undefined, now = Date.now(), variant?: string) =>
+export const probeInFlight = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  variant?: string,
+) =>
   probeStates(target, credentialID, variant).some(
     ({ state }) =>
-      state !== undefined &&
-      probeClaimLive(state, now) &&
-      (state.probePending === true || state.cooldownUntil > now),
+      state !== undefined && probeClaimLive(state, now) && (state.probePending === true || state.cooldownUntil > now),
   )
 
 /** Releases a probe claim whose owner resolved the target but never attempted a request on it
@@ -1059,13 +1136,28 @@ export const credentialQuotaCoolingDown = (target: Model.Ref, credentialID: stri
  * effort's bench says nothing about this leg. */
 const longBenched = (state: HealthState | undefined, now: number, location?: string) =>
   state !== undefined &&
-  state.benchReason === "retry-after" &&
+  state.cooldownUntil > now &&
+  !probeDueState(state, now) &&
   // Long is a property of the bench as planted (benchLong), not of the time left
   // on it: a nine-hour bench is still a window bench in its last hour, and it
-  // stays classified dead until it expires into its probe.
-  state.benchLong === true &&
-  state.cooldownUntil > now &&
-  !probeDueState(state, now)
+  // stays classified dead until it expires into its probe. A plan-wall bench is
+  // dead from its first plant, at any length (code#10128): the refusal is
+  // permanent on the current plan, so a last-resort attempt dealt into it can
+  // only fail and re-plant the bench — the cycle that dealt a tier-ended door
+  // ~1,500 attempts in a day while its day-long auth bench stood, because an
+  // auth bench never counted as dead here.
+  ((state.benchReason === "retry-after" && state.benchLong === true) || state.benchReason === "plan-wall")
+
+/** Whether a health state is an auth bench still in force. An entitlement refusal
+ * cannot heal by itself — the leg is dead until a credential or plan change, not
+ * cooling — so while the bench stands the leg is out in the same sense a long
+ * traffic bench is out: never dealt as a last resort (#2555). Re-admission is the
+ * bench's own expiry conversion to a single probe (code#9950), never continuous
+ * dealing during the bench. Any standing auth bench counts, whatever its rung on
+ * the escalation ladder: the ladder's duration is a re-probe schedule, not a
+ * recovery horizon, and the failure it records is a death, not a wait. */
+const authBenchedState = (state: HealthState | undefined, now: number) =>
+  state !== undefined && state.benchReason === "auth" && state.cooldownUntil > now && !probeDueState(state, now)
 
 /** Whether this leg — the target at the named effort, and its named credential at
  * the same effort — is out under a long traffic bench right now: its own traffic
@@ -1094,10 +1186,40 @@ export const longTrafficBenched = (
   return longBenched(credentialTraffic, now, location)
 }
 
+/** Whether this leg — the target at the named effort, and its named credential at
+ * the same effort — is out under an auth bench right now: its own traffic scope,
+ * its credential's traffic scope, or (for benches planted before traffic scopes
+ * existed, which live at target/credential scope) those scopes themselves.
+ * Judged at the leg's own keys only, exactly like longTrafficBenched. */
+export const authBenched = (
+  target: Model.Ref,
+  credentialID: string | undefined,
+  now = Date.now(),
+  location?: string,
+  variant?: string,
+) => {
+  const own = health.get(key(target))
+  if (own) recover(target, own, now)
+  if (authBenchedState(own, now)) return true
+  const traffic = trafficHealth.get(trafficKey(target, variant))
+  if (traffic) recover(target, traffic, now)
+  if (authBenchedState(traffic, now)) return true
+  if (!credentialID) return false
+  const credential = credentialHealth.get(credentialKey(target, credentialID))
+  if (credential) recover(target, credential, now, credentialID)
+  if (authBenchedState(credential, now)) return true
+  const credentialTraffic = trafficCredentialHealth.get(trafficCredentialKey(target, credentialID, variant))
+  if (credentialTraffic) recover(target, credentialTraffic, now, credentialID)
+  return authBenchedState(credentialTraffic, now)
+}
+
 /** Whether last-resort selection must treat this leg as dead rather than merely
  * cooling: quota-dead at pool scope (quotaCoolingDown /
- * credentialQuotaCoolingDown — the pool that drained) or out under a long traffic
- * bench at the leg's own effort scope (longTrafficBenched — the leg that errored).
+ * credentialQuotaCoolingDown — the pool that drained), out under a plan-wall
+ * bench at pool scope (longTrafficBenched — the plan that refuses the model),
+ * out under a long traffic bench at the leg's own effort scope
+ * (longTrafficBenched — the leg that errored), or out under an auth bench at
+ * the leg's own scopes (authBenched — the leg whose entitlement died, #2555).
  * The two scopes stay distinct: this read only ORs the verdicts, it never lets a
  * traffic bench speak for a pool or a pool verdict bench a leg. The 2026-11-07
  * no-hard-exclusion doctrine (code#8086) governs quota READS — a pool is never
@@ -1113,7 +1235,8 @@ export const lastResortDead = (
 ) =>
   quotaCoolingDown(target, now, location) ||
   (credentialID !== undefined && credentialQuotaCoolingDown(target, credentialID, now)) ||
-  longTrafficBenched(target, credentialID, now, location, variant)
+  longTrafficBenched(target, credentialID, now, location, variant) ||
+  authBenched(target, credentialID, now, location, variant)
 
 /** The durable record id for one model target's reactive quota skip (#1976): keyed to the
  * answering target, so one model family's exhaustion record names only that family. */
@@ -1196,12 +1319,14 @@ const modelWindowReading = (
   readings: readonly QuotaCurrent.ProviderReading[],
   providerID: string,
   modelID: string,
-): {
-  readonly percent: number
-  readonly resetAt: number | null
-  readonly observedAt: number
-  readonly complete: boolean
-} | undefined => {
+):
+  | {
+      readonly percent: number
+      readonly resetAt: number | null
+      readonly observedAt: number
+      readonly complete: boolean
+    }
+  | undefined => {
   const candidatesOf = (reading: QuotaCurrent.ProviderReading): QuotaCurrent.Window[] => [
     ...(ownValue(reading.models, modelID) ?? []),
     ...reading.windows.filter((window) => window.name.startsWith(`${modelID}:`)),
@@ -1397,6 +1522,152 @@ export const plantGatheredQuotaWall = (
   return undefined
 }
 
+/** The binding-window level at which a gathered reading counts as nearly
+ * gone (#2256, Drew 2026-11-10): strictly above this percent used, less
+ * than 1% remains on the window that gates calls — the concrete case is
+ * $0.05 of $10 left, 99.5% used. At or below it the reading is a warning
+ * state only: low quota alone never walls. */
+export const NEAR_EMPTY_USED_PERCENT = 99
+
+/** The note marker every walled-below-1% plant carries: the route/quota
+ * surfaces (activeAdjustments, availability) key the distinct state off
+ * it, so a dead-below-1% pool stops reading as "ok / not walled" or as a
+ * generic bench (#2256 acceptance). */
+export const WALLED_BELOW_1_NOTE = "walled-below-1%"
+
+/** Whether quota-class (plan-limit) failure evidence for this target is
+ * on record (#2256): a quota event inside the demotion policy's window —
+ * recorded by the failure path itself (`failed` with a quota hint, or
+ * replayed by `seedDemotion`) — or a quota-class bench in force. Generic
+ * failures never count: the signal is errors that imply plan limits. */
+export const quotaFailureSignal = (target: Model.Ref, now = Date.now(), location?: string): boolean => {
+  const windowMs = demotionPolicy(location).windowMs
+  const base = key(target)
+  for (const [id, events] of quotaEvents) {
+    if (id !== base && !id.startsWith(`${base}#`)) continue
+    if (events.some((at) => now - at <= windowMs)) return true
+  }
+  const state = health.get(base)
+  return (
+    state !== undefined &&
+    state.cooldownUntil > now &&
+    (state.benchReason === "quota" || state.benchReason === "quota retry-after" || state.benchReason === "plan-wall")
+  )
+}
+
+/** The target's binding gathered reading (#2256): the fullest window the
+ * snapshot prices for it — its own model windows when it carries any, or
+ * the provider's single-entry windows (the same two shapes
+ * `gatheredQuotaWall` judges; several provider entries are per-account
+ * readings and state no binding window). */
+const bindingGatheredReading = (
+  entries: readonly QuotaCurrent.ProviderReading[],
+  target: Model.Ref,
+): { percent: number; resetAt: number | null; observedAt: number; complete: boolean } | undefined => {
+  const own = modelWindowReading(entries, target.providerID, target.id as string)
+  if (own) return own
+  if (entries.length !== 1) return undefined
+  const entry = entries[0]
+  let percent: number | undefined
+  let resetAt: number | null = null
+  let complete = entry.windows.length > 0
+  for (const window of entry.windows) {
+    if (window.usedPercent === null) {
+      complete = false
+      continue
+    }
+    if (percent === undefined || window.usedPercent >= percent) {
+      percent = window.usedPercent
+      resetAt = window.resetAt
+    }
+  }
+  if (percent === undefined) return undefined
+  return { percent, resetAt, observedAt: entry.measuredAt, complete }
+}
+
+/** The combined-signal wall (#2256, Drew 2026-11-10 + refinement): the
+ * target is walled-below-1% while a FRESH gathered reading shows its
+ * binding window above NEAR_EMPTY_USED_PERCENT used (less than 1%
+ * remaining) AND quota-class failures are on record for it. Either half
+ * alone states no wall: low quota alone is a warning, and a failure
+ * alone earns only its ordinary bench — and this wall is never the
+ * permanent bench a lone failure must not plant: it holds until the
+ * binding window's reset (or the gate's bounded fallback) and lifts on
+ * the first fresh reading that shows room again. A full window whose
+ * stated reset has already passed has rolled, whatever the percent
+ * still says — not a wall. Returns the wall and the reading that
+ * stated it. */
+export const gatheredNearEmptyWall = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): { readonly until: number; readonly observedAt: number; readonly percent: number } | undefined => {
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  if (entries.length === 0) return undefined
+  const binding = bindingGatheredReading(entries, target)
+  if (!binding) return undefined
+  if (now - binding.observedAt > GATHERED_WALL_MAX_AGE_MS) return undefined
+  if (binding.percent <= NEAR_EMPTY_USED_PERCENT) return undefined
+  if (binding.resetAt !== null && binding.resetAt <= now) return undefined
+  if (!quotaFailureSignal(target, now, location)) return undefined
+  const gate = currentConstants(location).quotaGate
+  return {
+    until: Math.min(binding.resetAt ?? now + gate.fallbackMs, now + gate.maxMs),
+    observedAt: binding.observedAt,
+    percent: binding.percent,
+  }
+}
+
+/** Plants — or, on a later reading's word, lifts — the walled-below-1%
+ * record for one target (#2256): the same model-scoped skip record the
+ * gathered full wall plants, carrying the distinct WALLED_BELOW_1_NOTE
+ * so the surfaces name the state. Re-planted at every feed while the
+ * combined signal stands, so `until` tracks the freshest reading. The
+ * lift is the measured-increase path the issue names: a fresh, complete
+ * binding reading at or below the near-empty line removes a standing
+ * record OF THIS PLANT'S OWN NOTE — the full wall's record and
+ * attempt-reported records are other paths' business, exactly as in
+ * `plantGatheredQuotaWall`. A stale, missing, or incomplete reading
+ * judges nothing: the record lapses at its own `until`. Returns the
+ * record id when one was planted or lifted. */
+export const plantGatheredNearEmptyWall = (
+  target: Model.Ref,
+  readings: readonly QuotaCurrent.ProviderReading[],
+  now = Date.now(),
+  location?: string,
+): string | undefined => {
+  const id = quotaModelSkipID(target)
+  const wall = gatheredNearEmptyWall(target, readings, now, location)
+  if (wall) {
+    const standing = adjustments.find((item) => item.id === id)
+    if (standing && standing.quotaSkipOrigin !== "proactive") return undefined
+    if (standing && !(standing.note ?? "").includes(WALLED_BELOW_1_NOTE)) return undefined
+    addAdjustment({
+      id,
+      match: `${target.providerID}/${target.id}`,
+      action: "skip",
+      until: wall.until,
+      quotaSkipOrigin: "proactive",
+      note: `${WALLED_BELOW_1_NOTE}: binding window at ${wall.percent}% used (under 1% remaining) with quota-class failures on record; held until the gathered window resets`,
+    })
+    logHealth(target, "quota-walled-below-1pct", `binding window ${wall.percent}% used with quota failures on record`)
+    return id
+  }
+  const standing = adjustments.find((item) => item.id === id)
+  if (!standing || !(standing.note ?? "").includes(WALLED_BELOW_1_NOTE)) return undefined
+  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  const binding = bindingGatheredReading(entries, target)
+  if (!binding || !binding.complete) return undefined
+  if (now - binding.observedAt > GATHERED_WALL_MAX_AGE_MS) return undefined
+  if (binding.percent > NEAR_EMPTY_USED_PERCENT) return undefined
+  if (removeAdjustment(id)) {
+    logHealth(target, "quota-readmitted", "gathered quota reading re-admitted the walled-below-1% plant")
+    return id
+  }
+  return undefined
+}
+
 /** Provider gate state stated by the fleet gatherer's snapshot alone (fork
  * #2479): the wall for providers whose gathered shape is a single provider-wide
  * entry — no per-model windows, and no plan-derived feed to arm the provider
@@ -1488,7 +1759,6 @@ export const releaseQuotaSkipsForCurrent = (
   const entries = readings.filter((reading) => reading.providerID === target.providerID)
   if (entries.length === 0) return []
   const own = modelWindowReading(entries, target.providerID, target.id as string)
-  if (!own) return []
   const threshold = currentConstants(location).quotaGate.balanceDeadThreshold
   const asSnapshot = (reading: { percent: number; resetAt: number | null; observedAt: number }) => ({
     planID: "quota-current",
@@ -1500,22 +1770,27 @@ export const releaseQuotaSkipsForCurrent = (
     observedAt: reading.observedAt,
     stale: now - reading.observedAt > QuotaSnapshot.DEFAULT_MAX_AGE_MS,
   })
-  const ownSnapshot = asSnapshot(own)
   // An incomplete freshest reading — some window of the model's measurement
   // carries no percent — is not whole evidence of headroom (#2036): it lifts
   // nothing, exactly as a stale or full reading lifts nothing.
-  if (!own.complete) return []
-  if (!QuotaSnapshot.known(ownSnapshot) || QuotaSnapshot.isKnownFull(ownSnapshot, now, threshold)) return []
+  if (own) {
+    if (!own.complete) return []
+    const ownSnapshot = asSnapshot(own)
+    if (!QuotaSnapshot.known(ownSnapshot) || QuotaSnapshot.isKnownFull(ownSnapshot, now, threshold)) return []
+  }
   const modelSkipID = quotaModelSkipID(target)
   const providerStanding = adjustments.some(
     (item) => item.id === `quota:${target.providerID}` && attemptQuotaSkip(item),
   )
   // While a provider-wide record stands, this model's headroom alone lifts nothing —
   // not even its own record beneath it: the leaf is out at provider scope, so only
-  // provider-wide headroom (below) re-admits anything.
-  const released = !providerStanding
-    ? releaseQuotaSkipsForSnapshot(target, ownSnapshot, now, location).filter((id) => id === modelSkipID)
-    : []
+  // provider-wide headroom (below) re-admits anything. With no model-keyed reading at
+  // all (the gatherer's provider-windows shape, e.g. `_claude`), there is no model
+  // headroom to judge, and provider-wide headroom alone judges the provider record.
+  const released =
+    !providerStanding && own
+      ? releaseQuotaSkipsForSnapshot(target, asSnapshot(own), now, location).filter((id) => id === modelSkipID)
+      : []
   if (!providerStanding) return released
   // A provider-wide record stands: it lifts only on provider-wide headroom — the
   // freshest reading whose every provider window is below full.
@@ -1543,7 +1818,7 @@ export interface ActiveBench {
    * effort). Absent on pool-scope benches: quota holds the pool, not an effort. */
   readonly variant?: string
   readonly until: number
-  /** The bench class that planted it: quota, quota retry-after, retry-after, auth, failure, slow. */
+  /** The bench class that planted it: quota, quota retry-after, plan-wall, retry-after, auth, failure, slow. */
   readonly reason: string
   readonly consecutiveFailures: number
   /** The known quota window reset this bench is bounded by, when one is known. */
@@ -1623,13 +1898,15 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
   const benchClass = (reason: string): { class: AvailabilityClass; resume: AvailabilityEntry["resume"] } =>
     reason === "quota" || reason === "quota retry-after"
       ? { class: "quota", resume: "reset" }
-      : reason === "retry-after"
-        ? { class: "rate-limit", resume: "retry-after" }
-        : reason === "auth"
-          ? { class: "auth", resume: "timer" }
-          : reason === "slow"
-            ? { class: "slow", resume: "timer" }
-            : { class: "unknown", resume: "timer" }
+      : reason === "plan-wall"
+        ? { class: "quota", resume: "timer" }
+        : reason === "retry-after"
+          ? { class: "rate-limit", resume: "retry-after" }
+          : reason === "auth"
+            ? { class: "auth", resume: "timer" }
+            : reason === "slow"
+              ? { class: "slow", resume: "timer" }
+              : { class: "unknown", resume: "timer" }
   for (const bench of activeBenches(now)) {
     const mapped = benchClass(bench.reason)
     put({
@@ -1701,7 +1978,9 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
     if (
       state.probePending !== true &&
       !(
-        (state.benchReason === "auth" || (state.benchReason === "retry-after" && state.benchLong === true)) &&
+        (state.benchReason === "auth" ||
+          state.benchReason === "plan-wall" ||
+          (state.benchReason === "retry-after" && state.benchLong === true)) &&
         state.cooldownUntil > 0 &&
         state.cooldownUntil <= now &&
         state.consecutiveFailures > 0
@@ -1713,17 +1992,18 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
     const slash = base.indexOf("/")
     // A converted bench cleared its reason; the class it converted from is stamped
     // on probePendingReason. An unconverted one still carries it as benchReason.
-    const label = (state.probePendingReason ?? state.benchReason) === "retry-after" ? "rate-limit" : "auth"
+    const converted = state.probePendingReason ?? state.benchReason
+    const label = converted === "retry-after" ? "rate-limit" : converted === "plan-wall" ? "quota" : "auth"
+    const name = converted === "plan-wall" ? "plan-wall" : label
     put({
       providerID: base.slice(0, slash),
       modelID: base.slice(slash + 1),
       ...(credentialID ? { credentialID } : {}),
       ...(variant !== undefined ? { variant } : {}),
       class: label,
-      reason:
-        probeClaimLive(state, now)
-          ? `${label} bench expired; half-open probe in flight`
-          : `${label} bench expired; half-open probe pending`,
+      reason: probeClaimLive(state, now)
+        ? `${name} bench expired; half-open probe in flight`
+        : `${name} bench expired; half-open probe pending`,
       resume: "probe",
     })
   }
@@ -1733,6 +2013,19 @@ export const availability = (now = Date.now()): AvailabilityEntry[] => {
   for (const [id, state] of trafficCredentialHealth) {
     const base = id.slice(0, id.lastIndexOf("@"))
     probePendingEntry(id, state, base.slice(base.lastIndexOf("#") + 1), id.slice(id.lastIndexOf("@") + 1))
+  }
+  for (const item of activeAdjustments(now)) {
+    if (!(item.note ?? "").includes(WALLED_BELOW_1_NOTE)) continue
+    const slash = item.match.indexOf("/")
+    if (slash === -1) continue
+    put({
+      providerID: item.match.slice(0, slash),
+      modelID: item.match.slice(slash + 1),
+      class: "quota",
+      reason: "walled-below-1%: binding window under 1% remaining with quota-class failures on record",
+      ...(item.until !== undefined ? { until: item.until } : {}),
+      resume: "reset",
+    })
   }
   for (const [id, hold] of infraHolds) {
     if (hold.until <= now) continue
@@ -1862,6 +2155,11 @@ export const failed = (
   // bench's own key so the forgiveness sweep below clears the state that was
   // actually planted, in whichever scope's map holds it.
   const quotaScope = hint?.quota === true
+  // A plan wall benches at pool scope like a quota bench (the serving credential's
+  // own state when one served): the refusal names the account's plan for this
+  // model, so every effort of the leaf is refused alike — benching one effort at
+  // a time would re-deal the same wall at each sibling effort in turn.
+  const wallScope = quotaScope || hint?.planWall === true
   const benchKey = quotaScope
     ? credentialID
       ? credentialKey(target, credentialID)
@@ -1875,10 +2173,7 @@ export const failed = (
       target: benchKey,
       time: now,
     })
-  while (
-    recentFailures.length > 200 ||
-    (recentFailures[0] && now - recentFailures[0].time > retainedNetworkWindowMs())
-  )
+  while (recentFailures.length > 200 || (recentFailures[0] && now - recentFailures[0].time > retainedNetworkWindowMs()))
     recentFailures.shift()
   if (hint?.network && networkSuspect(now, location)) {
     // Undo the cooldowns from the earlier correlated transport errors too: those requests likely
@@ -1941,21 +2236,21 @@ export const failed = (
   if (credentialID) {
     bench(
       target,
-      quotaScope ? credentialEntry(target, credentialID) : trafficCredentialEntry(target, credentialID, variant),
+      wallScope ? credentialEntry(target, credentialID) : trafficCredentialEntry(target, credentialID, variant),
       policy,
       now,
       hint,
       credentialID,
       statedQuotaResetAt(target, credentialID, now, location, hint),
       location,
-      quotaScope ? undefined : variant,
+      wallScope ? undefined : variant,
     )
     // The outcome itself stays on the pool-scope ledger too: giveUps() judges a
     // target's recent answers there, and a traffic bench must not make the leg
     // look steady to the retry logic that reads it. Only the outcome is mirrored
     // — no counter, no bench: the pool scope records that the leg failed, the
     // traffic scope decides what that failure costs.
-    if (!quotaScope) {
+    if (!wallScope) {
       const pool = credentialEntry(target, credentialID)
       pool.outcomes = pushOutcome(pool.outcomes, false)
     }
@@ -1971,16 +2266,16 @@ export const failed = (
   }
   bench(
     target,
-    quotaScope ? entry(target) : trafficEntry(target, variant),
+    wallScope ? entry(target) : trafficEntry(target, variant),
     policy,
     now,
     hint,
     undefined,
     statedQuotaResetAt(target, undefined, now, location, hint),
     location,
-    quotaScope ? undefined : variant,
+    wallScope ? undefined : variant,
   )
-  if (!quotaScope) {
+  if (!wallScope) {
     const pool = entry(target)
     pool.outcomes = pushOutcome(pool.outcomes, false)
   }
@@ -2009,7 +2304,12 @@ export const slow = (target: Model.Ref, policy: Policy, now = Date.now(), varian
     state.probeClaimToken = undefined
     state.probePending = undefined
     state.probePendingReason = undefined
-    logHealth(target, "cooldown-start", `slow${state.variant !== undefined ? ` variant:${state.variant}` : ""}`, state.cooldownUntil)
+    logHealth(
+      target,
+      "cooldown-start",
+      `slow${state.variant !== undefined ? ` variant:${state.variant}` : ""}`,
+      state.cooldownUntil,
+    )
   }
 }
 
@@ -2225,8 +2525,7 @@ export const recordTierLimit = (
   canonical?: string,
 ) => {
   const until = ModelRouteMembership.recordTierLimit(membershipAccount(target.providerID, canonical), message, now)
-  if (until > now)
-    observeRateLimit(target, ModelRouteLimits.snapshot({ retryAfterMs: until - now }, now), now)
+  if (until > now) observeRateLimit(target, ModelRouteLimits.snapshot({ retryAfterMs: until - now }, now), now)
   return until
 }
 
@@ -2323,6 +2622,15 @@ export const giveUps = (target: Model.Ref, credentialID?: string, location?: str
   const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
   const window = currentConstants(location).escalation.outcomeWindow
   return (state?.outcomes ?? []).slice(-window).filter((answered) => !answered).length
+}
+
+/** A target's measured recent record: requests answered and attempted in the retained
+ * outcome window — the in-process successor of the #12228 five-door measurement. The
+ * cross-route substitution order ranks a candidate route by the measured record of the
+ * doors it would send the session to. */
+export const measured = (target: Model.Ref): { readonly answered: number; readonly attempts: number } => {
+  const outcomes = health.get(key(target))?.outcomes ?? []
+  return { answered: outcomes.filter((answered) => answered).length, attempts: outcomes.length }
 }
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */
@@ -2546,8 +2854,7 @@ const observeCredentialQuotaState = (
         })
         if (refreshedHold.judgedBalance !== hold.judgedBalance || refreshedHold.expired !== hold.expired)
           persistCredentialBalanceHold(credentialID, refreshedHold, target.providerID)
-      }
-      else if (
+      } else if (
         snapshot.balance !== true &&
         QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)
       ) {
@@ -2558,12 +2865,9 @@ const observeCredentialQuotaState = (
         credentialQuota.set(credentialID, {
           ...previous,
           gated: true,
-          ...(snapshot.resetAt !== null && snapshot.resetAt !== undefined
-            ? { timedGateUntil: snapshot.resetAt }
-            : {}),
+          ...(snapshot.resetAt !== null && snapshot.resetAt !== undefined ? { timedGateUntil: snapshot.resetAt } : {}),
         })
-      }
-      else if (
+      } else if (
         hold.origin === "threshold" &&
         snapshot.balance === true &&
         snapshot.observedAt >= previous.snapshot.observedAt
@@ -2609,7 +2913,7 @@ const observeCredentialQuotaState = (
         }
       : undefined
   const actualResetAt = resetAtTrusted
-    ? snapshot.resetAt ?? undefined
+    ? (snapshot.resetAt ?? undefined)
     : previous?.actualResetAt !== undefined && previous.actualResetAt > now
       ? previous.actualResetAt
       : undefined
@@ -2638,7 +2942,8 @@ const observeCredentialQuotaState = (
       snapshot.resetAt ?? undefined,
       credentialID,
     )
-  if (!full && previous?.gated) logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
+  if (!full && previous?.gated)
+    logHealth(target, "quota-readmitted", `credential:${credentialID}`, undefined, credentialID)
   // A fresh, known, not-full reading is a measured increase for the scope: quota-class
   // benches planted by earlier exhaustion release on it, not only at their reset (#1828).
   if (!full && QuotaSnapshot.known(snapshot) && now - snapshot.observedAt <= QuotaSnapshot.DEFAULT_MAX_AGE_MS)
@@ -2693,17 +2998,13 @@ export const observeProviderQuota = (
   // cannot clear the skip when the balance never actually increased.
   const restoredItem = previous
     ? undefined
-    : adjustments.find(
-        (item) => item.id === `quota:${target.providerID}` && item.balanceBaseline !== undefined,
-      )
+    : adjustments.find((item) => item.id === `quota:${target.providerID}` && item.balanceBaseline !== undefined)
   const hold: BalanceHold | undefined =
     previous?.balanceHold ??
     (restoredItem
       ? {
           benchedBalance: restoredItem.balanceBaseline ?? null,
-          ...(restoredItem.balanceHoldBalance !== undefined
-            ? { judgedBalance: restoredItem.balanceHoldBalance }
-            : {}),
+          ...(restoredItem.balanceHoldBalance !== undefined ? { judgedBalance: restoredItem.balanceHoldBalance } : {}),
           ...(restoredItem.balanceGrant !== undefined ? { grant: restoredItem.balanceGrant } : {}),
           ...(restoredItem.balanceHoldOrigin !== undefined ? { origin: restoredItem.balanceHoldOrigin } : {}),
           ...(restoredItem.balanceHoldExpired !== undefined ? { expired: restoredItem.balanceHoldExpired } : {}),
@@ -2733,16 +3034,13 @@ export const observeProviderQuota = (
             match: `${target.providerID}/`,
             action: "skip",
             balanceBaseline: refreshedHold.benchedBalance,
-            ...(refreshedHold.judgedBalance !== undefined
-              ? { balanceHoldBalance: refreshedHold.judgedBalance }
-              : {}),
+            ...(refreshedHold.judgedBalance !== undefined ? { balanceHoldBalance: refreshedHold.judgedBalance } : {}),
             ...(refreshedHold.grant !== undefined ? { balanceGrant: refreshedHold.grant } : {}),
             ...(refreshedHold.origin !== undefined ? { balanceHoldOrigin: refreshedHold.origin } : {}),
             ...(refreshedHold.expired !== undefined ? { balanceHoldExpired: refreshedHold.expired } : {}),
             note: "quota exhausted (proactive snapshot); held until the stated reset",
           })
-      }
-      else if (
+      } else if (
         hold.origin === "threshold" &&
         snapshot.balance === true &&
         snapshot.observedAt >= previous.snapshot.observedAt
@@ -2761,9 +3059,7 @@ export const observeProviderQuota = (
             match: `${target.providerID}/`,
             action: "skip",
             balanceBaseline: refreshedHold.benchedBalance,
-            ...(refreshedHold.judgedBalance !== undefined
-              ? { balanceHoldBalance: refreshedHold.judgedBalance }
-              : {}),
+            ...(refreshedHold.judgedBalance !== undefined ? { balanceHoldBalance: refreshedHold.judgedBalance } : {}),
             ...(refreshedHold.grant !== undefined ? { balanceGrant: refreshedHold.grant } : {}),
             ...(refreshedHold.origin !== undefined ? { balanceHoldOrigin: refreshedHold.origin } : {}),
             ...(refreshedHold.expired !== undefined ? { balanceHoldExpired: refreshedHold.expired } : {}),
@@ -3301,7 +3597,11 @@ export const completed = (
     credentialState.outcomes = pushOutcome(credentialState.outcomes, true)
     credentialState.consecutiveFailures = 0
     credentialState.consecutiveRateLimits = 0
-    if (!probeClaim || credentialState.probeClaimedAt === undefined || credentialState.probeClaimToken === probeClaim.token)
+    if (
+      !probeClaim ||
+      credentialState.probeClaimedAt === undefined ||
+      credentialState.probeClaimToken === probeClaim.token
+    )
       endBench(target, credentialState, now, credentialID)
   }
   const state = entry(target)
@@ -4100,7 +4400,9 @@ export const tracedWeightOf = (
     scheduled: afterScheduled,
     prefer: afterPrefer,
     adjustment: weight,
-    demotion: weight * (demoted(target, now, scope.credentialID, scope.location) ? currentConstants(scope.location).demotion.factor : 1),
+    demotion:
+      weight *
+      (demoted(target, now, scope.credentialID, scope.location) ? currentConstants(scope.location).demotion.factor : 1),
     gate: null,
   }
 }
@@ -4152,6 +4454,10 @@ export const nextTarget = (
   random: () => number = Math.random,
   credentialOf?: (index: number) => string | undefined,
   location?: string,
+  /** The session's pinned leaf (#2671), passed only when the caller judged it healthy. It goes
+   * first at every node on its path while it is still ready, untried and gate-open; otherwise the
+   * normal order applies. */
+  preferred?: number,
 ): number | undefined => {
   const leaves = (nodeIndex: number): number[] => {
     const node = definition.nodes[nodeIndex]
@@ -4180,6 +4486,7 @@ export const nextTarget = (
     )
   }
   const hasReady = (nodeIndex: number): boolean => openLeaves(nodeIndex).length > 0
+  const pinned = preferred !== undefined && openLeaves(0).includes(preferred) ? preferred : undefined
   /** Whether any gate on the path from this node down to the leaf is closed at `now`. */
   const gateClosedOnPath = (nodeIndex: number, leafIndex: number): boolean => {
     const node = definition.nodes[nodeIndex]
@@ -4219,9 +4526,7 @@ export const nextTarget = (
       : eligible.reduce(
           (sum, index) =>
             sum +
-            tracedWeightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) })[
-              layer
-            ],
+            tracedWeightOf(definition.targets[index], 1, now, { ...scope, credentialID: credentialOf?.(index) })[layer],
           0,
         ) / eligible.length
   }
@@ -4230,7 +4535,8 @@ export const nextTarget = (
   const allDemoted = (nodeIndex: number) => {
     const eligible = openLeaves(nodeIndex)
     return (
-      eligible.length > 0 && eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index), location))
+      eligible.length > 0 &&
+      eligible.every((index) => demoted(definition.targets[index], now, credentialOf?.(index), location))
     )
   }
   const label = (child: Node["children"][number]) => {
@@ -4400,7 +4706,20 @@ export const nextTarget = (
     const sorted = node.selection === "round-robin" ? byTier(positions) : rank(positions)
     let ordered = sorted
     let decisionReason = sorted.some((position, index) => position !== positions[index]) ? "adjusted" : "ordered"
-    if (node.selection === "ordered" && currentPosition !== undefined) {
+    // The session's pinned member (#2671) leads while it can serve, ahead of continuity, the
+    // sticky pick and the draw — no draw is consumed, so clearing the pin resumes the session's
+    // normal selection. The rest keep their normal order as the failover tail.
+    const pinnedPosition =
+      pinned === undefined
+        ? undefined
+        : positions.find((position) => {
+            const child = node.children[position]
+            return child.leaf === pinned || (child.node !== undefined && leaves(child.node).includes(pinned))
+          })
+    if (pinnedPosition !== undefined) {
+      ordered = [pinnedPosition, ...sorted.filter((position) => position !== pinnedPosition)]
+      decisionReason = "pinned"
+    } else if (node.selection === "ordered" && currentPosition !== undefined) {
       ordered = [currentPosition, ...positions.filter((position) => position !== currentPosition)]
       decisionReason = "sticky"
     } else if (sessionID && sessionScoped(node.selection)) {
@@ -4428,9 +4747,7 @@ export const nextTarget = (
       if (chosen !== undefined)
         ordered = [
           chosen,
-          ...(node.selection === "round-robin" ? byTier : rank)(
-            positions.filter((position) => position !== chosen),
-          ),
+          ...(node.selection === "round-robin" ? byTier : rank)(positions.filter((position) => position !== chosen)),
         ]
       decisionReason =
         priorSticky !== undefined && pool.includes(priorSticky) ? "sticky" : draw ? "drawn" : decisionReason
@@ -4514,7 +4831,56 @@ export const forgetSession = (routeID: string, sessionID: string) => {
   selection.get(routeID)?.sessions.delete(sessionID)
 }
 
-export const resetSelection = () => selection.clear()
+/** A session's preferred pool member per route (#2671): the member the session uses while it is
+ * healthy, without leaving the pool, so failover and the return to the member work as usual.
+ *
+ * Kept in memory, like the sticky picks and continuity it sits beside, rather than on the session
+ * record. The pin is advice to selection, not session history: it needs no durable event, no
+ * projection column and no migration, and losing it on a restart is safe — the session is still
+ * on its pool and simply selects normally until a client sets the pin again. Clients read the
+ * current value back from the API. Bounded like the other per-session maps. */
+const pins = new Map<string, Map<string, Model.Ref>>()
+
+export const resetSelection = () => {
+  selection.clear()
+  pins.clear()
+}
+
+/** Sets or clears (`undefined`) a session's preferred member on one route. */
+export const pinTarget = (routeID: string, sessionID: string, target: Model.Ref | undefined) => {
+  const routes = new Map(pins.get(sessionID))
+  if (target === undefined) routes.delete(routeID)
+  else routes.set(routeID, target)
+  pins.delete(sessionID)
+  if (routes.size === 0) return
+  pins.set(sessionID, routes)
+  while (pins.size > SESSION_LIMIT) pins.delete(pins.keys().next().value!)
+}
+
+/** The session's pins, one per route. */
+export const pinnedTargets = (sessionID: string) =>
+  Array.from(pins.get(sessionID) ?? [], ([routeID, target]) => ({ routeID, target }))
+
+/** Drops every pin a session holds, e.g. when the session is deleted. */
+export const forgetPins = (sessionID: string) => {
+  pins.delete(sessionID)
+}
+
+/** The leaf a target names on this route: the exact member (variant included), or — for a target
+ * without a variant — the first member of that provider/model. Undefined when it is not a member. */
+export const memberIndex = (definition: Definition, target: Model.Ref) => {
+  const exact = definition.targets.findIndex((item) => key(item) === key(target) && item.variant === target.variant)
+  if (exact >= 0) return exact
+  if (target.variant !== undefined) return undefined
+  const loose = definition.targets.findIndex((item) => key(item) === key(target))
+  return loose >= 0 ? loose : undefined
+}
+
+/** The leaf the session pinned on this route, while it is still a member. */
+export const pinnedLeaf = (definition: Definition, sessionID: string) => {
+  const target = pins.get(sessionID)?.get(definition.id)
+  return target === undefined ? undefined : memberIndex(definition, target)
+}
 
 /** Where a session has been answered on a route. `origin` is the target it moved away from after a
  * failover; `away` counts requests answered since on the target it moved to. */
@@ -4564,8 +4930,7 @@ export const served = (routeID: string, sessionID: string, target: Model.Ref, lo
  * settled on the new target. */
 export const hedgeHome = (routeID: string, sessionID: string, location?: string) => {
   const state = continuityOf(routeID, sessionID)
-  if (state?.origin === undefined || state.away >= currentConstants(location).continuity.hedgeRequests)
-    return undefined
+  if (state?.origin === undefined || state.away >= currentConstants(location).continuity.hedgeRequests) return undefined
   return state.origin
 }
 

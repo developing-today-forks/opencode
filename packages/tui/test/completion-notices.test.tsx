@@ -8,7 +8,8 @@ import { tmpdir } from "./fixture/fixture"
 
 test.each([40, 120])("shell completion notices do not navigate at width %s", async (width) => {
   await using state = await tmpdir()
-  const setup = await createTestRenderer({ width, height: 36, useThread: false, kittyKeyboard: true })
+  const setup = await createTestRenderer({ width, height: 36, kittyKeyboard: true })
+  await setup.renderer.setupTerminal()
   setup.renderer.start()
   const session = {
     id: "ses_notices",
@@ -129,7 +130,8 @@ test.each([40, 120])("shell completion notices do not navigate at width %s", asy
 
 test.each([40, 120])("subagent completion notices navigate to the child session at width %s", async (width) => {
   await using state = await tmpdir()
-  const setup = await createTestRenderer({ width, height: 20, useThread: false, kittyKeyboard: true })
+  const setup = await createTestRenderer({ width, height: 20, kittyKeyboard: true })
+  await setup.renderer.setupTerminal()
   setup.renderer.start()
   const parent = {
     id: "ses_parent",
@@ -196,7 +198,7 @@ test.each([40, 120])("subagent completion notices navigate to the child session 
 
 test.each([40, 120])("messaging notices show user messages and navigate to the sender at width %s", async (width) => {
   await using state = await tmpdir()
-  const setup = await createTestRenderer({ width, height: 30, useThread: false, kittyKeyboard: true })
+  const setup = await createTestRenderer({ width, height: 30, kittyKeyboard: true })
   setup.renderer.start()
   const parent = {
     id: "ses_parent",
@@ -247,7 +249,9 @@ test.each([40, 120])("messaging notices show user messages and navigate to the s
       app: { name: "test", version: "test", channel: "test" },
       server: { endpoint: { url: server.url.toString() } },
       config: {
-        get: async () => ({ animations: false, tabs: { mode: "off" } }),
+        // The test renderer rejects the terminal-title control this test's navigation triggers
+        // (ot_session_control InvalidPhase); titles are not what this test checks.
+        get: async () => ({ animations: false, tabs: { mode: "off" }, terminal: { title: false } }),
         update: async () => ({}),
       },
       packages: { prepare: async () => ({ directory: "" }) },

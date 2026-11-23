@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { LLMEvent, type AIError, type ToolResultPart } from "../../schema/index.js"
+import { LLMEvent, type AIError, type LLMRequest, type ToolResultPart } from "../../schema/index.js"
 import { OpenResponses } from "../open-responses.js"
 import { Lifecycle } from "./lifecycle.js"
 
@@ -26,45 +26,82 @@ export interface Definition {
 
 export type Definitions = Readonly<Record<string, Definition>>
 
+/** Hosted tools that several Responses providers report with the same item shape. */
+export const common = {
+  web_search_call: { name: "web_search", input: (item) => item.action ?? {} },
+  file_search_call: { name: "file_search", input: (item) => ({ queries: item.queries ?? [] }) },
+  code_interpreter_call: {
+    name: "code_interpreter",
+    input: (item) => ({ code: item.code, container_id: item.container_id }),
+  },
+  mcp_call: {
+    name: "mcp",
+    input: (item) => ({ server_label: item.server_label, name: item.name, arguments: item.arguments }),
+  },
+} as const satisfies Definitions
+
 // Own keys only: the in operator reads through the prototype chain, so a provider output item
 // typed "constructor" (or toString, __proto__, ...) would be classified as a hosted-tool
 // item and kill the stream when the inherited member turns out not to be a Definition.
 export const isItem = <Tools extends Definitions>(item: OpenResponses.OutputItem, tools: Tools): item is Item =>
   Object.hasOwn(tools, item.type)
 
+/**
+ * Responses stream that turns completed hosted tool items into a provider-executed
+ * tool call and result. `override` sees each normalized event first and may handle it.
+ */
+export const stream = (
+  adapter: OpenResponses.ProviderAdapter,
+  tools: Definitions,
+  override?: (
+    state: OpenResponses.ParserState,
+    event: OpenResponses.NormalizedEvent,
+  ) => Effect.Effect<OpenResponses.StepResult, AIError> | undefined,
+) => ({
+  event: OpenResponses.protocol.stream.event,
+  initial: (request: LLMRequest) => OpenResponses.initial(request, adapter),
+  step: (state: OpenResponses.ParserState, input: OpenResponses.Event) => {
+    const event = OpenResponses.normalize(state, input)
+    const handled = override?.(state, event)
+    if (handled) return handled
+    if (event.type === "response.output_item.done" && event.item && isItem(event.item, tools))
+      return onDone(state, event.item, tools)
+    return OpenResponses.step(state, event)
+  },
+  terminal: OpenResponses.terminal,
+})
+
 export const onDone: (
   state: OpenResponses.ParserState,
   item: Item,
   tools: Definitions,
-) => Effect.Effect<OpenResponses.StepResult, AIError> = Effect.fnUntraced(
-  function* (state, item, tools) {
-    const tool = Object.hasOwn(tools, item.type) ? tools[item.type] : undefined
-    if (!tool) return [state, []] satisfies OpenResponses.StepResult
-    const providerMetadata = OpenResponses.providerMetadata(state, { itemId: item.id })
-    const events: LLMEvent[] = []
-    const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
-    events.push(
-      LLMEvent.toolCall({
-        id: item.id,
-        name: tool.name,
-        input: tool.input(item),
-        providerExecuted: true,
-        providerMetadata,
-      }),
-      LLMEvent.toolResult({
-        id: item.id,
-        name: tool.name,
-        result: tool.result
-          ? yield* tool.result(item)
-          : item.error !== undefined && item.error !== null
-            ? { type: "error", value: item.error }
-            : { type: "json", value: item },
-        providerExecuted: true,
-        providerMetadata,
-      }),
-    )
-    return [{ ...state, lifecycle }, events] satisfies OpenResponses.StepResult
-  },
-)
+) => Effect.Effect<OpenResponses.StepResult, AIError> = Effect.fnUntraced(function* (state, item, tools) {
+  const tool = Object.hasOwn(tools, item.type) ? tools[item.type] : undefined
+  if (!tool) return [state, []] satisfies OpenResponses.StepResult
+  const providerMetadata = OpenResponses.providerMetadata(state, { itemId: item.id })
+  const events: LLMEvent[] = []
+  const lifecycle = Lifecycle.stepStart(state.lifecycle, events)
+  events.push(
+    LLMEvent.toolCall({
+      id: item.id,
+      name: tool.name,
+      input: tool.input(item),
+      providerExecuted: true,
+      providerMetadata,
+    }),
+    LLMEvent.toolResult({
+      id: item.id,
+      name: tool.name,
+      result: tool.result
+        ? yield* tool.result(item)
+        : item.error !== undefined && item.error !== null
+          ? { type: "error", value: item.error }
+          : { type: "json", value: item },
+      providerExecuted: true,
+      providerMetadata,
+    }),
+  )
+  return [{ ...state, lifecycle }, events] satisfies OpenResponses.StepResult
+})
 
 export * as ResponsesHostedTools from "./responses-hosted-tools.js"

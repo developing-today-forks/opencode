@@ -10,6 +10,22 @@ test("accepts only the fixed opencode username", () => {
   expect(ServerAuth.authorized({ username: "custom", password: Redacted.make("secret") }, config)).toBe(false)
 })
 
+test("password comparison accepts the configured password and rejects near misses (#2281)", () => {
+  expect(ServerAuth.passwordMatches("secret", "secret")).toBe(true)
+  expect(ServerAuth.passwordMatches("secrer", "secret")).toBe(false) // same length, one character off
+  expect(ServerAuth.passwordMatches("secret!", "secret")).toBe(false) // longer candidate sharing the prefix
+  expect(ServerAuth.passwordMatches("secre", "secret")).toBe(false) // shorter candidate
+  expect(ServerAuth.passwordMatches("", "secret")).toBe(false)
+  expect(ServerAuth.passwordMatches("pässwörd", "pässwörd")).toBe(true)
+})
+
+test("authorized rejects wrong passwords of any length (#2281)", () => {
+  const config = { password: Option.some("secret"), username: "opencode" }
+  expect(ServerAuth.authorized({ username: "opencode", password: Redacted.make("secrer") }, config)).toBe(false)
+  expect(ServerAuth.authorized({ username: "opencode", password: Redacted.make("secret!") }, config)).toBe(false)
+  expect(ServerAuth.authorized({ username: "opencode", password: Redacted.make("") }, config)).toBe(false)
+})
+
 test("session tokens expire, resist tampering, and are revoked by changing the password", () => {
   const config = { password: Option.some("secret"), username: "opencode" }
   const now = Date.now()
@@ -42,9 +58,7 @@ test("session cookies require a same-scheme same-authority Origin", async () => 
   expect(await authorized("/api/info", "http://localhost:3000")).toBe(true)
   expect(await authorized("/api/info", "https://localhost:3000")).toBe(false)
   expect(await authorized("https://localhost:3000/api/info", "http://localhost:3000")).toBe(false)
-  expect(
-    await authorized("/api/info", "https://localhost:3000", { "x-forwarded-proto": "https" }),
-  ).toBe(false)
+  expect(await authorized("/api/info", "https://localhost:3000", { "x-forwarded-proto": "https" })).toBe(false)
   expect(await authorized("/api/info")).toBe(true)
   expect(await authorized("/api/info", "not an origin")).toBe(false)
 })

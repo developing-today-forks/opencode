@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { AIError } from "@opencode/ai"
+import { AIError } from "@opencode/ai/effect"
 import { ModelRoute } from "@opencode/core/model-route"
 import { QuotaSnapshot } from "@opencode/core/quota-snapshot"
 import { SessionStep } from "@opencode/core/session/runner/step"
@@ -101,6 +101,61 @@ describe("availability classification (#1828)", () => {
     expect(entries[0]?.resume).toBe("retry-after")
     expect(Math.abs((entries[0]?.until ?? 0) - (now + 120_000))).toBeLessThan(2_000)
     expect(Math.abs(ModelRoute.cooldownUntil(target, now) - (now + 120_000))).toBeLessThan(2_000)
+  })
+
+  // Oracle: code#12228 done-when — a 429 carrying a stated reset benches the
+  // member until that reset on the FIRST failure (not only after sustained
+  // failures classify it up): selection excludes it before the reset, and at
+  // the reset the bench's half-open probe is due. The reset here arrives
+  // only in the reset header; no retry-after is sent.
+  test("a 429 carrying a reset header benches until the reset on the first failure", async () => {
+    const mock = new MockProvider()
+    const target = ref("prov", "m")
+    mock.set(target, MockScenarios.rateLimitReset("2h0m0s"))
+    const now = Date.now()
+    const hint = SessionStep.failureHint(await failure(mock, target))
+    expect(Math.abs((hint.retryAfterMs ?? 0) - 2 * 3_600_000)).toBeLessThan(2_000)
+    ModelRoute.failed(target, ModelRoute.policy(), now, hint)
+    expect(Math.abs(ModelRoute.cooldownUntil(target, now) - (now + 2 * 3_600_000))).toBeLessThan(2_000)
+    expect(availabilityOf("prov", now)[0]?.class).toBe("rate-limit")
+    // Before the reset: still excluded, and no probe is due early.
+    expect(ModelRoute.coolingDown(target, now + 3_600_000)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, now + 3_600_000)).toBe(false)
+    // At the reset: the bench is long, so its half-open probe is due.
+    expect(ModelRoute.probeDue(target, undefined, now + 2 * 3_600_000)).toBe(true)
+  })
+
+  // Oracle: code#12228 done-when — the same first-failure bench when the
+  // reset arrives as a timestamp and no window states a remaining count:
+  // the 429 itself is the exhaustion evidence for the stated reset.
+  test("a 429 carrying only a reset timestamp benches until that reset on the first failure", async () => {
+    const mock = new MockProvider()
+    const target = ref("prov", "m")
+    const now = Date.now()
+    const resetAt = now + 2 * 3_600_000
+    mock.set(target, MockScenarios.rateLimitResetTimestamp(new Date(resetAt).toISOString()))
+    const hint = SessionStep.failureHint(await failure(mock, target))
+    ModelRoute.failed(target, ModelRoute.policy(), now, hint)
+    expect(Math.abs(ModelRoute.cooldownUntil(target, now) - resetAt)).toBeLessThan(2_000)
+    expect(ModelRoute.coolingDown(target, now + 3_600_000)).toBe(true)
+    expect(ModelRoute.probeDue(target, undefined, resetAt + 1_000)).toBe(true)
+  })
+
+  // Oracle: code#12228 — a 429 with no stated reset keeps the short first
+  // bench exactly as before; only sustained failures classify it up.
+  test("a 429 with no stated reset keeps the short first bench", async () => {
+    const mock = new MockProvider()
+    const target = ref("prov", "m")
+    mock.set(target, {
+      kind: "http",
+      status: 429,
+      body: JSON.stringify({ error: { message: "Rate limit reached; slow down" } }),
+    })
+    const now = Date.now()
+    const hint = SessionStep.failureHint(await failure(mock, target))
+    expect(hint.retryAfterMs).toBeUndefined()
+    ModelRoute.failed(target, ModelRoute.policy(), now, hint)
+    expect(ModelRoute.cooldownUntil(target, now) - now).toBe(60_000)
   })
 
   test("unknown errors block for increasing times; a success resets the ladder", () => {

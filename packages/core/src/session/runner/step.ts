@@ -4,20 +4,35 @@ import {
   AIError,
   InvalidProviderOutputError,
   LLMClient,
-  LLMEvent,
   isContextOverflowFailure,
   TransportError,
-  UnknownProviderError,
-  type ProviderErrorEvent,
+  type LLMEvent,
   type ToolCall,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import type { Agent } from "@opencode/schema/agent"
-import { Cause, Clock, Data, Deferred, Duration, Effect, Exit, Fiber, Option, Result, Scope, Stream } from "effect"
+import {
+  Cause,
+  Clock,
+  Context,
+  Data,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Fiber,
+  Option,
+  Result,
+  Scope,
+  Stream,
+} from "effect"
 import { SessionError } from "@opencode/schema/session-error"
 import { Bus } from "../../bus.js"
 import { FileAccess } from "../../file-access.js"
 import { Permission } from "../../permission.js"
 import { Snapshot } from "../../snapshot.js"
+import { FSUtil } from "@opencode/util/fs-util"
+import { join } from "node:path"
+import { PlanSuggestions } from "../plan-suggestions.js"
 import { Tool } from "../../tool.js"
 import { ToolOutput } from "../../tool-output.js"
 import { QuestionTool } from "../../tool/plugin/question.js"
@@ -37,19 +52,29 @@ import { SessionRunnerModel } from "./model.js"
 import { SessionMembershipGate } from "./membership-gate.js"
 import { createLLMEventPublisher } from "./publish-llm-event.js"
 import { SessionHedge } from "./hedge.js"
+import { SessionRunnerRenderCard } from "./render-card.js"
+import { SessionRunnerRenderWiring } from "./render-wiring.js"
 import { SessionRunnerRetry } from "./retry.js"
 import { materializeToolResult } from "./tool-result-content.js"
 
 export type Outcome = Data.TaggedEnum<{
   Completed: { readonly needsContinuation: boolean }
-  Retry: { readonly error: SessionError.Error; readonly decision: SessionRunnerRetry.Decision }
-  Failover: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
-  Continue: {
+  Retry: {
     readonly error: SessionError.Error
     readonly decision: SessionRunnerRetry.Decision
+    readonly freshAssistant?: boolean
   }
+  Failover: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
+  /** A routed attempt failed after its output started and no further request was granted: the
+   * turn continues in a new reply on the route's next member, which is already resolved. */
+  ContinueOn: { readonly model: SessionRunnerModel.Resolved; readonly error: SessionError.Error }
   RecoverFull: {}
   Compacted: {}
+  /** The step hit a quota wall with the failover walk exhausted and the host
+   * render tool present (#2384 slice 3): the runner ends the step here and
+   * directs the next step to render the quota fallback card, instead of the
+   * turn dying on the bare error. */
+  QuotaWall: { readonly wall: SessionRunnerRenderCard.QuotaWall; readonly error: SessionError.Error }
   OutputLimit: { readonly needsContinuation: boolean }
 }>
 export const Outcome = Data.taggedEnum<Outcome>()
@@ -59,6 +84,10 @@ export type ContinuationLink = { readonly of: SessionMessage.ID; readonly index:
 
 interface Input {
   readonly isLocationClosed: () => boolean
+  /** Why the execution is being interrupted, once it is: `"user"` when someone stopped it. */
+  readonly interruption?: () => "user" | "shutdown" | undefined
+  /** Whether this server is handing its process daemon over to the next one (see `PersistentPty.handoffPrepared`). */
+  readonly handoffPrepared?: () => boolean
   readonly sessionID: SessionSchema.ID
   readonly assistantMessageID: SessionMessage.ID
   /** Set when this request continues a response that hit the output token limit: the assistant message of the
@@ -66,6 +95,10 @@ interface Input {
   readonly continuation?: ContinuationLink
   readonly agent: Agent.ID
   readonly model: SessionRunnerModel.Resolved
+  /** The step's advertised tool names, for host-tool detection (#2384): the
+   * render-card wiring engages only when `openchamber_render` is among them,
+   * and is inert — behavior byte-identical — when it is absent. */
+  readonly toolNames?: ReadonlyArray<string>
   /** The membership account the attempt's model draws from (#2253), when its provider
    * declares caps: the gate meters the start before any request goes out. Kept off
    * `model` so failover swaps of the resolved model cannot lose or duplicate it —
@@ -74,6 +107,8 @@ interface Input {
   /** Prompt-size estimate for budget accounting when a hedge is cancelled before provider usage arrives. */
   readonly estimatedInputTokens?: number
   readonly prepared: Omit<SessionModelRequest.Prepared, "event">
+  /** Set when this attempt runs because an earlier one in the step scheduled a retry. */
+  readonly retryAttempt?: number
   readonly retry: (
     cause: AIError,
     error: SessionError.Error,
@@ -107,6 +142,16 @@ export const failedAttemptCount = (key?: string) =>
   key === undefined ? failedAttempts.size : (failedAttempts.get(key) ?? 0)
 
 export const clearFailedAttempt = (key: string) => failedAttempts.delete(key)
+
+/** The longest in-lane wait a wall-class failure (rate limit / quota) may sleep
+ * before the step ends instead (#12228): the retry schedule's own gaps never
+ * exceed ten seconds, so a granted wait past this bound is the wall's own
+ * statement — a stated retry-after or reset, or a last-resort seat's recheck
+ * instant — not a retry gap. Sleeping it out inside the step loop is the
+ * #10085 freeze: the session sits at "retry attempt 2" for up to fifteen
+ * minutes, holding its lane against a door that has already said when it
+ * recovers. A wait at or under the bound stays a pause and keeps the retry. */
+export const WALL_ENDING_MIN_DELAY_MS = 60_000
 
 /** Consecutive no-message completions per session and target (#1903): a provider that keeps
  * answering with a few tokens and no message at all would otherwise loop a session forever,
@@ -152,10 +197,10 @@ const wasHedged = (messageID: string) => hedgedMessages.has(messageID)
  * successful request said about its quota is kept as well as what a failed one did. Each snapshot is
  * handed to the routing state immediately: a spent window holds the target back for the next turn.
  */
-''/** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
+;("") /** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
  * as the step's name for it so existing callers and tests keep working; the implementation is the
  * shared observer from `ModelRouteLog`, which handles both `onResponse` and `onRejected`. */
-''/** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
+;("") /** Reads a response's rate-limit headers as it arrives, and a rejection's own headers too. Kept
  * as the step's name for it so existing callers and tests keep working; the implementation is the
  * shared observer from `ModelRouteLog`, which handles both `onResponse` and `onRejected`. */
 export const captureRateLimit = (target: ModelRoute.Target, credentialID?: string) => {
@@ -176,6 +221,14 @@ export const captureRateLimit = (target: ModelRoute.Target, credentialID?: strin
 const quotaText =
   /individual quota|quota (?:exhausted|reached|exceeded)|insufficient credits|insufficient balance|insufficient funds|out of credits|usage limit (?:exceeded|reached)|reached your (?:usage|quota|plan) limit/i
 
+/** Text that states a permanent plan/tier refusal (code#10128): the provider says the
+ * account's plan does not entitle this model — a model named as outside the plan, a
+ * tier stated to have ended, a model the plan does not include, a model gated behind
+ * a higher plan. Affirmative wording only, like quotaText: an unrecognized refusal
+ * stays a plain authentication failure and keeps the auth bench's terms. */
+const planWallText =
+  /model[_\s]?not[_\s]?in[_\s]?plan|tier has ended|not (?:included|available) in (?:your|the|this) (?:current )?plan|plan does not (?:yet )?include|not (?:a )?part of your (?:current )?plan|requires? (?:a |an )?(?:higher|upgraded|paid) (?:plan|tier)/i
+
 /** Transport OS codes that prove a request never reached a provider API: the name did not
  * resolve, or nothing listened at the far end (a dead local service or proxy). Those are
  * path failures — the fleet's DNS, a local proxy, the server itself — not provider health,
@@ -187,12 +240,14 @@ const INFRA_TRANSPORT_CODES: ReadonlySet<string> = new Set(["ENOTFOUND", "EAI_AG
  * authentication refusal (the `Authentication` tag, an HTTP 401/403, or the org-disabled
  * refusal shape), which cannot heal by itself and so takes the long first bench. A quota
  * stated only in the error text classifies as quota too, with the stated reset bound to the
- * bench; a transport path failure classifies as infra. */
+ * bench; a transport path failure classifies as infra. A permanent plan/tier refusal stated
+ * in the text (a tier ended, a model outside the plan) classifies as a plan wall instead:
+ * the router benches the leaf as a wall, not as a credential failure. */
 export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   const reason = failure.reason as {
     _tag: string
     retryAfterMs?: number
-    rateLimit?: { retryAfterMs?: number }
+    rateLimit?: ModelRouteLimits.Details
     http?: { status?: number }
     code?: string
     message?: string
@@ -201,25 +256,46 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
   // The client's own timeout text says how long we waited, not when the provider said to retry:
   // it must not become a rate-limit hint (#1551). A provider-stated wait in any other shape survives.
   const clientTimeoutMessage =
-    reason._tag === "Transport" &&
-    reason.code === "Timeout" &&
-    reason.message?.startsWith("No response output within ")
+    reason._tag === "Transport" && reason.code === "Timeout" && reason.message?.startsWith("No response output within ")
   const text = `${reason.message ?? ""} ${reason.body ?? ""}`
   const quota = reason._tag === "QuotaExceeded" || quotaText.test(text)
   const tierLimit = reason.code === "tier_limit_exceeded" || TIER_LIMIT_TEXT.test(text)
+  // A permanent plan/tier refusal (code#10128) is neither quota nor plain auth: no
+  // window rolls and no balance refills, so the quota class — whose tag also earns
+  // the increase-only balance hold in quotaFailureClassification — would wall the
+  // leaf past the plan change that actually frees it; and the credential may be
+  // perfectly valid for the account's other models, so the auth class's per-effort
+  // bench understates it. Transport and timeout answers are excluded outright: a
+  // path failure never hard-benches, whatever text it happens to carry.
+  const planWall = reason._tag !== "Transport" && reason._tag !== "Timeout" && planWallText.test(text)
   // Extraction reads the same combined text classification reads, in the same
   // message-then-body order: a reset stated only in the raw body must bind to
   // the bench exactly as one stated in the message does (#2108). Reading
   // `message ?? body` instead would discard the body whenever a message
   // exists, even when the message states no reset at all.
   const quotaResetAtMs = quota ? ModelRouteLimits.resetAtFromMessage(text, Date.now()) : undefined
+  // A rate-limit failure's headers may state the wall's reset without stating
+  // a retry-after (the reset headers the executor parses into the rate-limit
+  // details, #12228): the reset is the same statement in absolute form, so it
+  // feeds the retry-after below — bench() believes a stated retry-after
+  // as-is, which benches the door until its reset on the first failure
+  // instead of the short ladder a bare 429 earns until its failures prove
+  // sustained. A stated retry-after header still wins: it is the more
+  // direct instruction.
+  const hintNow = Date.now()
+  const rateLimitSnapshot =
+    reason._tag === "RateLimit" && reason.rateLimit
+      ? ModelRouteLimits.snapshot(reason.rateLimit, hintNow)
+      : undefined
+  const rateLimitResetAtMs = rateLimitSnapshot
+    ? ModelRouteLimits.statedResetAt(rateLimitSnapshot, hintNow)
+    : undefined
   return {
     retryAfterMs:
       reason.retryAfterMs ??
       reason.rateLimit?.retryAfterMs ??
-      (clientTimeoutMessage
-        ? undefined
-        : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
+      (rateLimitResetAtMs !== undefined ? Math.max(0, rateLimitResetAtMs - hintNow) : undefined) ??
+      (clientTimeoutMessage ? undefined : ModelRouteLimits.retryHintFromMessage(text, Date.now())),
     quota,
     // The rate-limit class itself, stated wait or not: bench() counts these, and
     // a run of them with no success between classifies the bench up (model-route).
@@ -228,6 +304,7 @@ export const failureHint = (failure: AIError): ModelRoute.FailureHint => {
     // same convention the route policy follows.
     ...(quotaResetAtMs !== undefined ? { quotaResetAtMs } : {}),
     ...(tierLimit ? { tierLimit: true } : {}),
+    ...(planWall ? { planWall: true } : {}),
     ...(reason._tag === "Transport" &&
     reason.http === undefined &&
     !clientTimeoutMessage &&
@@ -280,9 +357,7 @@ const balanceExhaustionText =
  * keeps its timed recovery even when the pool's last snapshot was balance-shaped.
  * Returns undefined when the failure does not enter the quota-failure path at all.
  */
-export const quotaFailureClassification = (
-  failure: AIError,
-): "balance-exhaustion" | "rate-limit" | undefined => {
+export const quotaFailureClassification = (failure: AIError): "balance-exhaustion" | "rate-limit" | undefined => {
   // A content-policy rejection is not a quota event, however its text is worded: policy
   // wording must never gate a pool through the broad exhaustion heuristics (#1084).
   if (failure.reason._tag === "ContentPolicy") return undefined
@@ -291,7 +366,6 @@ export const quotaFailureClassification = (
   if (!isQuotaFailure(failure) && !exhaustionText.test(text) && !balanceExhaustionText.test(text)) return undefined
   return reason._tag === "QuotaExceeded" || balanceExhaustionText.test(text) ? "balance-exhaustion" : "rate-limit"
 }
-
 
 const TOOLS_INTERRUPTED = { type: "aborted", message: "Tool execution interrupted" } as const
 const STEP_INTERRUPTED = { type: "aborted", message: "Step interrupted" } as const
@@ -308,7 +382,57 @@ export const make = Effect.gen(function* () {
     onNone: () => undefined,
     onSome: (value) => value.directory as string,
   })
+  // FSUtil is read from the ambient context WITHOUT adding a layer requirement
+  // to SessionStep.make (compositions enumerate this environment, and the
+  // FileAccess layer already brings FSUtil wherever it is present): when no FS
+  // is in context, the plan-suggestion hook below simply yields no notices.
+  const fs = yield* Effect.contextWith((context: Context.Context<never>) =>
+    Effect.succeed(Context.getOption(context as Context.Context<FSUtil.Service>, FSUtil.Service)),
+  )
   const toolOutput = yield* ToolOutput.Service
+
+  /** Post-turn ExecutionPlan suggestions (issue #10): when a turn finishes with
+   * file changes, read the active plans from the Project Knowledge plans
+   * directory and compute the notice lines carried on Step.Ended. Suggest-first
+   * (ruling Q3): this only ever reads plans — it never writes them — and any
+   * failure (no plans directory, no FS service, diff unavailable) yields no
+   * notices; suggestions must never fail a turn. */
+  const planNotices = Effect.fnUntraced(function* (input: { readonly from?: Snapshot.ID; readonly to?: Snapshot.ID }) {
+    if (!locationDirectory || Option.isNone(fs) || !input.from || !input.to) return undefined
+    const directory = join(locationDirectory, PlanSuggestions.PLANS_RELATIVE_DIRECTORY)
+    const entries = yield* fs.value.readDirectoryEntries(directory)
+    const markdowns = yield* Effect.forEach(
+      entries.filter((entry) => entry.type === "File" && entry.name.endsWith(".md")),
+      (entry) => fs.value.readFileStringSafe(join(directory, entry.name)),
+      { concurrency: 4 },
+    )
+    const plans = markdowns.filter((markdown): markdown is string => markdown !== undefined)
+    if (plans.length === 0) return undefined
+    const diffs = yield* snapshots.diff({ from: input.from, to: input.to })
+    const notices = PlanSuggestions.planNoticesForTurn(plans, diffs)
+    return notices.length > 0 ? notices : undefined
+  })
+
+  /** Whether another target can take this request now: the route's next fallback, resolved the way a
+   * hedge explores it — speculatively, from this resolution's state, so the failover that may follow
+   * still resolves it itself. A resolution not used hands its bench probe claim back (#1478). A
+   * resolution that fails counts as nowhere to move. */
+  const canMoveOn = (input: Input) => {
+    const routing = input.model.routing
+    if (!routing) return Effect.succeed(false)
+    return routing.fallback().pipe(
+      Effect.map((next) => {
+        const claim = next?.routing?.probeClaim
+        if (next?.routing && claim) {
+          ModelRoute.releaseBenchProbe(next.routing.target, undefined, claim.claimedAt, claim.token)
+          if (claim.credentialID)
+            ModelRoute.releaseBenchProbe(next.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+        }
+        return next !== undefined
+      }),
+      Effect.orElseSucceed(() => false),
+    )
+  }
 
   const run = Effect.fn("SessionStep.run")(function* (
     input: Input,
@@ -323,10 +447,20 @@ export const make = Effect.gen(function* () {
     // The start snapshot only has to exist before local tools run, which cannot happen before Step.Started,
     // so it is captured while the provider request is in flight instead of delaying it.
     const pendingStartSnapshot = yield* snapshots.capture().pipe(Effect.forkScoped)
+    const started = yield* Clock.currentTimeMillis
     const rateLimit = raced?.rateLimit ?? captureRateLimit(input.model.ref, input.model.routing?.credentialID)
     const requestStarted = raced?.startedAt ?? performance.now()
     const wallStarted = Date.now() - (performance.now() - requestStarted)
     const firstOutput = yield* Deferred.make<void>()
+    const modelAttributes = {
+      "gen_ai.provider.name": input.model.ref.providerID,
+      "gen_ai.request.model": input.model.ref.id,
+    }
+    yield* Effect.annotateCurrentSpan({
+      ...modelAttributes,
+      "gen_ai.agent.name": input.agent,
+      ...(input.retryAttempt === undefined ? {} : { "opencode.retry.attempt": input.retryAttempt }),
+    })
     const publisher = createLLMEventPublisher(bus, {
       sessionID: input.sessionID,
       assistantMessageID: input.assistantMessageID,
@@ -334,80 +468,96 @@ export const make = Effect.gen(function* () {
       model: input.model.ref,
       providerMetadataKey: input.model.model.route.providerMetadataKey ?? input.model.model.provider,
       pendingSnapshot: Fiber.join(pendingStartSnapshot),
-      started: yield* Clock.currentTimeMillis,
+      started,
       deferStepStart: input.model.routing !== undefined,
     })
     const toolRuns: Array<{
       readonly call: ToolCall
       readonly fiber: Fiber.Fiber<void, Permission.DeclinedError | QuestionTool.CancelledError>
+      readonly cancel: Cancel
     }> = []
     const interruptTools = Effect.suspend(() => Fiber.interruptAll(toolRuns.map((run) => run.fiber)))
-    const executeTool = (call: ToolCall) => {
+    // Render-card wiring (#2384): engaged only when the host render tool is
+    // in this step's tool set. A real render result is the user's submitted
+    // answer: parse it and apply it through the plan store as the tool
+    // completes, so the choice is durable before the turn moves on. A
+    // malformed store or result must never break the step — the seam's
+    // parser already answers `none` for anything unrecognized, and store
+    // failures are ignored here for the same reason.
+    const renderToolPresent = SessionRunnerRenderCard.hasRenderTool(input.toolNames ?? [])
+    const applyRenderToolResult = (
+      call: ToolCall,
+      content: ReadonlyArray<{ readonly type: string; readonly text?: string }>,
+    ) =>
+      !renderToolPresent || call.name !== SessionRunnerRenderCard.RENDER_TOOL_NAME
+        ? Effect.void
+        : Effect.ignore(
+            Effect.try(() =>
+              SessionRunnerRenderWiring.applyToolResult({
+                sessionID: input.sessionID,
+                result: content
+                  .filter((item) => item.type === "text")
+                  .map((item) => item.text ?? "")
+                  .join(""),
+              }),
+            ),
+          )
+    // A user's stop asks each tool awaiting `cancel` to stop and settle its own call, and interrupts every other
+    // tool. A tool that does not settle in time is interrupted too. Teardown interrupts every tool.
+    const stopTools = Effect.suspend(() => {
+      // A reloaded Location still serves the steps that borrow it, so its tools can stop on their own too.
+      const user = input.interruption?.() === "user"
+      const immediate = toolRuns.flatMap((run) => (user && run.cancel.trigger() ? [] : [run.fiber]))
+      return Fiber.interruptAll(immediate).pipe(
+        Effect.andThen(Fiber.awaitAll(toolRuns.map((run) => run.fiber)).pipe(Effect.timeoutOption(COOPERATIVE_STOP))),
+        Effect.flatMap((settled) => (Option.isSome(settled) ? Effect.void : interruptTools)),
+      )
+    })
+    const executeTool = (call: ToolCall, cancel: Cancel) => {
       if (input.prepared.request.toolChoice?.type === "none")
         return new Tool.Error({ message: "Tools are disabled after the maximum agent steps" })
-      return input.prepared.executeTool({
-        sessionID: input.sessionID,
-        agent: input.agent,
-        messageID: input.assistantMessageID,
-        call,
-        progress: (update) => publisher.progress(call.id, update),
-      }).pipe(
-        Effect.flatMap((result) =>
-          materializeToolResult(
-            result.content,
-            {
-              sessionID: input.sessionID,
-              agent: input.agent,
-              messageID: input.assistantMessageID,
-              id: Tool.CallID.make(call.id),
-            },
-            fileAccess.authorizeRead,
-          ).pipe(Effect.map((content) => ({ ...result, content }))),
-        ),
-      )
+      return input.prepared
+        .executeTool({
+          sessionID: input.sessionID,
+          agent: input.agent,
+          messageID: input.assistantMessageID,
+          call,
+          progress: (update) => publisher.progress(call.id, update),
+          cancel: cancel.effect,
+        })
+        .pipe(
+          Effect.flatMap((result) =>
+            materializeToolResult(
+              result.content,
+              {
+                sessionID: input.sessionID,
+                agent: input.agent,
+                messageID: input.assistantMessageID,
+                id: Tool.CallID.make(call.id),
+              },
+              fileAccess.authorizeRead,
+            ).pipe(Effect.map((content) => ({ ...result, content }))),
+          ),
+          Effect.tap((result) => applyRenderToolResult(call, result.content)),
+        )
     }
 
     // Provider and tool fibers retain per-source order without a shared writer queue.
     // A local execution starts only after its Tool.Called publication completes.
-    let overflowFailure: ProviderErrorEvent | undefined
-    let providerFailure: ProviderErrorEvent | undefined
     let firstOutputAt = raced?.outputAt
     if (firstOutputAt !== undefined) yield* Deferred.succeed(firstOutput, undefined)
     // Read to the end, not just the finish event, so the next request can reuse this response.
+    // The span covers only the provider stream, so model time separates from tools, which run in this consumer.
     const providerStream = (
       raced?.stream ?? llm.stream(input.prepared.request, rateLimit.options(input.prepared.options))
     ).pipe(
+      Stream.withSpan("LLM.stream", { attributes: modelAttributes }),
       Stream.runForEach((event) =>
         Effect.gen(function* () {
-          if (overflowFailure || providerFailure || publisher.hasProviderError()) return
+          if (publisher.record().providerFailed) return
           // Wait here, where cancellation still works, rather than inside the uninterruptible publish.
           if (!publisher.hasStarted()) yield* Fiber.join(pendingStartSnapshot)
-          if (
-            LLMEvent.is.providerError(event) &&
-            isContextOverflowFailure(event) &&
-            !publisher.record().outputStarted
-          ) {
-            overflowFailure = event
-            return
-          }
           const outputAlreadyStarted = publisher.record().outputStarted
-          if (LLMEvent.is.providerError(event) && input.model.routing) {
-            if (!outputAlreadyStarted) {
-              providerFailure = event
-              return
-            }
-            if (!event.classification)
-              ModelRoute.failed(
-                input.model.routing.target,
-                input.model.routing.policy,
-                undefined,
-                undefined,
-                undefined,
-                locationDirectory,
-                input.model.routing.probeClaim,
-                input.model.ref.variant,
-              )
-          }
           const receivedAt = performance.now()
           yield* publisher.publish(event)
           if (!outputAlreadyStarted && publisher.record().outputStarted && firstOutputAt === undefined) {
@@ -415,10 +565,12 @@ export const make = Effect.gen(function* () {
             yield* Deferred.succeed(firstOutput, undefined)
           }
           if (event.type !== "tool-call" || event.providerExecuted) return
+          const cancel = makeCancel()
           toolRuns.push({
             call: event,
+            cancel,
             fiber: yield* Effect.uninterruptibleMask((restore) =>
-              restore(executeTool(event)).pipe(
+              restore(executeTool(event, cancel)).pipe(
                 Effect.flatMap(toolOutput.truncate),
                 Effect.flatMap((outcome) => publisher.toolExecution(event.id, event.name, outcome)),
                 Effect.catchTag("Tool.Error", (error) =>
@@ -443,24 +595,50 @@ export const make = Effect.gen(function* () {
           stream = yield* restore(providerStream).pipe(Effect.exit)
         } else {
           const streamFiber = yield* Effect.forkScoped(Effect.exit(restore(providerStream)))
-          const timedOut = yield* restore(
-            Effect.raceFirst(
-              Deferred.await(firstOutput).pipe(Effect.as(false)),
+          // True when `deadlineMs` (from the request's start; false for none) passes before the first
+          // output or the end of the stream.
+          const silentUntil = (deadlineMs: number | false) =>
+            restore(
               Effect.raceFirst(
-                Fiber.await(streamFiber).pipe(Effect.as(false)),
-                Effect.sleep(
-                  Duration.millis(Math.max(0, firstTokenTimeout - (performance.now() - requestStarted))),
-                ).pipe(Effect.as(true)),
+                Deferred.await(firstOutput).pipe(Effect.as(false)),
+                deadlineMs === false
+                  ? Fiber.await(streamFiber).pipe(Effect.as(false))
+                  : Effect.raceFirst(
+                      Fiber.await(streamFiber).pipe(Effect.as(false)),
+                      Effect.sleep(
+                        Duration.millis(Math.max(0, deadlineMs - (performance.now() - requestStarted))),
+                      ).pipe(Effect.as(true)),
+                    ),
               ),
-            ),
-          )
+            )
+          let waited: number | false = firstTokenTimeout
+          let timedOut = yield* silentUntil(firstTokenTimeout)
+          // The first-output wait only moves the request to another target. With none left to take it,
+          // ending this attempt would only turn a slow answer into an error, so the target keeps going
+          // until the route's last-target limit instead.
+          const lastTarget = ModelRoute.lastTargetTimeout(input.model.routing!.policy)
+          if (timedOut && (lastTarget === false || lastTarget > firstTokenTimeout)) {
+            const moveOn = yield* restore(canMoveOn(input))
+            // Output, or the end of the stream, may have arrived while that was decided: the attempt stands.
+            if ((yield* Deferred.isDone(firstOutput)) || streamFiber.pollUnsafe() !== undefined) timedOut = false
+            else if (!moveOn) {
+              yield* Effect.logInfo("last target kept past the first-output wait", {
+                routeID: input.model.routing?.routeID,
+                target: `${input.model.ref.providerID}/${input.model.ref.id}`,
+                firstTokenTimeoutMs: firstTokenTimeout,
+                lastTargetTimeoutMs: lastTarget,
+              })
+              waited = lastTarget
+              timedOut = yield* silentUntil(lastTarget)
+            }
+          }
           stream = timedOut
             ? yield* Fiber.interrupt(streamFiber).pipe(
                 Effect.as(
                   Exit.fail(
                     new AIError({
                       reason: new TransportError({
-                        message: `No response output within ${firstTokenTimeout}ms`,
+                        message: `No response output within ${waited}ms`,
                         transport: "http",
                         operation: "request",
                         code: "Timeout",
@@ -478,24 +656,41 @@ export const make = Effect.gen(function* () {
         const streamFailure = Option.getOrUndefined(Exit.findErrorOption(stream))
         const streamInterrupted = Exit.hasInterrupts(stream)
         // Cancelled before the start snapshot existed: record nothing, as when the capture preceded the request.
-        if (Exit.hasInterrupts(stream) && !publisher.hasStarted() && !pendingStartSnapshot.pollUnsafe())
+        if (
+          Exit.isFailure(stream) &&
+          streamInterrupted &&
+          !publisher.hasStarted() &&
+          !pendingStartSnapshot.pollUnsafe()
+        )
           return yield* Effect.failCause(stream.cause)
-        if (!overflowFailure && publisher.hasStarted()) yield* publisher.streamed()
-        if (streamInterrupted) yield* interruptTools
-        const joined = yield* restore(Fiber.awaitAll(toolRuns.map((run) => run.fiber))).pipe(Effect.exit)
-        if (Exit.isFailure(joined)) yield* interruptTools
-        const tools = classifyToolExits(joined, toolRuns)
+        if (publisher.hasStarted()) yield* publisher.streamed()
+        if (streamInterrupted) yield* stopTools
+        const fibers = toolRuns.map((run) => run.fiber)
+        const joined = yield* restore(Fiber.awaitAll(fibers)).pipe(Effect.exit)
+        if (!streamInterrupted && Exit.isFailure(joined)) yield* stopTools
+        // Read each tool's exit once all have ended, so what they raised while stopping (a decline, a defect) counts.
+        const exits = Exit.isSuccess(joined) ? joined.value : yield* Fiber.awaitAll(fibers)
+        const tools = classifyToolExits(exits, toolRuns, Exit.hasInterrupts(joined))
+        // A server handing its process daemon over leaves the step as a crash would: unsettled calls and no step end.
+        // The next server settles them when the Session resumes, and takes over the shell commands still running for
+        // them. Any other interrupt settles the calls here.
+        if (
+          (streamInterrupted || tools.interrupted) &&
+          tools.declines.length === 0 &&
+          input.interruption?.() !== "user" &&
+          input.handoffPrepared?.() === true
+        )
+          return yield* Effect.interrupt
 
-        const overflow = overflowFailure ?? streamFailure
         if (
           !publisher.record().outputStarted &&
-          isContextOverflowFailure(overflow) &&
+          isContextOverflowFailure(streamFailure) &&
           (yield* restore(input.recoverOverflow))
         ) {
           yield* Effect.logWarning("provider rejected the request as too long; compacting", {
             sessionID: input.sessionID,
             model: input.model.ref,
-            message: overflow?.message,
+            message: streamFailure?.message,
           })
           ModelRouteLog.record({
             kind: "attempt",
@@ -511,7 +706,7 @@ export const make = Effect.gen(function* () {
               credential_id: input.model.servingCredentialID ?? input.model.routing?.credentialID,
               outcome: "failure",
               error_tag: "ContextOverflow",
-              error_message: overflow?.message,
+              error_message: streamFailure?.message,
               retryable: false,
               output_started: false,
               response_ms: streamedAt - requestStarted,
@@ -522,8 +717,7 @@ export const make = Effect.gen(function* () {
           return Outcome.Compacted()
         }
 
-        if (overflowFailure) yield* publisher.publish(overflowFailure)
-        let recorded = publisher.record()
+        const recorded = publisher.record()
         const unknownFinish =
           Exit.isSuccess(stream) && recorded.finish?.finish === "unknown"
             ? new AIError({
@@ -533,12 +727,7 @@ export const make = Effect.gen(function* () {
                 }),
               })
             : undefined
-        const llmFailure =
-          streamFailure instanceof AIError
-            ? streamFailure
-            : providerFailure
-              ? new AIError({ reason: new UnknownProviderError({ message: providerFailure.message }) })
-              : unknownFinish
+        const llmFailure = streamFailure instanceof AIError ? streamFailure : unknownFinish
         const failureError = llmFailure
           ? toSessionError(llmFailure, { credentialMethodID: input.model.servingMethodID, model: input.model.ref })
           : undefined
@@ -550,7 +739,7 @@ export const make = Effect.gen(function* () {
         // other — and an interruption during the retry hook records it too (see recordAttempt).
         const failed = llmFailure !== undefined
         const timedOut = failed && llmFailure.reason._tag === "Transport" && llmFailure.reason.code === "Timeout"
-        const tokens = recorded.finish?.tokens
+        const tokens = recorded.finish ? SessionUsage.tokens(recorded.finish.usage) : undefined
         ModelRoute.recordRequest(input.model.ref, tokens)
         const failureLog = failed ? ModelRouteLog.failureFields(llmFailure.reason) : undefined
         if (failed)
@@ -625,7 +814,6 @@ export const make = Effect.gen(function* () {
           llmFailure !== undefined &&
           (llmFailure.reason._tag === "Timeout" ||
             llmFailure.reason._tag === "UnsupportedOperation" ||
-            llmFailure.reason._tag === "NoRoute" ||
             (llmFailure.reason._tag === "InvalidRequest" &&
               (llmFailure.reason.classification === undefined ||
                 // An InvalidRequest whose text carries the provider's own
@@ -647,7 +835,7 @@ export const make = Effect.gen(function* () {
         // the target is benched, and the turn fails over or ends with a visible error instead
         // of another silent "success".
         const emptyKey = `${input.sessionID ?? input.assistantMessageID}|${input.model.ref.providerID}/${input.model.ref.id}`
-        const emptyOutput = recorded.finish ? recorded.finish.tokens.output + recorded.finish.tokens.reasoning : 0
+        const emptyOutput = tokens ? tokens.output + tokens.reasoning : 0
         const emptyCompletion =
           !failed &&
           !policyFinish &&
@@ -670,6 +858,8 @@ export const make = Effect.gen(function* () {
         // The failover decision: where this attempt moves to, if anywhere. It is computed
         // after the retry hook below, and the attempt row names its destination.
         let failover: { readonly model: SessionRunnerModel.Resolved; readonly overTo: string } | undefined
+        // Where the turn continues, in a new reply, when the attempt failed after its output started.
+        let continueOn: { readonly model: SessionRunnerModel.Resolved; readonly overTo: string } | undefined
         // The attempt row is written exactly once, normally after the failover decision so
         // it can name the destination. The retry hook runs behind restore(), so a session
         // interrupted while the hook runs would otherwise exit before that write and the
@@ -699,12 +889,14 @@ export const make = Effect.gen(function* () {
                     ? "failure"
                     : "success",
               ...failureLog,
-              error_tag: failureLog?.error_tag ?? (policyFinish ? "ContentPolicy" : emptyTripped ? "EmptyCompletion" : undefined),
+              error_tag:
+                failureLog?.error_tag ??
+                (policyFinish ? "ContentPolicy" : emptyTripped ? "EmptyCompletion" : undefined),
               // A failed request's own details win; a successful one keeps what its response said.
               quota: failureLog?.quota ?? (rateLimit.capture.snapshot && { ...rateLimit.capture.snapshot }),
               retryable: failed ? SessionRunnerRetry.isRetryable(llmFailure) : undefined,
               output_started: recorded.outputStarted,
-              failed_over_to: failover?.overTo,
+              failed_over_to: failover?.overTo ?? continueOn?.overTo,
               first_token_ms: firstOutputAt === undefined ? undefined : firstOutputAt - requestStarted,
               response_ms: streamedAt - requestStarted,
               tokens_per_second:
@@ -804,10 +996,17 @@ export const make = Effect.gen(function* () {
         // while eligible candidates remain (#1014).
         // Output already started keeps this gate closed on purpose: partial output is already
         // published on this assistant message, so another model's output must not be appended
-        // to it. That case cascades through the Continue outcome below when a retry is
-        // authorized -- a new assistant message whose re-selection sees the target marked
-        // failed above; a hook that declines any further request ends the turn, as instructed.
-        if (input.model.routing && llmFailure && failureError && (routeFailure || policyFailure || cascadeFailure) && !sameTargetRetry) {
+        // to it. That case continues in a new assistant message instead: through the Continue
+        // outcome below when a retry is granted -- re-selection sees the target marked failed
+        // above -- and otherwise through ContinueOn, on the next member of this attempt's own
+        // fallback chain.
+        if (
+          input.model.routing &&
+          llmFailure &&
+          failureError &&
+          (routeFailure || policyFailure || cascadeFailure) &&
+          !sameTargetRetry
+        ) {
           if (!recorded.outputStarted) {
             // #6: before moving to a different target, a quota-class failure with no output yet
             // may switch to the next eligible credential on the same provider and re-issue the
@@ -847,6 +1046,29 @@ export const make = Effect.gen(function* () {
             }
             if (failover && input.sessionID)
               ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+          } else if (!retry?.retry && tools.declines.length === 0 && !tools.interrupted) {
+            // No further request was granted: the failure cannot be retried, or the step's
+            // retry budget (the route's `attempts`, two by default) is spent. That budget is
+            // for asking a target again, and must not end a pool's turn while another member
+            // could answer (#1806: a session errors only when every candidate is exhausted).
+            // The next member comes from this attempt's own fallback chain, which skips every
+            // member already tried, so no member is asked twice and the walk ends after the
+            // last one.
+            const fallback = yield* Effect.result(input.model.routing.fallback())
+            if (Result.isSuccess(fallback) && fallback.success) {
+              continueOn = {
+                model: fallback.success,
+                overTo: `${fallback.success.ref.providerID}/${fallback.success.ref.id}`,
+              }
+              yield* Effect.logInfo("model route continues on the next member after output", {
+                routeID: input.model.routing.routeID,
+                from: `${input.model.routing.target.providerID}/${input.model.routing.target.id}`,
+                to: continueOn.overTo,
+                reason: failureError?.message,
+              })
+              if (input.sessionID)
+                ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+            }
           }
         }
 
@@ -874,7 +1096,43 @@ export const make = Effect.gen(function* () {
               ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
           }
         }
+        // A refusal delivered as a content-filter finish before any output fails over like
+        // the same refusal delivered as an error (policyFailure above): this target declined
+        // the request, another member of the pool may not. Health and quota stay untouched,
+        // as for every policy rejection (#1084). Once output started the gate stays closed:
+        // another model's output must not be appended to the published partial reply.
+        const policyFinishError = policyFinish ? recorded.failure : undefined
+        if (policyFinishError && input.model.routing && !failover && !recorded.outputStarted) {
+          const fallback = yield* Effect.result(input.model.routing.fallback())
+          if (Result.isSuccess(fallback) && fallback.success) {
+            failover = {
+              model: fallback.success,
+              overTo: `${fallback.success.ref.providerID}/${fallback.success.ref.id}`,
+            }
+            yield* Effect.logInfo("model route failover after a content-filter finish", {
+              routeID: input.model.routing.routeID,
+              from: `${input.model.routing.target.providerID}/${input.model.routing.target.id}`,
+              to: failover.overTo,
+            })
+            if (input.sessionID)
+              ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
+          }
+        }
         recordAttempt()
+        const usage = recorded.finish?.usage
+        yield* Effect.annotateCurrentSpan({
+          ...(firstOutputAt === undefined ? {} : { "opencode.llm.first_output_ms": firstOutputAt - requestStarted }),
+          ...(recorded.finish === undefined ? {} : { "gen_ai.response.finish_reasons": [recorded.finish.finish] }),
+          ...(usage?.inputTokens === undefined ? {} : { "gen_ai.usage.input_tokens": usage.inputTokens }),
+          ...(usage?.outputTokens === undefined ? {} : { "gen_ai.usage.output_tokens": usage.outputTokens }),
+          ...(usage?.cacheReadInputTokens === undefined
+            ? {}
+            : { "gen_ai.usage.cache_read.input_tokens": usage.cacheReadInputTokens }),
+          ...(usage?.cacheWriteInputTokens === undefined
+            ? {}
+            : { "gen_ai.usage.cache_creation.input_tokens": usage.cacheWriteInputTokens }),
+          ...(llmFailure === undefined ? {} : { "error.type": llmFailure.reason._tag }),
+        })
         if (
           input.recoverContinuation &&
           llmFailure?.reason._tag === "Transport" &&
@@ -884,21 +1142,35 @@ export const make = Effect.gen(function* () {
           return Outcome.RecoverFull()
         if (failover && failureError) return Outcome.Failover({ model: failover.model, error: failureError })
         if (failover && emptyError) return Outcome.Failover({ model: failover.model, error: emptyError })
-        if (providerFailure) {
-          yield* publisher.publish(providerFailure)
-          recorded = publisher.record()
-        }
+        if (failover && policyFinishError) return Outcome.Failover({ model: failover.model, error: policyFinishError })
         if (llmFailure && llmError && retry?.retry && !recorded.outputStarted) {
-          // Retry state projects onto the existing assistant, even before it has produced output.
-          yield* publisher.startAssistant()
-          // No failover candidate served (the Failover outcome above did not
-          // fire): a last-resort seat's retry waits for its recheck instant —
-          // the earliest excluded candidate's re-admission — rather than
-          // re-resolving into the same wall on the short schedule (#1806).
-          return Outcome.Retry({
-            error: llmError,
-            decision: SessionRunnerRetry.withRecheckFloor(retry, input.model.routing?.recheckAt),
-          })
+          const decision = SessionRunnerRetry.withRecheckFloor(retry, input.model.routing?.recheckAt)
+          // Wall ending (#12228): a wall-class failure (RateLimit /
+          // QuotaExceeded) on a routed step whose granted wait is the wall's
+          // own — past WALL_ENDING_MIN_DELAY_MS — does not sleep in-lane.
+          // Reaching this branch means the failover walk above served no
+          // candidate (the Failover outcome did not fire), so the sleep would
+          // hold the session's lane against a walled door until its reset —
+          // the #10085 freeze at "retry attempt 2". The step falls through
+          // instead: the quota-wall gate below ends it in the structured
+          // wall state when the host render tool is present, and the
+          // ordinary failure ending below applies when it is not — prompt
+          // either way, and re-launchable once the bench's reset passes.
+          // Unrouted steps (compaction, a bare model) and short stated waits
+          // keep the in-lane retry exactly as before.
+          const wallEnding =
+            input.model.routing !== undefined &&
+            (llmFailure.reason._tag === "RateLimit" || llmFailure.reason._tag === "QuotaExceeded") &&
+            decision.delay > WALL_ENDING_MIN_DELAY_MS
+          if (!wallEnding) {
+            // Retry state projects onto the existing assistant, even before it has produced output.
+            yield* publisher.startAssistant()
+            // No failover candidate served (the Failover outcome above did not
+            // fire): a last-resort seat's retry waits for its recheck instant —
+            // the earliest excluded candidate's re-admission — rather than
+            // re-resolving into the same wall on the short schedule (#1806).
+            return Outcome.Retry({ error: llmError, decision })
+          }
         }
         if (llmError && !recorded.providerFailed) yield* publisher.failAssistant(llmError)
 
@@ -946,7 +1218,7 @@ export const make = Effect.gen(function* () {
               firstTokenMs: firstOutputAt - requestStarted,
               responseMs: streamedAt - requestStarted,
               tokensPerSecond:
-                ((record.finish.tokens.output + record.finish.tokens.reasoning) * 1_000) / outputDuration,
+                (tokens ? (tokens.output + tokens.reasoning) * 1_000 : 0) / outputDuration,
             },
             Date.now(),
             input.model.routing.credentialID,
@@ -955,7 +1227,12 @@ export const make = Effect.gen(function* () {
             input.model.ref.variant,
           )
           if (input.sessionID)
-            ModelRoute.served(input.model.routing.routeID, input.sessionID, input.model.routing.target, locationDirectory)
+            ModelRoute.served(
+              input.model.routing.routeID,
+              input.sessionID,
+              input.model.routing.target,
+              locationDirectory,
+            )
         }
         if (record.finish || record.failure) {
           const startSnapshot = yield* Fiber.join(pendingStartSnapshot)
@@ -968,9 +1245,12 @@ export const make = Effect.gen(function* () {
                     .files({ from: startSnapshot, to: snapshot })
                     .pipe(Effect.orElseSucceed(() => undefined))
               : undefined
-          const usage = record.finish
-            ? { cost: SessionUsage.calculateCost(input.model.cost, record.finish.tokens), tokens: record.finish.tokens }
-            : undefined
+          const usage = record.finish ? SessionUsage.record(record.finish.usage, input.model.cost) : undefined
+          if (usage) yield* Effect.annotateCurrentSpan("opencode.usage.cost_usd", usage.cost)
+          const notices =
+            record.finish && usage && !record.failure && files?.length
+              ? yield* planNotices({ from: startSnapshot, to: snapshot }).pipe(Effect.orElseSucceed(() => undefined))
+              : undefined
           if (record.failure) yield* publisher.publishStepFailure({ ...usage, snapshot, files })
           if (record.finish && usage && !record.failure)
             yield* bus.publish(SessionEvent.Step.Ended, {
@@ -978,22 +1258,54 @@ export const make = Effect.gen(function* () {
               assistantMessageID: yield* publisher.startAssistant(),
               finish: record.finish.finish,
               rawFinish: record.finish.rawFinish,
-              providerState: record.finish.providerState,
+              native: record.finish.native,
               ...usage,
               snapshot,
               files,
+              ...(notices ? { planNotices: notices } : {}),
             })
         }
 
+        // Output already started: the retry continues on a fresh assistant message.
+        if (llmError && retry?.retry && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
+          return Outcome.Retry({ error: llmError, decision: retry, freshAssistant: true })
+        if (continueOn && llmError && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
+          return Outcome.ContinueOn({ model: continueOn.model, error: llmError })
+
+        // Quota wall (#2384 slice 3): every serving path above — same-target
+        // retry, credential switch, route failover, continuation — has had
+        // its chance and none served, so this quota-class failure is the
+        // step's fall-through. With the host render tool present, end the
+        // step in the structured quota-wall state instead of the bare
+        // error: the runner directs the next step to render the quota
+        // fallback card and apply the submitted fallback in the same turn.
+        // Offered at most once per session until a render answer settles
+        // it, so a turn that ignores the card still ends on the next wall.
+        // Without the render tool nothing here changes.
         if (
+          renderToolPresent &&
           llmFailure &&
-          llmError &&
-          retry?.retry &&
-          record.outputStarted &&
+          failureError &&
+          (quotaClassification !== undefined || isQuotaFailure(llmFailure)) &&
+          !streamInterrupted &&
           tools.declines.length === 0 &&
-          !tools.interrupted
-        )
-          return Outcome.Continue({ error: llmError, decision: retry })
+          !tools.interrupted &&
+          SessionRunnerRenderWiring.offeredWall(input.sessionID) === undefined
+        ) {
+          const hint = failureHint(llmFailure)
+          const wall: SessionRunnerRenderCard.QuotaWall = {
+            providerID: String(input.model.ref.providerID),
+            modelID: String(input.model.ref.id),
+            ...(hint.quotaResetAtMs !== undefined
+              ? { resetAt: hint.quotaResetAtMs }
+              : hint.retryAfterMs !== undefined
+                ? { resetAt: Date.now() + hint.retryAfterMs }
+                : {}),
+            ...(failureError.message ? { message: failureError.message } : {}),
+          }
+          SessionRunnerRenderWiring.offerWall(input.sessionID, wall)
+          return Outcome.QuotaWall({ wall, error: failureError })
+        }
 
         if (Exit.isFailure(stream)) return yield* Effect.failCause(stream.cause)
         if (tools.declines.length > 0) {
@@ -1039,7 +1351,10 @@ export const make = Effect.gen(function* () {
     // provider take their own slot against its account here, once, and release
     // when this attempt's outcome settles: a hedge leg on the same account as
     // the primary is a second concurrent request and meters separately.
-    const hedgeSlots: Array<{ membership: SessionMembershipGate.MembershipRef; result: SessionMembershipGate.GateResult }> = []
+    const hedgeSlots: Array<{
+      membership: SessionMembershipGate.MembershipRef
+      result: SessionMembershipGate.GateResult
+    }> = []
     const holdHedgeSlot = (model: SessionRunnerModel.Resolved) =>
       Effect.gen(function* () {
         if (!model.membership) return
@@ -1052,103 +1367,115 @@ export const make = Effect.gen(function* () {
         })
         if (gated) hedgeSlots.push({ membership: model.membership, result: gated })
       })
-    const raced = yield* SessionHedge.race({
-      primary: llm.stream(input.prepared.request, primaryLimit.options(input.prepared.options)),
-      afterMs: escalate ? 0 : (routing.hedgeAfterMs ?? 0),
-      deadlineMs: typeof routing.policy.firstTokenTimeoutMs === "number" ? routing.policy.firstTokenTimeoutMs : 60_000,
-      // No next target, or one that cannot be prepared, simply means there is nothing to hedge with.
-      // A session that just moved races its origin, where its cache is, rather than the next fallback.
-      start: Effect.suspend(() => (routing.origin ? routing.origin() : routing.fallback())).pipe(
-        Effect.flatMap((next) =>
-          next === undefined
-            ? Effect.succeed(Option.none())
-            : prepareFor(next).pipe(
-                // A preparation that fails or is interrupted never starts the hedge, so
-                // the claim the fallback resolution spent is handed back here instead of
-                // stranding until the bench expires (#1486, review follow-up). A hedge
-                // that does start keeps its claim: the race settles it (the winner via
-                // run(), the loser via ModelRoute.slow).
-                Effect.onExit((exit) =>
-                  exit._tag === "Success" || !next.routing?.probeClaim
-                    ? Effect.void
-                    : Effect.sync(() => {
-                        const claim = next.routing!.probeClaim!
-                        ModelRoute.releaseBenchProbe(next.routing!.target, undefined, claim.claimedAt, claim.token)
-                        if (claim.credentialID)
-                          ModelRoute.releaseBenchProbe(next.routing!.target, claim.credentialID, claim.claimedAt, claim.token)
-                      }),
-                ),
-                Effect.tap(() => holdHedgeSlot(next)),
-                Effect.map((prepared) => {
-                  const rateLimit = captureRateLimit(next.ref, next.routing?.credentialID)
-                  // A hedge has begun: both targets are named before either answers, so the race
-                  // itself is visible even if the loser never produces an event.
-                  ModelRouteLog.record({
-                    kind: "decision",
-                    row: {
-                      time: Date.now(),
-                      session_id: input.sessionID,
-                      route_id: routing.routeID,
-                      selection: "hedge-race",
-                      candidates: [
-                        `${input.model.ref.providerID}/${input.model.ref.id}`,
-                        `${next.ref.providerID}/${next.ref.id}`,
-                      ],
-                      reason: "hedge-started" as const,
-                    },
-                  })
-                  return Option.some({
-                    value: { model: next, prepared, rateLimit },
-                    stream: llm.stream(prepared.request, rateLimit.options(prepared.options)),
-                  })
-                }),
-              ),
-        ),
-        Effect.orElseSucceed(() => Option.none()),
-      ),
-    })
-    if (raced.hedgeStarted) {
-      // The target that lost: the primary when the hedge answered first, otherwise the hedge.
-      const loser = raced.winner === "hedge" ? input.model : raced.hedgeValue?.model
-      if (loser) {
-        ModelRoute.slow(loser.ref, routing.policy, Date.now(), loser.ref.variant)
-        ModelRoute.recordUsage(loser.ref, input.estimatedInputTokens ?? 0)
-      }
-      ModelRouteLog.record({
-        kind: "attempt",
-        row: {
-          time_started: Date.now() - raced.loserElapsedMs,
-          time_ended: Date.now(),
-          session_id: input.sessionID,
-          assistant_message_id: input.assistantMessageID,
-          route_id: routing.routeID,
-          provider_id: loser?.ref.providerID ?? input.model.ref.providerID,
-          model_id: loser?.ref.id ?? input.model.ref.id,
-          credential_id: loser?.servingCredentialID ?? loser?.routing?.credentialID,
-          outcome: "hedged-out",
-          hedged: true,
-          output_started: false,
-          response_ms: raced.loserElapsedMs,
-          tokens_input: input.estimatedInputTokens,
-          tokens_estimated: true,
-          continuation_index: input.continuation?.index,
-        },
-        continuationOfMessageID: input.continuation?.of,
-      })
+    // Releases every hedge slot taken so far, draining the list so a
+    // second call releases nothing (membership release is not
+    // idempotent). The ensuring below covers the WHOLE composed body —
+    // race and run together (#2417): previously the only release lived
+    // on run(...), so an interruption or failure inside
+    // SessionHedge.race, before run was ever entered, leaked every
+    // acquired slot for the process lifetime.
+    const releaseHedgeSlots = () => {
+      for (const slot of hedgeSlots.splice(0)) SessionMembershipGate.release(slot.membership, slot.result)
     }
-    const winner = raced.winner === "hedge" ? raced.value : undefined
-    return yield* run(winner ? { ...input, model: winner.model, prepared: winner.prepared } : input, {
-      rateLimit: winner ? winner.rateLimit : primaryLimit,
-      stream: raced.stream,
-      startedAt: raced.startedAt,
-      ...(raced.outputAt !== undefined ? { outputAt: raced.outputAt } : {}),
-    }).pipe(
-      Effect.ensuring(
-        Effect.sync(() => {
-          for (const slot of hedgeSlots) SessionMembershipGate.release(slot.membership, slot.result)
-        }),
-      ),
-    )
+    return yield* Effect.gen(function* () {
+      const raced = yield* SessionHedge.race({
+        primary: llm.stream(input.prepared.request, primaryLimit.options(input.prepared.options)),
+        afterMs: escalate ? 0 : (routing.hedgeAfterMs ?? 0),
+        deadlineMs:
+          typeof routing.policy.firstTokenTimeoutMs === "number" ? routing.policy.firstTokenTimeoutMs : 60_000,
+        // No next target, or one that cannot be prepared, simply means there is nothing to hedge with.
+        // A session that just moved races its origin, where its cache is, rather than the next fallback.
+        start: Effect.suspend(() => (routing.origin ? routing.origin() : routing.fallback())).pipe(
+          Effect.flatMap((next) =>
+            next === undefined
+              ? Effect.succeed(Option.none())
+              : prepareFor(next).pipe(
+                  // A preparation that fails or is interrupted never starts the hedge, so
+                  // the claim the fallback resolution spent is handed back here instead of
+                  // stranding until the bench expires (#1486, review follow-up). A hedge
+                  // that does start keeps its claim: the race settles it (the winner via
+                  // run(), the loser via ModelRoute.slow).
+                  Effect.onExit((exit) =>
+                    exit._tag === "Success" || !next.routing?.probeClaim
+                      ? Effect.void
+                      : Effect.sync(() => {
+                          const claim = next.routing!.probeClaim!
+                          ModelRoute.releaseBenchProbe(next.routing!.target, undefined, claim.claimedAt, claim.token)
+                          if (claim.credentialID)
+                            ModelRoute.releaseBenchProbe(
+                              next.routing!.target,
+                              claim.credentialID,
+                              claim.claimedAt,
+                              claim.token,
+                            )
+                        }),
+                  ),
+                  Effect.tap(() => holdHedgeSlot(next)),
+                  Effect.map((prepared) => {
+                    const rateLimit = captureRateLimit(next.ref, next.routing?.credentialID)
+                    // A hedge has begun: both targets are named before either answers, so the race
+                    // itself is visible even if the loser never produces an event.
+                    ModelRouteLog.record({
+                      kind: "decision",
+                      row: {
+                        time: Date.now(),
+                        session_id: input.sessionID,
+                        route_id: routing.routeID,
+                        selection: "hedge-race",
+                        candidates: [
+                          `${input.model.ref.providerID}/${input.model.ref.id}`,
+                          `${next.ref.providerID}/${next.ref.id}`,
+                        ],
+                        reason: "hedge-started" as const,
+                      },
+                    })
+                    return Option.some({
+                      value: { model: next, prepared, rateLimit },
+                      stream: llm.stream(prepared.request, rateLimit.options(prepared.options)),
+                    })
+                  }),
+                ),
+          ),
+          Effect.orElseSucceed(() => Option.none()),
+        ),
+      })
+      if (raced.hedgeStarted) {
+        // The target that lost: the primary when the hedge answered first, otherwise the hedge.
+        const loser = raced.winner === "hedge" ? input.model : raced.hedgeValue?.model
+        if (loser) {
+          ModelRoute.slow(loser.ref, routing.policy, Date.now(), loser.ref.variant)
+          ModelRoute.recordUsage(loser.ref, input.estimatedInputTokens ?? 0)
+        }
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: {
+            time_started: Date.now() - raced.loserElapsedMs,
+            time_ended: Date.now(),
+            session_id: input.sessionID,
+            assistant_message_id: input.assistantMessageID,
+            route_id: routing.routeID,
+            provider_id: loser?.ref.providerID ?? input.model.ref.providerID,
+            model_id: loser?.ref.id ?? input.model.ref.id,
+            credential_id: loser?.servingCredentialID ?? loser?.routing?.credentialID,
+            outcome: "hedged-out",
+            hedged: true,
+            output_started: false,
+            response_ms: raced.loserElapsedMs,
+            tokens_input: input.estimatedInputTokens,
+            tokens_estimated: true,
+            continuation_index: input.continuation?.index,
+          },
+          continuationOfMessageID: input.continuation?.of,
+        })
+      }
+      const winner = raced.winner === "hedge" ? raced.value : undefined
+      return yield* run(winner ? { ...input, model: winner.model, prepared: winner.prepared } : input, {
+        rateLimit: winner ? winner.rateLimit : primaryLimit,
+        stream: raced.stream,
+        startedAt: raced.startedAt,
+        ...(raced.outputAt !== undefined ? { outputAt: raced.outputAt } : {}),
+      })
+    }).pipe(Effect.ensuring(Effect.sync(releaseHedgeSlots)))
   })
 
   /** One request, or two when the route hedges: see SessionHedge.race. */
@@ -1214,10 +1541,11 @@ const isInterruptedStream = (failure: AIError) => {
 
 /** Tool.Error settles in each fiber; only user declines remain in the typed error channel. */
 const classifyToolExits = (
-  settled: Exit.Exit<Array<Exit.Exit<void, Permission.DeclinedError | QuestionTool.CancelledError>>>,
+  exits: ReadonlyArray<Exit.Exit<void, Permission.DeclinedError | QuestionTool.CancelledError>>,
   runs: ReadonlyArray<{ readonly call: ToolCall }>,
+  // The step was interrupted while it waited for its tools.
+  interruptedWhileWaiting: boolean,
 ) => {
-  const exits = Exit.isSuccess(settled) ? settled.value : []
   const declines = exits.flatMap((exit, index) =>
     Exit.isFailure(exit)
       ? exit.cause.reasons.flatMap((reason) =>
@@ -1225,9 +1553,7 @@ const classifyToolExits = (
         )
       : [],
   )
-  const causes = Exit.isFailure(settled)
-    ? [settled.cause]
-    : exits.flatMap((exit) => (Exit.isFailure(exit) ? [exit.cause] : []))
+  const causes = exits.flatMap((exit) => (Exit.isFailure(exit) ? [exit.cause] : []))
   const failure = causes
     .flatMap((cause) => {
       if (Cause.hasInterrupts(cause)) return []
@@ -1235,5 +1561,39 @@ const classifyToolExits = (
       return reasons.length > 0 ? [Cause.fromReasons<never>(reasons)] : []
     })
     .at(0)
-  return { interrupted: causes.some(Cause.hasInterrupts), declines, failure }
+  return { interrupted: interruptedWhileWaiting || causes.some(Cause.hasInterrupts), declines, failure }
+}
+
+// How long a user's stop waits for the tools it asked to stop before interrupting them.
+const COOPERATIVE_STOP = "5 seconds"
+
+type Cancel = ReturnType<typeof makeCancel>
+
+/**
+ * A tool call's `cancel`. `trigger` completes it, and reports whether the tool was awaiting it, so would stop on its
+ * own; a tool that was not is interrupted instead.
+ */
+export const makeCancel = () => {
+  let listeners = 0
+  let cancelled = false
+  const gate = Deferred.makeUnsafe<void>()
+  return {
+    effect: Effect.suspend(() => {
+      if (cancelled) return Effect.void
+      listeners++
+      return Deferred.await(gate).pipe(
+        Effect.ensuring(
+          Effect.sync(() => {
+            listeners--
+          }),
+        ),
+      )
+    }),
+    trigger: () => {
+      cancelled = true
+      if (listeners === 0) return false
+      Deferred.doneUnsafe(gate, Exit.void)
+      return true
+    },
+  }
 }

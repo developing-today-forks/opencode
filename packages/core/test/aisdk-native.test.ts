@@ -17,7 +17,7 @@ function map(
     package: `aisdk:${packageName}`,
     settings: { ...settings },
   }
-  AISDKNative.rewrite(target, { specifier: target.package, providerID, modelID })
+  AISDKNative.rewrite(target, { builtins: Provider.builtinPackages, specifier: target.package, providerID, modelID })
   return target.package?.startsWith("aisdk:") ? undefined : target
 }
 
@@ -92,6 +92,18 @@ describe("AISDKNative", () => {
         reasoningEffort: "high",
       },
     })
+  })
+
+  test("maps the meta provider's AI SDK spellings to the native Meta packages (G1, #2230)", () => {
+    // The meta config block spells `@ai-sdk/openai` on purpose: the HOSTS rewrite
+    // in aisdk-native.ts is the only thing that lands it on the fork-native Meta
+    // Responses package instead of the real AI SDK OpenAI package. Pin every
+    // protocol spelling so removing the HOSTS entry fails here first.
+    expect(map("@ai-sdk/openai", { baseURL: "https://api.meta.ai/v1" }, "test-model", "meta")?.package).toBe(
+      "@opencode/ai/providers/meta/responses",
+    )
+    expect(map("@ai-sdk/openai-compatible", {}, "test-model", "meta")?.package).toBe("@opencode/ai/providers/meta/chat")
+    expect(map("@ai-sdk/anthropic", {}, "test-model", "meta")?.package).toBe("@opencode/ai/providers/meta/messages")
   })
 
   test("maps Anthropic settings and request options to the native provider", () => {
@@ -240,7 +252,12 @@ describe("AISDKNative", () => {
         package: specifier,
         settings,
       }
-      AISDKNative.rewrite(target, { specifier, providerID: "test-provider", modelID })
+      AISDKNative.rewrite(target, {
+        builtins: Provider.builtinPackages,
+        specifier,
+        providerID: "test-provider",
+        modelID,
+      })
       return target
     }
 
@@ -252,6 +269,13 @@ describe("AISDKNative", () => {
       package: "@opencode/ai/providers/amazon-bedrock/mantle/messages",
       settings: { apiKey: "token" },
     })
+    expect(rewrite("@opencode/ai/providers/amazon-bedrock-mantle", {}, "openai.gpt-oss-120b").package).toBe(
+      "@opencode/ai/providers/amazon-bedrock/mantle/chat",
+    )
+    for (const name of ["chat", "responses", "interactions", "mistral"])
+      expect(rewrite(`@opencode/ai/providers/google-vertex-${name}`, {}).package).toBe(
+        `@opencode/ai/providers/google-vertex/${name}`,
+      )
     expect(rewrite("@opencode/ai/providers/azure", { useCompletionUrls: true }).package).toBe(
       "@opencode/ai/providers/azure/chat",
     )

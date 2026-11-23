@@ -54,8 +54,25 @@ jobs:
         id: pr-details
         run: |
           gh api /repos/${{ github.repository }}/pulls/${{ steps.pr-number.outputs.number }} > pr_data.json
-          echo "title=$(jq -r .title pr_data.json)" >> $GITHUB_OUTPUT
-          echo "sha=$(jq -r .head.sha pr_data.json)" >> $GITHUB_OUTPUT
+          # Free-text outputs use the heredoc delimiter form with a
+          # per-run random delimiter: the single-line form lets a title
+          # containing a newline forge or corrupt the other outputs
+          # (e.g. a forged sha, later substituted into a step script).
+          # The body also moves to an output so the consuming step
+          # receives it as data (env), never as shell text. (#2478)
+          title_delim="gho_title_${RANDOM}_${RANDOM}"
+          {
+            echo "title<<${title_delim}"
+            jq -r .title pr_data.json
+            echo "${title_delim}"
+          } >> "$GITHUB_OUTPUT"
+          body_delim="gho_body_${RANDOM}_${RANDOM}"
+          {
+            echo "body<<${body_delim}"
+            jq -r .body pr_data.json
+            echo "${body_delim}"
+          } >> "$GITHUB_OUTPUT"
+          echo "sha=$(jq -r .head.sha pr_data.json)" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -65,35 +82,34 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OPENCODE_PERMISSION: '{ "bash": {  "*": "deny", "gh*": "allow", "gh pr review*": "deny" } }'
           PR_TITLE: ${{ steps.pr-details.outputs.title }}
+          PR_BODY: ${{ steps.pr-details.outputs.body }}
         run: |
-          PR_BODY=$(jq -r .body pr_data.json)
-          opencode run -m opencode/gpt-5.5 --variant medium "A new pull request has been created: '${PR_TITLE}'
-
-          <pr-number>
-          ${{ steps.pr-number.outputs.number }}
-          </pr-number>
-
-          <pr-description>
-          $PR_BODY
+          # The prompt is assembled as data: title/body arrive via env
+          # and are written with printf %s or a quoted heredoc, so their
+          # bytes are never part of a shell string that gets parsed.
+          # (Defense in depth for #2478: one careless edit of the old
+          # double-quoted construction would have made them code.)
+          {
+            printf "A new pull request has been created: '%s'\n\n<pr-number>\n%s\n</pr-number>\n\n<pr-description>\n" "$PR_TITLE" "${{ steps.pr-number.outputs.number }}"
+            printf '%s\n' "$PR_BODY"
+            cat <<'PROMPT_EOF'
           </pr-description>
 
           Please check all the code changes in this pull request against the style guide, also look for any bugs if they exist. Diffs are important but make sure you read the entire file to get proper context. Make it clear the suggestions are merely suggestions and the human can decide what to do
 
           When critiquing code against the style guide, be sure that the code is ACTUALLY in violation, don't complain about else statements if they already use early returns there. You may complain about excessive nesting though, regardless of else statement usage.
-          When critiquing code style don't be a zealot, we don't like "let" statements but sometimes they are the simplest option, if someone does a bunch of nesting with let, they should consider using iife (see packages/opencode/src/util.iife.ts)
+          When critiquing code style don't be a zealot, we don't like let statements but sometimes they are the simplest option, if someone does a bunch of nesting with let, they should consider using iife (see packages/opencode/src/util.iife.ts)
 
           Use the gh cli to create comments on the files for the violations. Try to leave the comment on the exact line number. If you have a suggested fix include it in a suggestion code block.
-          If you are writing suggested fixes, BE SURE THAT the change you are recommending is actually valid typescript, often I have seen missing closing "}" or other syntax errors.
+          If you are writing suggested fixes, BE SURE THAT the change you are recommending is actually valid typescript, often I have seen missing closing } or other syntax errors.
           Generally, write a comment instead of writing suggested change if you can help it.
 
           Command MUST be like this.
-          \`\`\`
-          gh api \
-            --method POST \
-            -H \"Accept: application/vnd.github+json\" \
-            -H \"X-GitHub-Api-Version: 2022-11-28\" \
-            /repos/${{ github.repository }}/pulls/${{ steps.pr-number.outputs.number }}/comments \
-            -f 'body=[summary of issue]' -f 'commit_id=${{ steps.pr-details.outputs.sha }}' -f 'path=[path-to-file]' -F \"line=[line]\" -f 'side=RIGHT'
-          \`\`\`
+          ```
+          gh api   --method POST   -H "Accept: application/vnd.github+json"   -H "X-GitHub-Api-Version: 2022-11-28"   /repos/${{ github.repository }}/pulls/${{ steps.pr-number.outputs.number }}/comments   -f 'body=[summary of issue]' -f 'commit_id=${{ steps.pr-details.outputs.sha }}' -f 'path=[path-to-file]' -F "line=[line]" -f 'side=RIGHT'
+          ```
 
-          Only create comments for actual violations. If the code follows all guidelines, comment on the issue using gh cli: 'lgtm' AND NOTHING ELSE!!!!."
+          Only create comments for actual violations. If the code follows all guidelines, comment on the issue using gh cli: 'lgtm' AND NOTHING ELSE!!!!.
+          PROMPT_EOF
+          } > prompt.txt
+          opencode run -m opencode/gpt-5.5 --variant medium "$(cat prompt.txt)"

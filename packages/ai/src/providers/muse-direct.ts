@@ -18,7 +18,8 @@
 import type { ProviderPackage } from "../provider-package.js"
 import { MuseDirectResponses } from "../protocols/muse-direct-responses.js"
 import { MuseDirectAuth, type CredentialSources } from "./muse-direct-auth.js"
-import { Route, type RouteDefaultsInput } from "../route/client.js"
+import { Route } from "../route/client.js"
+import type { RequestOptions } from "../schema/index.js"
 import { Endpoint } from "../route/endpoint.js"
 import { Auth } from "../route/auth.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
@@ -29,7 +30,7 @@ const baseURL = "https://api.meta.ai/v1"
 
 export type ProviderOptionsInput = OpenResponsesProviderOptionsInput
 
-export type LanguageModelOptions = Omit<RouteDefaultsInput, "providerOptions"> & {
+export type LanguageModelOptions = Omit<RequestOptions, "providerOptions"> & {
   readonly baseURL?: string
   /** An already-minted inference key, used directly (tests/offline). The live path exchanges the Muse account credential instead. */
   readonly apiKey?: string
@@ -82,7 +83,7 @@ const responsesRoute = Route.make({
   endpoint: Endpoint.path("/responses", { baseURL }),
   // Meta Responses does not support WebSocket upgrades; always use HTTP/SSE.
   transport: MuseDirectResponses.transport,
-  defaults: { providerOptions: { store: false, include: ["reasoning.encrypted_content"] } },
+  options: { providerOptions: { store: false, include: ["reasoning.encrypted_content"] } },
 })
 
 export const routes = [responsesRoute]

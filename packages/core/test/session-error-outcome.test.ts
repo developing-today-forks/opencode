@@ -2,12 +2,9 @@ import { describe, expect, test } from "bun:test"
 import {
   AuthenticationError,
   InvalidRequestError,
-  NoRouteError,
   AIError,
   HttpContext,
-  ModelID,
-  ProviderID,
-} from "@opencode/ai"
+} from "@opencode/ai/effect"
 import { toSessionError } from "@opencode/core/session/to-session-error"
 
 const llm = (reason: AIError["reason"]) => new AIError({ reason })
@@ -48,22 +45,6 @@ describe("toSessionError outcome recording (code#7073 step 4)", () => {
       provider: "opencode-go.drewrypope",
       model: "claude-haiku-5-5",
     })
-  })
-
-  test("reason-carried provider/model win over caller context (no-route)", () => {
-    expect(
-      toSessionError(
-        llm(
-          new NoRouteError({
-            message: "failed",
-            route: "route",
-            provider: ProviderID.make("provider"),
-            model: ModelID.make("model"),
-          }),
-        ),
-        { model: { providerID: "other", id: "other-model" } },
-      ),
-    ).toMatchObject({ type: "provider.no-route", provider: "provider", model: "model" })
   })
 
   test("omits provider/model when nothing is known", () => {

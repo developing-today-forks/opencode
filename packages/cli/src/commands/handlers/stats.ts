@@ -27,10 +27,7 @@ const handler = Effect.fn("cli.stats")(function* (input: Runtime.Input<typeof Co
   const invalidDays = days === undefined ? undefined : daysError(days)
   if (invalidDays !== undefined) yield* Effect.fail(new Error(invalidDays))
 
-  const server = yield* ServerConnection.resolve({
-    server: Option.getOrUndefined(input.server),
-    standalone: input.standalone,
-  })
+  const server = yield* ServerConnection.resolve()
   const client = OpenCode.make({ baseUrl: server.endpoint.url, headers: Service.headers(server.endpoint) })
   const range = statsRange({ days, year, all: input.all })
   const projectID =
@@ -43,7 +40,7 @@ const handler = Effect.fn("cli.stats")(function* (input: Runtime.Input<typeof Co
       : project
   const details = input.models || input.tools || input.cost || input.full
   const stats = yield* request(server.endpoint.url, (signal) =>
-    client.session.stats(
+    client.experimental.session.stats(
       {
         from: range.from,
         to: range.to,

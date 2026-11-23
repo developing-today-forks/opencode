@@ -27,6 +27,7 @@ import {
   resolveTranscriptionModel,
   type TranscriptionModelRegistration,
 } from "@opencode/core/transcription-facade"
+import { ownValue } from "@opencode/core/util/record"
 
 export type { TranscriptionModelRegistration }
 
@@ -83,7 +84,7 @@ const EXTENSION_MEDIA_TYPES: Readonly<Record<string, string>> = {
 export function voiceMediaType(name: string, declared?: string): string {
   if (declared) return declared
   const extension = name.split(".").pop()?.toLowerCase()
-  return (extension ? EXTENSION_MEDIA_TYPES[extension] : undefined) ?? ""
+  return (extension ? ownValue(EXTENSION_MEDIA_TYPES, extension) : undefined) ?? ""
 }
 
 function acceptedExtensions(registration: TranscriptionModelRegistration): string {
@@ -202,7 +203,22 @@ export class VoiceInputMachine {
     return this.#snapshot
   }
 
+  /** Grant a submission: reviewing/error audio moves to submitting.
+   * A call while a submission is already in flight grants nothing:
+   * it returns the in-flight state WITHOUT the audio, so a caller
+   * guarding on the returned snapshot (state + audio) treats the
+   * repeat as a no-op instead of calling the facade a second time
+   * for the same audio (#2446). The machine's own snapshot is left
+   * untouched, so the in-flight submission still completes or fails
+   * with its audio retained (section 6.2). */
   beginSubmit(): VoiceSnapshot {
+    if (this.#snapshot.state === "submitting") {
+      return {
+        state: "submitting",
+        elapsedSeconds: this.#snapshot.elapsedSeconds,
+        ...(this.#snapshot.partialText ? { partialText: this.#snapshot.partialText } : {}),
+      }
+    }
     const audio = this.#snapshot.audio
     if (!audio || (this.#snapshot.state !== "reviewing" && this.#snapshot.state !== "error")) return this.#snapshot
     this.#snapshot = { state: "submitting", audio, elapsedSeconds: 0 }
@@ -281,9 +297,14 @@ interface TranscriptionEnvelope {
   provider_metadata?: { provider?: string; model?: string }
 }
 
-function envelopeResult(envelope: TranscriptionEnvelope, registration: TranscriptionModelRegistration): VoiceTranscriptionResult {
+function envelopeResult(
+  envelope: TranscriptionEnvelope,
+  registration: TranscriptionModelRegistration,
+): VoiceTranscriptionResult {
   if (typeof envelope?.text !== "string")
-    throw new VoiceTranscriptionError("The façade answered without a transcript. Retry, or discard the audio and re-record.")
+    throw new VoiceTranscriptionError(
+      "The façade answered without a transcript. Retry, or discard the audio and re-record.",
+    )
   return {
     text: envelope.text,
     provenance: {
@@ -334,7 +355,11 @@ export async function submitVoiceTranscription(input: {
   const body: unknown = await response.json().catch(() => undefined)
   if (!response.ok) {
     const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
-    throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
+    throw actionableError(
+      response.status,
+      error?.code,
+      error?.message ?? `Transcription failed (HTTP ${response.status}).`,
+    )
   }
   return envelopeResult(body as TranscriptionEnvelope, input.registration)
 }
@@ -466,10 +491,16 @@ export async function submitVoiceTranscriptionStream(input: {
   if (!response.ok) {
     const body: unknown = await response.json().catch(() => undefined)
     const error = (body as { error?: { message?: string; code?: string } } | undefined)?.error
-    throw actionableError(response.status, error?.code, error?.message ?? `Transcription failed (HTTP ${response.status}).`)
+    throw actionableError(
+      response.status,
+      error?.code,
+      error?.message ?? `Transcription failed (HTTP ${response.status}).`,
+    )
   }
   if (!response.body)
-    throw new VoiceTranscriptionError("The façade answered without a stream. Retry, or discard the audio and re-record.")
+    throw new VoiceTranscriptionError(
+      "The façade answered without a stream. Retry, or discard the audio and re-record.",
+    )
   const assembler = new TranscriptionStreamAssembler(input.registration)
   const reader = response.body.getReader()
   const decoder = new TextDecoder()
@@ -528,7 +559,10 @@ export interface RecorderCandidate {
 export function recorderCandidates(platform: string): ReadonlyArray<RecorderCandidate> {
   if (platform === "darwin")
     return [
-      { command: "ffmpeg", args: (output) => ["-y", "-f", "avfoundation", "-i", ":0", "-ac", "1", "-ar", "16000", output] },
+      {
+        command: "ffmpeg",
+        args: (output) => ["-y", "-f", "avfoundation", "-i", ":0", "-ac", "1", "-ar", "16000", output],
+      },
       { command: "rec", args: (output) => ["-r", "16000", "-c", "1", output] },
     ]
   if (platform === "win32") return []
@@ -558,10 +592,6 @@ export interface RecorderHandle {
 
 export type RecorderSpawn = (command: string, args: ReadonlyArray<string>) => RecorderHandle
 
-export function startRecorder(
-  candidate: RecorderCandidate,
-  outputPath: string,
-  spawn: RecorderSpawn,
-): RecorderHandle {
+export function startRecorder(candidate: RecorderCandidate, outputPath: string, spawn: RecorderSpawn): RecorderHandle {
   return spawn(candidate.command, candidate.args(outputPath))
 }

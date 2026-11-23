@@ -64,7 +64,15 @@ export const ShellHandler = HttpApiBuilder.group(Api, "server.shell", (handlers)
         "shell.remove",
         Effect.fn(function* (ctx) {
           const shell = yield* Shell.Service
-          yield* shell.remove(ctx.params.id).pipe(Effect.catchTag("Shell.NotFoundError", () => Effect.void))
+          yield* shell
+            .remove(ctx.params.id)
+            .pipe(
+              Effect.catchTag(
+                "Shell.NotFoundError",
+                () =>
+                  new ShellNotFoundError({ id: ctx.params.id, message: `Shell command not found: ${ctx.params.id}` }),
+              ),
+            )
           return HttpApiSchema.NoContent.make()
         }),
       )

@@ -73,6 +73,7 @@ export const ShellGroup = HttpApiGroup.make("server.shell")
       params: { id: Shell.ID },
       query: LocationQuery,
       success: HttpApiSchema.NoContent,
+      error: ShellNotFoundError,
     })
       .annotateMerge(locationQueryOpenApi)
       .annotateMerge(
@@ -83,6 +84,4 @@ export const ShellGroup = HttpApiGroup.make("server.shell")
         }),
       ),
   )
-  .annotateMerge(
-    OpenApi.annotations({ title: "shell", description: "Location-scoped shell command routes." }),
-  )
+  .annotateMerge(OpenApi.annotations({ title: "shell", description: "Location-scoped shell command routes." }))

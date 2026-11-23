@@ -28,13 +28,13 @@ no push tier, whatever older text said (#1533).
 
 Highest class wins when a change spans classes.
 
-| class | trigger paths (examples) | basic tier |
-|---|---|---|
-| 0 — prose | `**.md`, `docs/`, comments-only changes | nothing, or markdown lint only |
-| 1 — config/data | `**.json/yaml/toml` non-build, `.github/**` (non-workflow) | syntax parse + lint of changed files |
-| 2 — package source (default) | one package's `src` + tests | lint/format + typecheck/syntax of affected packages + affected unit tests |
-| 3 — elevated | lockfiles, `go.mod`/`go.sum` roots, `flake.nix`/`flake.lock`, build definitions, `.github/workflows/**`, shared/core libraries | class 2 + compile check of affected packages |
-| 4 — nix expressions | `**.nix` | class 1 + parse/eval of the changed files only (never full flake check in the basic tier) |
+| class                        | trigger paths (examples)                                                                                                       | basic tier                                                                                |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| 0 — prose                    | `**.md`, `docs/`, comments-only changes                                                                                        | nothing, or markdown lint only                                                            |
+| 1 — config/data              | `**.json/yaml/toml` non-build, `.github/**` (non-workflow)                                                                     | syntax parse + lint of changed files                                                      |
+| 2 — package source (default) | one package's `src` + tests                                                                                                    | lint/format + typecheck/syntax of affected packages + affected unit tests                 |
+| 3 — elevated                 | lockfiles, `go.mod`/`go.sum` roots, `flake.nix`/`flake.lock`, build definitions, `.github/workflows/**`, shared/core libraries | class 2 + compile check of affected packages                                              |
+| 4 — nix expressions          | `**.nix`                                                                                                                       | class 1 + parse/eval of the changed files only (never full flake check in the basic tier) |
 
 ## Merge requirement
 
@@ -77,8 +77,11 @@ in the same dispatched or scheduled runs, after the basic tier.
 - `nix-eval` — full evaluation on **manual dispatch only** (there
   is no push trigger and no paths-gated PR variant, because there
   are no PR triggers).
-- `storybook` — **manual dispatch only**; unchanged apart from the
-  standard concurrency group.
+
+Workflow files were renamed by the 2026-11-22 anomalyco/opencode sync
+(`test.yml` → `check-test.yml`, `nix-eval.yml` → `check-nix.yml`); the
+workflow `name:` values above are unchanged. `storybook.yml` was
+removed by that sync along with the upstream storybook build.
 
 ## Release gate (Phase 3, code#1782 step 7)
 
@@ -88,29 +91,26 @@ workflows — `test`, `check`, `nix-eval`, the same set
 `main-broken.yml` watches: for the exact SHA being published, the
 latest completed run of each on branch `main` must have conclusion
 `success`. A failed, cancelled, or missing conclusion refuses the
-publish (fail-closed). Enforcement is the reusable
-`.github/actions/main-gate` check: `publish.yml` gates its `version`
-job on it (every other job follows through `needs`), and
-`publish-vscode.yml` and `publish-github-action.yml` gate their
-`publish` jobs on it the same way, with one refinement: those
-publishers take their release from the newest `vscode-v*` /
-`github-v*` tag (by committer date), not from the run's SHA, so
-their gate jobs resolve that tag once, gate its peeled commit (for
-vscode, the checked-out code's SHA is gated as well), and pass the
-same tag to the publish script as a pinned argument — the gated
-commit is always the published one. `release-github-action.yml` only
-cuts the `github-v*` tag and publishes nothing itself; the publish it
-feeds is gated, so it carries no separate gate. Because the tier
-workflows run only on dispatch or schedule, a publish dispatch whose
-gate has not completed for that SHA is refused: dispatch the tier
-workflows, wait for a green main for that SHA, then re-run
-(dispatch) the publish workflow.
+publish (fail-closed). Enforcement is the inline gate in the
+publish path (`release.yml`, `release_gate: true`).
 
-Hotfix override: set the repository variable `MAIN_GATE_OVERRIDE=1`
-to bypass the gate for one release — the bypass is announced as a
-warning in the run log — and unset it immediately afterwards. The
-override is for a legitimate hotfix that cannot wait for a green
-main; it is not a way to make red-main releases routine.
+Since the 2026-11-22 anomalyco/opencode sync, this repository has no
+publish workflow that can run: upstream replaced `publish.yml`,
+`publish-vscode.yml`, `publish-github-action.yml`,
+`release-github-action.yml` and `containers.yml` with `release.yml`,
+whose every job depends on a `plan` job guarded to
+`github.repository == 'anomalyco/opencode'`, so it never publishes from
+this fork. The former composite check (`.github/actions/main-gate`)
+was removed as orphaned dead code (#2687): no workflow referenced it.
+Any publish workflow added to this fork must enforce this gate for
+the exact SHA before publishing.
+
+Hotfix override: the gate must keep a bypass for a legitimate
+hotfix that cannot wait for a green main, announced as a warning in
+the run log and never left in place afterwards — the removed
+composite check implemented this as the repository variable
+`MAIN_GATE_OVERRIDE=1`, set for one release and unset immediately
+after. The override is not a way to make red-main releases routine.
 
 ## Dedup rule
 
@@ -125,9 +125,9 @@ push-triggered one.
 
 Runs on `main` are keyed by `run_id` so they are never cancelled;
 branch and dispatch runs on other refs cancel on supersede.
-`check.yml` and `test.yml` express this as a `case(...)` on
-`github.ref`; `nix-eval.yml` and `storybook.yml` still carry the
-equivalent template expression:
+`check.yml` and `check-test.yml` express this as a `case(...)` on
+`github.ref`; `check-nix.yml` still carries the equivalent template
+expression:
 
 ```yaml
 concurrency:
@@ -158,20 +158,32 @@ Never pair `queue: max` with a `cancel-in-progress` expression that
 can evaluate true for `issues`/`pull_request_target` events — GitHub
 rejects that combination and the workflow never runs.
 
-## Backstop guard (#2322)
+## Backstop guard (#2322, extended by #2409)
 
 The `test` workflow's nightly schedule is this repo's full-main
 backstop (see "How the classes map"). It was found `disabled_manually`
 on 2026-11-12 with no recorded decision to disable it, and re-enabled
 the same day. A disabled workflow fails silently — the schedule simply
-never fires — so the state is guarded operationally:
+never fires — so the state is guarded operationally.
 
-- Check: `gh workflow list --all` must report `test` as `active`.
-  Anything else (`disabled_manually`, `disabled_inactivity`) removes
-  the backstop and is a CI-health bug, not a posture.
+The guard covers every dispatch-only tier workflow, not just `test`:
+`check` was found `disabled_manually` next (#2409 — it is the only
+place typecheck runs; re-enabled 2026-11-15, first post-enable dispatch
+verified green on `main`, run 43996456394), and `nix-eval` and
+`storybook` were still `disabled_manually` with no recorded decision
+when the guard was extended to them on 2026-11-17; both were enabled
+the same day, with verification dispatches on `main` (runs 44011572773
+and 44011578553).
+
+- Check: `gh workflow list --all` must report `test`, `check`, and
+  `nix-eval` as `active` (`storybook` was removed by the 2026-11-22
+  sync). Anything else
+  (`disabled_manually`, `disabled_inactivity`) removes the backstop
+  and is a CI-health bug, not a posture.
 - The repo-health sweep for this repo verifies that state on its
   regular pass and re-files it against this policy when it drifts;
-  re-enabling is `gh workflow enable test` plus a dispatched
-  verification run on `main` that must reach the build and e2e jobs.
-- Disabling `test` deliberately requires recording the decision and
-  its replacement backstop in this file first.
+  re-enabling is `gh workflow enable <name>` plus a dispatched
+  verification run on `main` that must reach the workflow's jobs
+  (for `test`, the build and e2e jobs; for `check`, basic typecheck).
+- Disabling any of them deliberately requires recording the decision
+  and its replacement backstop in this file first.

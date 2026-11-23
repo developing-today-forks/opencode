@@ -1,9 +1,9 @@
 export * as Session from "./session.js"
 export * from "./session/schema.js"
 
-import { Effect, Layer, Schema, Context, Stream } from "effect"
-import { LLMClient } from "@opencode/ai"
-import { ListAnchor } from "@opencode/schema/session"
+import { DateTime, Effect, Layer, Context, Option, Stream } from "effect"
+import { LLMClient } from "@opencode/ai/effect"
+import { ListAnchor, ListCursor, ListFilter } from "@opencode/schema/session"
 import { and, desc, eq } from "drizzle-orm"
 import { Project } from "./project.js"
 import { Model } from "@opencode/schema/model"
@@ -13,9 +13,12 @@ import { SessionMessage } from "./session/message.js"
 import { PromptInput } from "@opencode/schema/prompt-input"
 import { Bus } from "./bus.js"
 import { Instance } from "./instance/service.js"
+import { Plugin } from "./plugin/service.js"
+import { PluginHooks } from "./plugin/hooks.js"
 import { Database } from "./database/database.js"
 import { SessionProjector } from "./session/projector.js"
 import { SessionMessageTable } from "./session/sql.js"
+import { SessionBlob } from "./session/blob.js"
 import { SessionSchema } from "./session/schema.js"
 import { RelativePath } from "./schema.js"
 import { Agent } from "@opencode/schema/agent"
@@ -32,10 +35,12 @@ import {
   CompactionConflictError,
   ForkEmptyError,
   InboxConflictError,
+  InvalidListCursorError,
   MessageDecodeError,
   MessageNotFoundError,
   NotFoundError,
   PromptConflictError,
+  RouteTargetError,
   SkillNotFoundError,
   SyntheticConflictError,
 } from "./session/error.js"
@@ -66,6 +71,8 @@ import type { FileDiff } from "@opencode/schema/file-diff"
 import { Job } from "./job.js"
 import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
+import { SessionRouteTarget } from "./session/route-target.js"
+import { ModelRoute } from "./model-route.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
 import { McpxSubagent } from "./tool/plugin/mcpx-subagent.js"
 import { MessagingVars } from "./messaging/vars.js"
@@ -79,10 +86,12 @@ import { MessagingVars } from "./messaging/vars.js"
 //   - by subpath
 // - by workspace (home is special)
 
-export { ListAnchor }
+export { ListAnchor, ListCursor }
 
 export const ListInput = SessionStore.ListInput
 export type ListInput = SessionStore.ListInput
+
+const DefaultListLimit = 50
 
 type CreateBaseInput = {
   id?: SessionSchema.ID
@@ -111,11 +120,14 @@ export {
   AttachmentError,
   BusyError,
   CompactionConflictError,
+  ForkEmptyError,
   InboxConflictError,
+  InvalidListCursorError,
   MessageDecodeError,
   MessageNotFoundError,
   NotFoundError,
   PromptConflictError,
+  RouteTargetError,
   SkillNotFoundError,
   SyntheticConflictError,
 }
@@ -125,9 +137,14 @@ export { DestinationNotFoundError, DestinationNotDirectoryError, DestinationUnav
 export { TurnRangeError }
 
 export interface Interface {
-  readonly list: (input?: ListInput) => Effect.Effect<{
-    readonly data: SessionSchema.Info[]
-  }>
+  /** A cursor carries the filters of the request that produced it, so filters passed with a cursor are ignored. */
+  readonly list: (input?: ListFilter & { readonly limit?: number; readonly cursor?: ListCursor }) => Effect.Effect<
+    {
+      readonly data: SessionSchema.Info[]
+      readonly cursor: { readonly previous?: ListCursor; readonly next?: ListCursor }
+    },
+    InvalidListCursorError
+  >
   readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info, NotFoundError | ModelGovernance.DeniedError>
   readonly fork: (
     input: ForkInput,
@@ -149,6 +166,15 @@ export interface Interface {
     sessionID: SessionSchema.ID
     messageID: SessionMessage.ID
   }) => Effect.Effect<SessionMessage.Info | undefined>
+  /** Experimental: {@link Interface.messages} with files stored in `blob` left as `media:` refs when the session's location enables `experimental.media_blob`. */
+  readonly messagesWithRefs: (
+    input: SessionStore.MessagesInput,
+  ) => Effect.Effect<SessionMessage.MediaInfo[], NotFoundError | MessageDecodeError>
+  /** Experimental: {@link Interface.message} with files stored in `blob` left as `media:` refs when the session's location enables `experimental.media_blob`. */
+  readonly messageWithRefs: (input: {
+    sessionID: SessionSchema.ID
+    messageID: SessionMessage.ID
+  }) => Effect.Effect<SessionMessage.MediaInfo | undefined>
   readonly context: (
     sessionID: SessionSchema.ID,
   ) => Effect.Effect<SessionMessage.Info[], NotFoundError | MessageDecodeError>
@@ -168,6 +194,8 @@ export interface Interface {
    * unhandled compaction barriers.
    */
   readonly inbox: (sessionID: SessionSchema.ID) => Effect.Effect<SessionInbox.Info[], NotFoundError>
+  /** Experimental: {@link Interface.inbox} with files stored in `blob` left as `media:` refs when the session's location enables `experimental.media_blob`. */
+  readonly inboxWithRefs: (sessionID: SessionSchema.ID) => Effect.Effect<SessionInbox.MediaInfo[], NotFoundError>
   readonly cancelInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly steerInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
   readonly queueInbox: (input: InboxItemRef) => Effect.Effect<void, NotFoundError | InboxConflictError>
@@ -192,7 +220,23 @@ export interface Interface {
     sessionID: SessionSchema.ID
     model: Model.Ref
   }) => Effect.Effect<void, NotFoundError | ModelGovernance.DeniedError>
+  /**
+   * Pins (or, with `target: null`, clears) the session's preferred member of a model pool. The
+   * session stays on the pool: the member serves while healthy, failover works as usual, and later
+   * requests return to the member once it recovers. Applies from the next model request. Held in
+   * memory (see `ModelRoute.pinTarget`), so a restart clears it.
+   */
+  readonly routeTarget: (input: {
+    sessionID: SessionSchema.ID
+    routeID: string
+    target: Model.Ref | null
+  }) => Effect.Effect<void, NotFoundError | RouteTargetError>
+  readonly routeTargets: (
+    sessionID: SessionSchema.ID,
+  ) => Effect.Effect<ReadonlyArray<{ readonly routeID: string; readonly target: Model.Ref }>, NotFoundError>
   readonly rename: (input: { sessionID: SessionSchema.ID; title: string }) => Effect.Effect<void, NotFoundError>
+  readonly archive: (sessionID: SessionSchema.ID, input?: { time?: number }) => Effect.Effect<void, NotFoundError>
+  readonly unarchive: (sessionID: SessionSchema.ID) => Effect.Effect<void, NotFoundError>
   readonly setMetadata: (input: {
     sessionID: SessionSchema.ID
     metadata: SessionSchema.Metadata
@@ -208,12 +252,14 @@ export interface Interface {
   readonly move: SessionMove.Interface["move"]
   readonly prompt: (
     input: Parameters<Session.Handle["prompt"]>[0] & { sessionID: SessionSchema.ID },
+    /** A bounded durability step after successful admission and wake, in the same interruption mask. */
+    onAccepted?: Effect.Effect<void>,
   ) => ReturnType<Session.Handle["prompt"]>
-  /** Generates text from current Session context without admitting input or mutating history. */
+  /** Generates text from current Session context without admitting input or mutating history. Its usage counts toward the Session's totals. */
   readonly generate: (input: {
     sessionID: SessionSchema.ID
     prompt: string
-  }) => Effect.Effect<string, NotFoundError | SessionGenerate.Error>
+  }) => Effect.Effect<SessionGenerate.Result, NotFoundError | SessionGenerate.Error>
   readonly command: (input: {
     sessionID: SessionSchema.ID
     command: string
@@ -267,7 +313,7 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/Se
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const app = yield* App.Metadata
+    const app = yield* App.Service
     const database = yield* Database.Service
     const db = database.db
     const bus = yield* Bus.Service
@@ -282,7 +328,9 @@ const layer = Layer.effect(
     const environments = yield* SessionEnvironment.Service
     const locations = yield* LocationServiceMap.Service
     const sessions = yield* Session.make()
-    const isDurableSessionEvent = Schema.is(SessionEvent.Durable)
+    const mediaBlob = (session: SessionSchema.Info) => SessionBlob.enabledFor(instances, session)
+    const isDurableSessionEvent = (item: Bus.LogItem): item is SessionEvent.DurableEvent =>
+      Object.hasOwn(SessionEvent.Durable.cases, item.type)
     // Governance inputs (config entries + provider catalog) come from the one
     // shared construction in session/governance-config.ts: GovernanceConfig.load.
     const assertModelAllowed = (input: {
@@ -388,7 +436,7 @@ const layer = Layer.effect(
         if (recorded) return recorded
         const parent = input.parentID ? yield* store.get(input.parentID) : undefined
         if (input.parentID && parent === undefined) return yield* new NotFoundError({ sessionID: input.parentID })
-        const location = parent?.location ?? input.location
+        const location = parent?.location ?? (input.location && LocationServiceMap.canonical(input.location))
         if (location === undefined)
           return yield* Effect.die(new Error("Session.create requires either location or an existing parentID"))
         const project = yield* projects.resolve(location.directory)
@@ -513,13 +561,26 @@ const layer = Layer.effect(
         // The fork adopts the parent's newest instruction values rather than the
         // values in effect at the boundary; copied history may contain frozen
         // instruction-update text the initial baseline already reflects.
-        yield* bus.publish(SessionEvent.Forked, {
-          sessionID,
-          parentID: parent.id,
-          boundary: { type: input.before ? "before" : "through", messageID: boundary.id },
-          ...inherited,
-        })
-        return yield* result.get(sessionID).pipe(Effect.orDie)
+        // The parent's location, not the caller's, decides whether the copy's media is stored as blobs.
+        const media = yield* mediaBlob(parent)
+        yield* bus
+          .publish(SessionEvent.Forked, {
+            sessionID,
+            parentID: parent.id,
+            boundary: { type: input.before ? "before" : "through", messageID: boundary.id },
+            ...inherited,
+          })
+          .pipe(Effect.provideService(SessionBlob.ForkMedia, media))
+        const forked = yield* result.get(sessionID).pipe(Effect.orDie)
+        yield* Effect.gen(function* () {
+          yield* Plugin.awaitActivation
+          const hooks = yield* PluginHooks.Service
+          yield* hooks.trigger("session", "fork", { sessionID })
+        }).pipe(
+          instances.provide(forked),
+          Effect.catchCause((cause) => Effect.logWarning("fork hook failed", { sessionID, cause })),
+        )
+        return forked
       }),
       get: (sessionID) => sessions.forSession(sessionID).get(),
       environment: Effect.fn("Session.environment")(function* (input) {
@@ -532,22 +593,62 @@ const layer = Layer.effect(
         yield* result.get(sessionID)
         yield* execution.interrupt(sessionID)
         yield* execution.awaitIdle(sessionID)
+        yield* jobs.cancelSession(sessionID)
         yield* transport.close(sessionID)
-        const children = yield* result.list({ parentID: sessionID })
-        yield* Effect.forEach(children.data, (child) => result.remove(child.id), { concurrency: 1, discard: true })
+        const children = yield* store.list({ parentID: sessionID })
+        // Delete the parent before its children: an interrupted child settles through the report
+        // path, and a report admitted just before the parent's deletion wakes an execution whose
+        // lifecycle write then fails on the deleted row.
         yield* McpxSubagent.releaseSubagentSession(sessionID).pipe(Effect.catch(() => Effect.void))
         yield* environments.clear(sessionID)
+        ModelRoute.forgetPins(sessionID)
         yield* bus.publish(SessionEvent.Deleted, { sessionID })
         yield* bus.remove(sessionID)
+        yield* Effect.forEach(children, (child) => result.remove(child.id), { concurrency: 1, discard: true })
       }),
-      list: Effect.fn("Session.list")(function* (input) {
-        return { data: yield* store.list(input) }
+      list: Effect.fn("Session.list")(function* (input = {}) {
+        const filter =
+          input.cursor === undefined
+            ? input
+            : yield* ListCursor.parse(input.cursor).pipe(Effect.mapError(() => new InvalidListCursorError()))
+        const data = yield* store.list({ ...filter, limit: input.limit ?? DefaultListLimit })
+        const first = data[0]
+        const last = data.at(-1)
+        return {
+          data,
+          cursor: {
+            previous: first
+              ? ListCursor.make({
+                  ...filter,
+                  anchor: { id: first.id, time: DateTime.toEpochMillis(first.time.updated), direction: "previous" },
+                })
+              : undefined,
+            next: last
+              ? ListCursor.make({
+                  ...filter,
+                  anchor: { id: last.id, time: DateTime.toEpochMillis(last.time.updated), direction: "next" },
+                })
+              : undefined,
+          },
+        }
       }),
       messages: Effect.fn("Session.messages")(function* (input) {
         yield* result.get(input.sessionID)
         return yield* store.messages(input)
       }),
       message: (input) => sessions.forSession(input.sessionID).message(input.messageID),
+      messagesWithRefs: Effect.fn("Session.messagesWithRefs")(function* (input) {
+        const session = yield* result.get(input.sessionID)
+        if (!(yield* mediaBlob(session))) return yield* store.messages(input)
+        return yield* store.messagesWithRefs(input)
+      }),
+      messageWithRefs: Effect.fn("Session.messageWithRefs")(function* (input) {
+        const session = yield* result.get(input.sessionID).pipe(Effect.option)
+        if (Option.isNone(session)) return undefined
+        if (!(yield* mediaBlob(session.value))) return yield* result.message(input)
+        const stored = yield* store.messageWithRefs(input.messageID)
+        return stored?.sessionID === input.sessionID ? stored.message : undefined
+      }),
       context: Effect.fn("Session.context")(function* (sessionID) {
         yield* result.get(sessionID)
         return yield* store.context(sessionID)
@@ -564,6 +665,11 @@ const layer = Layer.effect(
         })
       }),
       inbox: (sessionID) => sessions.forSession(sessionID).inbox(),
+      inboxWithRefs: Effect.fn("Session.inboxWithRefs")(function* (sessionID) {
+        const session = yield* result.get(sessionID)
+        if (!(yield* mediaBlob(session))) return yield* result.inbox(sessionID)
+        return yield* SessionInbox.listWithRefs(db, sessionID)
+      }),
       cancelInbox: (input) => sessions.forSession(input.sessionID).cancelInbox(input.inboxID),
       steerInbox: (input) => sessions.forSession(input.sessionID).steerInbox(input.inboxID),
       queueInbox: (input) => sessions.forSession(input.sessionID).queueInbox(input.inboxID),
@@ -578,13 +684,14 @@ const layer = Layer.effect(
               Bus.isSynced(item) || isDurableSessionEvent(item),
           ),
         ),
-      prompt: (input) => sessions.forSession(input.sessionID).prompt(input),
+      prompt: (input, onAccepted) => sessions.forSession(input.sessionID).prompt(input, onAccepted),
       generate: Effect.fn("Session.generate")(function* (input) {
         const session = yield* result.get(input.sessionID)
         return yield* SessionGenerate.generate({ session, prompt: input.prompt }).pipe(
           Effect.provideService(Instance.Service, instances),
           Effect.provideService(Database.Service, database),
           Effect.provideService(LLMClient.Service, llm),
+          Effect.provideService(Bus.Service, bus),
         )
       }),
       command: Effect.fn("Session.command")(function* (input) {
@@ -597,7 +704,27 @@ const layer = Layer.effect(
       skill: (input) => sessions.forSession(input.sessionID).skill(input),
       switchAgent: (input) => sessions.forSession(input.sessionID).switchAgent(input),
       switchModel: (input) => sessions.forSession(input.sessionID).switchModel(input),
+      routeTarget: Effect.fn("Session.routeTarget")(function* (input) {
+        const session = yield* result.get(input.sessionID)
+        if (input.target === null) return ModelRoute.pinTarget(input.routeID, input.sessionID, undefined)
+        const lookup = yield* SessionRouteTarget.lookup(locations, session.location, input.routeID)
+        const reason = !lookup.checked
+          ? undefined
+          : lookup.definition === undefined
+            ? "no model pool has this id"
+            : ModelRoute.memberIndex(lookup.definition, input.target) === undefined
+              ? `${input.target.providerID}/${input.target.id}${input.target.variant ? `#${input.target.variant}` : ""} is not a member of the pool`
+              : undefined
+        if (reason) return yield* new RouteTargetError({ routeID: input.routeID, reason })
+        ModelRoute.pinTarget(input.routeID, input.sessionID, input.target)
+      }),
+      routeTargets: Effect.fn("Session.routeTargets")(function* (sessionID) {
+        yield* result.get(sessionID)
+        return ModelRoute.pinnedTargets(sessionID)
+      }),
       rename: (input) => sessions.forSession(input.sessionID).rename(input),
+      archive: (sessionID, input) => sessions.forSession(sessionID).archive(input),
+      unarchive: (sessionID) => sessions.forSession(sessionID).unarchive(),
       setMetadata: (input) => sessions.forSession(input.sessionID).setMetadata(input),
       setPermissions: (input) => sessions.forSession(input.sessionID).setPermissions(input),
       setSubagentPolicy: (input) => sessions.forSession(input.sessionID).setSubagentPolicy(input),

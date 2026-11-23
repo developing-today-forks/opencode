@@ -334,13 +334,18 @@ export const writeCredential = async (sources: CredentialSources, oauth: ClaudeC
 
 // Renewal timing (#6120). The access token this door spends lives ~8
 // hours; renewal starts when less than RENEWAL_LEAD_MS of it remains —
-// a quarter of the lifetime, two hours — instead of at expiry. The
+// half of the lifetime, four hours — instead of at expiry. The
 // incident this fixes: on 2026-11-10 the first refresh attempt ran 22
 // seconds AFTER the token expired, met the token endpoint's rate limit
 // from the first try, and the failure was misreported as a dead login.
-// Renewing inside a two-hour lead leaves room to wait a rate limit out
-// while the current token still serves.
-export const RENEWAL_LEAD_MS = 2 * 60 * 60 * 1000
+// Renewing inside a lead leaves room to wait a rate limit out while
+// the current token still serves. The lead was two hours until
+// 2026-11-16, when the token endpoint's rate limit outlasted it: the
+// renewal landed ~51 minutes AFTER the token died, with this door the
+// fleet's sole drawable absorber (code#9549). A half-lifetime lead
+// starts attempts mid-life, so a multi-hour rate limit can still be
+// waited out on a live token.
+export const RENEWAL_LEAD_MS = 4 * 60 * 60 * 1000
 /** One request's renewal waits out rate limiting for at most this long
  * before the request surfaces the wait as a rate-limit failure. The
  * wait itself does NOT end there: exhausting the budget against a
@@ -486,7 +491,10 @@ const storedCredentialServes = (stored: ClaudeCodeCredential, now: number): bool
  * in-memory-only credential exists (an unpersisted rotated token is a
  * burned login). Tokens are never logged.
  */
-const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: string): Promise<ClaudeCodeCredential> => {
+const exchangeRefreshToken = async (
+  sources: CredentialSources,
+  refreshToken: string,
+): Promise<ClaudeCodeCredential> => {
   const response = await (sources.fetchFn ?? fetch)(OAUTH_TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -533,7 +541,10 @@ const exchangeRefreshToken = async (sources: CredentialSources, refreshToken: st
     throw new ClaudeCodeRefreshDiscarded(
       "Claude Code OAuth refresh returned no access token; the tokens were discarded.",
     )
-  if ("refresh_token" in tokens && (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0))
+  if (
+    "refresh_token" in tokens &&
+    (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0)
+  )
     throw new ClaudeCodeRefreshDiscarded(
       "Claude Code OAuth refresh returned an empty refresh token; the tokens were discarded.",
     )
@@ -675,7 +686,10 @@ export const beginClaudeCodeSignIn = async (sources: CredentialSources = {}): Pr
     const accessToken = typeof tokens.access_token === "string" ? tokens.access_token.trim() : ""
     if (accessToken.length === 0)
       throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned no access token.")
-    if ("refresh_token" in tokens && (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0))
+    if (
+      "refresh_token" in tokens &&
+      (typeof tokens.refresh_token !== "string" || tokens.refresh_token.trim().length === 0)
+    )
       throw new ClaudeCodeSignInError("Claude Code sign-in token exchange returned an empty refresh token.")
     if (
       "expires_in" in tokens &&
@@ -766,7 +780,7 @@ const emitRenewalEvent = (sources: CredentialSources, event: RenewalEvent): void
 const refreshAndPersist = async (
   sources: CredentialSources,
   refreshToken: string,
-  options: { readonly standing: boolean },
+  options: { readonly standing: boolean; readonly onAdopt?: (refreshToken: string) => void },
 ): Promise<ClaudeCodeCredential> => {
   const effective = sources
   const sleep = effective.sleep ?? defaultSleep
@@ -821,6 +835,7 @@ const refreshAndPersist = async (
       }
       currentRefreshToken = stored.refreshToken
       adoptions += 1
+      options.onAdopt?.(currentRefreshToken)
       emitRenewalEvent(effective, { kind: "adopted", at: now() })
     }
     return undefined
@@ -964,6 +979,11 @@ const scheduleStandingRenewal = (
 ): Promise<ClaudeCodeCredential> => {
   const existing = standingRenewals.get(key)
   if (existing !== undefined) return existing
+  // Keys this standing renewal becomes reachable under when one of its
+  // rounds adopts another writer's rotated token (#2623): a load that
+  // read the rotated file computes its key from the adopted token, and
+  // single-flight ownership must be findable under that key too.
+  const standingAliases = new Set<string>()
   // The ambient cadence marks its waits unref'd; a caller whose
   // sleep is ambient-aware (the test harness parks ambient waits
   // behind a gate) sees the marker on every cadence call.
@@ -997,7 +1017,16 @@ const scheduleStandingRenewal = (
         const span = { sources: roundSources, key }
         standingRoundSpan.add(span)
         try {
-          return await refreshAndPersist(roundSources, refreshToken, { standing: true })
+          return await refreshAndPersist(roundSources, refreshToken, {
+            standing: true,
+            onAdopt: (token) => {
+              const aliasKey = `${sources.configDir ?? ""}\u0000${token}`
+              if (aliasKey !== key && !standingAliases.has(aliasKey)) {
+                standingAliases.add(aliasKey)
+                standingRenewals.set(aliasKey, standing)
+              }
+            },
+          })
         } finally {
           standingRoundSpan.delete(span)
         }
@@ -1019,11 +1048,14 @@ const scheduleStandingRenewal = (
   standingRenewals.set(key, standing)
   // A landed standing renewal has already persisted the rotated pair;
   // a rejected one must not be cached — either way the slot clears on
-  // settle so the next expiry starts fresh.
+  // settle so the next expiry starts fresh. Adoption aliases (#2623)
+  // clear on the same terms.
   standing
     .catch(() => {})
     .finally(() => {
       if (standingRenewals.get(key) === standing) standingRenewals.delete(key)
+      for (const aliasKey of standingAliases)
+        if (standingRenewals.get(aliasKey) === standing) standingRenewals.delete(aliasKey)
     })
   return standing
 }
@@ -1032,7 +1064,8 @@ const scheduleStandingRenewal = (
 const inflightRefresh = new Map<string, Promise<ClaudeCodeCredential>>()
 
 const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCredential) => {
-  const key = `${sources.configDir ?? ""}\u0000${credential.refreshToken}`
+  const keyFor = (token: string) => `${sources.configDir ?? ""}\u0000${token}`
+  const key = keyFor(credential.refreshToken as string)
   // The standing loop's own rounds re-enter here through the join path
   // (its in-flight entry was just cleared as the previous attempt
   // settled), and the loop must not join standing code from inside
@@ -1050,8 +1083,29 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
   // joins it instead of running a competing in-request renewal.
   const standing = standingRenewals.get(key)
   if (standing !== undefined) return joinStandingRenewal(sources, standing, credential)
-  const attempt = refreshAndPersist(sources, credential.refreshToken as string, { standing: false }).catch(
-    (cause: unknown) => {
+  // Single-flight ownership follows adoption (#2623): when the renewal
+  // adopts another writer's rotated refresh token, its exchange presents
+  // the adopted token while this attempt stays registered under the
+  // original key — a concurrent load that read the rotated file computes
+  // the adopted key, would find neither map, and would start a second
+  // exchange of the same single-use token. The attempt is therefore
+  // aliased under every token it adopts, and a retirement to the
+  // standing retry is scheduled under the last adopted token, whose key
+  // is the one later loads compute.
+  const aliases = new Set<string>()
+  let lastAdopted: string | undefined
+  const attemptRef: { promise?: Promise<ClaudeCodeCredential> } = {}
+  const onAdopt = (token: string) => {
+    lastAdopted = token
+    const aliasKey = keyFor(token)
+    if (aliasKey === key || aliases.has(aliasKey)) return
+    aliases.add(aliasKey)
+    if (attemptRef.promise !== undefined) inflightRefresh.set(aliasKey, attemptRef.promise)
+  }
+  const attempt = refreshAndPersist(sources, credential.refreshToken as string, {
+    standing: false,
+    onAdopt,
+  }).catch((cause: unknown) => {
     // Genuine rejections keep today's fail-loud floor and are never
     // retried standing. Everything else — a rate limit that outlasted
     // the wait budget, a transient exchange failure — retires to the
@@ -1067,16 +1121,23 @@ const refreshCredential = (sources: CredentialSources, credential: ClaudeCodeCre
       })
       throw cause
     }
-    scheduleStandingRenewal(sources, key, credential.refreshToken as string)
+    scheduleStandingRenewal(
+      sources,
+      lastAdopted === undefined ? key : keyFor(lastAdopted),
+      lastAdopted ?? (credential.refreshToken as string),
+    )
     throw cause
   })
+  attemptRef.promise = attempt
+  for (const aliasKey of aliases) inflightRefresh.set(aliasKey, attempt)
   inflightRefresh.set(key, attempt)
   // Clear on settle so a later expiry refreshes again; a rejection must
-  // not be cached forever.
+  // not be cached forever. Adoption aliases clear on the same terms.
   attempt
     .catch(() => {})
     .finally(() => {
       if (inflightRefresh.get(key) === attempt) inflightRefresh.delete(key)
+      for (const aliasKey of aliases) if (inflightRefresh.get(aliasKey) === attempt) inflightRefresh.delete(aliasKey)
     })
   return attempt
 }
@@ -1115,8 +1176,7 @@ const loadCredentialEffect = (sources: CredentialSources) =>
     // credentials-file credential with a refresh token renews while its
     // current token still serves, so a rate-limited renewal can be
     // waited out without the door ever presenting an expired token.
-    const renewalDue =
-      credential.expiresAt !== undefined && credential.expiresAt - now <= RENEWAL_LEAD_MS
+    const renewalDue = credential.expiresAt !== undefined && credential.expiresAt - now <= RENEWAL_LEAD_MS
     if (!renewalDue) return credential
     // The env tier (#1752) never renews; a file credential with no
     // refresh token serves until expiry and then keeps the fail-loud

@@ -30,12 +30,15 @@ export const Fee = Schema.Struct({
   renewsOn: Schema.optional(Schema.String),
 })
 
+/** A finite number that must be positive: a zero or negative window duration is a data error, not a value (#2315). */
+export const PositiveFinite = Schema.Finite.check(Schema.isGreaterThan(0))
+
 /** One limit a plan puts on usage: a count, a token budget or a dollar amount, over a window that resets. */
 export const QuotaWindow = Schema.Struct({
   name: Schema.String,
   unit: Unit,
   limit: Schema.optional(Schema.Finite),
-  windowHours: Schema.optional(Schema.Finite),
+  windowHours: Schema.optional(PositiveFinite),
   resetRule: Schema.optional(Schema.String),
   resetAt: Schema.optional(Schema.String),
   note: Schema.optional(Schema.String),
@@ -402,14 +405,13 @@ export const readNotes = (filter: NoteFilter = {}, dataDir?: string): { notes: N
     }
     if (at >= since) matching.push(note)
   }
-  matching
-    .sort((left, right) => {
-      const leftAt = ModelRouteLimits.parseAbsoluteTime(left.at)
-      const rightAt = ModelRouteLimits.parseAbsoluteTime(right.at)
-      if (leftAt === undefined) return rightAt === undefined ? 0 : -1
-      if (rightAt === undefined) return 1
-      return leftAt - rightAt
-    })
+  matching.sort((left, right) => {
+    const leftAt = ModelRouteLimits.parseAbsoluteTime(left.at)
+    const rightAt = ModelRouteLimits.parseAbsoluteTime(right.at)
+    if (leftAt === undefined) return rightAt === undefined ? 0 : -1
+    if (rightAt === undefined) return 1
+    return leftAt - rightAt
+  })
   // slice(-0) is slice(0): a limit of 0 (or less) must keep no notes, not every note.
   // A non-finite limit slips past that guard (NaN <= 0 is false, and slice(-Infinity) is
   // also slice(0)), so it keeps no notes either (#733).
@@ -417,7 +419,8 @@ export const readNotes = (filter: NoteFilter = {}, dataDir?: string): { notes: N
   // a limit in (0, 1) would return every note (#904). Floor the limit first: a floored
   // limit of 0 keeps no notes, and a fractional limit >= 1 keeps at most the floored count.
   const floored = filter.limit === undefined ? undefined : Math.floor(filter.limit)
-  const limited = floored === undefined ? matching : !Number.isFinite(floored) || floored <= 0 ? [] : matching.slice(-floored)
+  const limited =
+    floored === undefined ? matching : !Number.isFinite(floored) || floored <= 0 ? [] : matching.slice(-floored)
   return { notes: limited, skipped }
 }
 

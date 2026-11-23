@@ -1,13 +1,15 @@
 export * as CopilotModels from "./models.js"
 
 import { Money } from "@opencode/schema/money"
-import { Option, Schema } from "effect"
+import { Effect, Option, Schema } from "effect"
+import { Headers, HttpClient, HttpClientRequest } from "effect/http"
 import { Model } from "../model.js"
 import { Provider } from "../provider.js"
-import { readBoundedResponseText } from "../tool/http-body.js"
+import { collectBoundedResponseBody } from "../tool/http-body.js"
 
 const RemoteModel = Schema.Struct({
   model_picker_enabled: Schema.Boolean,
+  is_chat_fallback: Schema.optional(Schema.Boolean),
   id: Schema.String,
   name: Schema.String,
   version: Schema.String,
@@ -15,6 +17,7 @@ const RemoteModel = Schema.Struct({
   policy: Schema.optional(Schema.Struct({ state: Schema.optional(Schema.String) })),
   billing: Schema.optional(
     Schema.Struct({
+      auto_discount: Schema.optional(Schema.Number),
       token_prices: Schema.optional(
         Schema.Struct({
           batch_size: Schema.Number,
@@ -59,7 +62,6 @@ const RemoteModel = Schema.Struct({
 })
 
 const Response = Schema.Struct({ data: Schema.Array(Schema.Unknown) })
-const decodeResponse = Schema.decodeUnknownSync(Response)
 const decodeModel = Schema.decodeUnknownOption(RemoteModel)
 
 type RemoteModel = typeof RemoteModel.Type
@@ -73,8 +75,13 @@ type UsableModel = RemoteModel & {
   }
 }
 
-export async function get(baseURL: string, headers: RequestInit["headers"], existing: readonly Model.Info[]) {
-  return derive(baseURL, await load(baseURL, headers), existing)
+export function get(
+  http: HttpClient.HttpClient,
+  baseURL: string,
+  headers: Headers.Input,
+  existing: readonly Model.Info[],
+) {
+  return load(http, baseURL, headers).pipe(Effect.map((remote) => derive(baseURL, remote, existing)))
 }
 
 export type Snapshot = ReadonlyMap<string, UsableModel>
@@ -86,26 +93,32 @@ export type Snapshot = ReadonlyMap<string, UsableModel>
 // in #1007).
 export const modelsMaxResponseBytes = 4 * 1024 * 1024
 
-export async function load(baseURL: string, headers: RequestInit["headers"]): Promise<Snapshot> {
+export const load = Effect.fn("CopilotModels.load")(function* (
+  http: HttpClient.HttpClient,
+  baseURL: string,
+  headers: Headers.Input,
+) {
   const url = `${baseURL}/models`
-  const response = await fetch(url, {
-    headers,
-    signal: AbortSignal.timeout(5_000),
-  })
-  if (!response.ok) throw new Error(`Failed to fetch Copilot models: ${response.status}`)
-
-  const text = await readBoundedResponseText(
-    response,
-    modelsMaxResponseBytes,
-    () => new Error(`Copilot models response from ${url} exceeded ${modelsMaxResponseBytes} bytes`),
-  )
+  const response = yield* HttpClient.filterStatusOk(http)
+    .execute(HttpClientRequest.get(url).pipe(HttpClientRequest.setHeaders(headers)))
+    .pipe(
+      Effect.flatMap((response) =>
+        collectBoundedResponseBody(
+          response,
+          modelsMaxResponseBytes,
+          () => new Error(`Copilot models response from ${url} exceeded ${modelsMaxResponseBytes} bytes`),
+        ),
+      ),
+      Effect.flatMap((body) => Schema.decodeUnknownEffect(Schema.fromJsonString(Response))(new TextDecoder().decode(body))),
+      Effect.timeout("5 seconds"),
+    )
   return new Map(
-    decodeResponse(JSON.parse(text)).data.flatMap((raw) => {
+    response.data.flatMap((raw) => {
       const model = Option.getOrUndefined(decodeModel(raw))
       return model && usable(model) ? ([[model.id, model]] as const) : []
     }),
   )
-}
+})
 
 /** Combine remote facts with source templates, never a previously transformed model result. */
 export function derive(baseURL: string, remote: Snapshot, existing: readonly Model.Info[]) {
@@ -131,6 +144,29 @@ export function derive(baseURL: string, remote: Snapshot, existing: readonly Mod
   return result
 }
 
+/** Copilot's Auto model. Copilot's router picks the model that serves each Session from the account's Auto pool. */
+export const auto = Model.ID.make("auto")
+
+export function autoModel(baseURL: string, remote: Snapshot) {
+  const pool = Array.from(remote.values()).filter((model) => model.billing?.auto_discount !== undefined)
+  if (pool.length === 0) return
+  const route = routeFor(auto, "chat", baseURL)
+  const limits = pool.map((model) => model.capabilities.limits)
+  return Model.Info.make({
+    ...Model.Info.default(Provider.ID.githubCopilot, auto),
+    name: "Auto",
+    package: route.package,
+    settings: { baseURL: route.baseURL },
+    capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+    // Any pool model may serve a Session, so show the smallest window.
+    limit: {
+      context: Math.min(...limits.map((limit) => limit.max_context_window_tokens ?? limit.max_prompt_tokens)),
+      input: Math.min(...limits.map((limit) => limit.max_prompt_tokens)),
+      output: Math.min(...limits.map((limit) => limit.max_output_tokens)),
+    },
+  })
+}
+
 function usable(model: RemoteModel): model is UsableModel {
   return (
     model.policy?.state !== "disabled" &&
@@ -141,14 +177,7 @@ function usable(model: RemoteModel): model is UsableModel {
 }
 
 function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Model.Info) {
-  const messages = remote.supported_endpoints?.includes("/v1/messages") ?? false
-  const endpoint = messages
-    ? "messages"
-    : remote.supported_endpoints?.includes("/responses")
-      ? "responses"
-      : remote.supported_endpoints?.includes("/chat/completions")
-        ? "chat"
-        : undefined
+  const route = routeFor(remote.id, endpoint(remote.supported_endpoints), baseURL)
   const image =
     (remote.capabilities.supports.vision ?? false) ||
     (remote.capabilities.limits.vision?.supported_media_types ?? []).some((item) => item.startsWith("image/"))
@@ -177,11 +206,8 @@ function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Mo
     providerID: Provider.ID.githubCopilot,
     family: previous?.family ?? Model.Family.make(remote.capabilities.family),
     name: previous?.name ?? remote.name,
-    package: messages ? "@opencode/ai/providers/anthropic" : Provider.aisdk("@ai-sdk/github-copilot"),
-    settings: Provider.mergeOverlay(previous?.settings, {
-      baseURL: messages ? `${baseURL}/v1` : baseURL,
-      ...(endpoint ? { endpoint } : {}),
-    }),
+    package: route.package,
+    settings: Provider.mergeOverlay(previous?.settings, { baseURL: route.baseURL }),
     headers: previous?.headers,
     body: previous?.body,
     capabilities: {
@@ -189,7 +215,7 @@ function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Mo
       input,
       output: ["text"],
     },
-    variants: variants(remote, messages),
+    variants: variants(remote, route.endpoint === "messages"),
     time: { released: Number.isFinite(released) ? released : 0 },
     cost: [
       {
@@ -211,6 +237,40 @@ function build(id: Model.ID, remote: UsableModel, baseURL: string, previous?: Mo
       output: remote.capabilities.limits.max_output_tokens,
     },
   })
+}
+
+type Endpoint = "messages" | "responses" | "chat"
+
+const PACKAGES = {
+  messages: "@opencode/ai/providers/anthropic",
+  responses: "@opencode/ai/providers/openai-compatible-responses",
+  chat: "@opencode/ai/providers/openai-compatible",
+} as const satisfies Record<Endpoint, string>
+
+/** The native package and base URL for the Copilot API that serves a model. */
+export function routeFor(modelID: string, advertised: Endpoint | undefined, root: string) {
+  const selected = advertised ?? fallbackEndpoint(modelID)
+  return {
+    endpoint: selected,
+    package: PACKAGES[selected],
+    // Copilot serves Anthropic Messages under /v1 and its OpenAI APIs at the root.
+    baseURL: selected === "messages" ? `${root}/v1` : root,
+  }
+}
+
+function endpoint(supported: ReadonlyArray<string> | undefined): Endpoint | undefined {
+  if (supported?.includes("/v1/messages")) return "messages"
+  if (supported?.includes("/responses")) return "responses"
+  if (supported?.includes("/chat/completions")) return "chat"
+}
+
+// Without advertised endpoints, Copilot serves GPT-5 and later (except GPT-5 mini), Grok and MAI Code
+// only on /responses, and Gemini and the rest on /chat/completions.
+function fallbackEndpoint(modelID: string): Endpoint {
+  const gpt = /^gpt-(\d+)/.exec(modelID)
+  if (gpt !== null && Number(gpt[1]) >= 5 && !modelID.startsWith("gpt-5-mini")) return "responses"
+  if (modelID.startsWith("grok-") || modelID.startsWith("mai-code-")) return "responses"
+  return "chat"
 }
 
 function variants(remote: UsableModel, messages: boolean): Model.Info["variants"] {

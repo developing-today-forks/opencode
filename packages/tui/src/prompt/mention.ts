@@ -1,6 +1,6 @@
 import type { PromptInput, PromptMention } from "@opencode/schema"
+import { measureEditText, type WidthMethod } from "@opentui/core"
 import type { EditablePromptInput } from "./codec"
-import { promptOffsetWidth } from "./display"
 import { expandTrackedPastedText } from "./part"
 
 type TextRange = {
@@ -20,6 +20,7 @@ type CandidateRange = TextRange & {
 export function realignPromptMentions(
   content: string,
   mentions: readonly (PromptMention | undefined)[],
+  widthMethod: WidthMethod,
 ): Array<PromptMention | undefined> {
   const protectedRanges: TextRange[] = []
   const aligned = mentions.map((mention) => (mention && !mention.text ? { ...mention } : undefined))
@@ -34,13 +35,13 @@ export function realignPromptMentions(
   for (const [text, items] of [...groups.entries()].sort(
     ([left], [right]) => right.length - left.length || left.localeCompare(right),
   )) {
-    const candidates = mentionRanges(content, text)
+    const candidates = mentionRanges(content, text, widthMethod)
     const available = candidates.filter((candidate) => !protectedRanges.some((range) => overlaps(candidate, range)))
     for (const [item, candidate] of assignMentions(items, available)) {
       aligned[item.index] = {
         text,
         start: candidate.offset,
-        end: candidate.offset + promptOffsetWidth(text),
+        end: candidate.offset + measureEditText(text, { widthMethod }),
       }
     }
     protectedRanges.push(...candidates)
@@ -49,15 +50,23 @@ export function realignPromptMentions(
   return aligned
 }
 
-export function realignPromptInputMentions(content: string, input: PromptInput.Prompt): EditablePromptInput {
+export function realignPromptInputMentions(
+  content: string,
+  input: PromptInput.Prompt,
+  widthMethod: WidthMethod,
+): EditablePromptInput {
   const files = input.files ?? []
   const agents = input.agents ?? []
   const skills = input.skills ?? []
-  const mentions = realignPromptMentions(content, [
-    ...files.map((file) => file.mention),
-    ...agents.map((agent) => agent.mention),
-    ...skills.map((skill) => skill.mention),
-  ])
+  const mentions = realignPromptMentions(
+    content,
+    [
+      ...files.map((file) => file.mention),
+      ...agents.map((agent) => agent.mention),
+      ...skills.map((skill) => skill.mention),
+    ],
+    widthMethod,
+  )
   const align = <T extends { mention?: PromptMention }>(items: readonly T[] | undefined, offset = 0) =>
     items?.flatMap((item, index) => {
       if (!item.mention?.text) return [{ ...item, mention: item.mention ? { ...item.mention } : undefined }]
@@ -73,36 +82,56 @@ export function realignPromptInputMentions(content: string, input: PromptInput.P
   }
 }
 
+/**
+ * The web composer stores mention ranges as string indexes and the TUI as cells; the two differ after a tab or a wide
+ * character. A range that does not cover its text in cells but does as string indexes is converted to cells.
+ */
+export function promptMentionsToCells<T extends PromptInput.Prompt>(prompt: T, widthMethod: WidthMethod): T {
+  const cells = (index: number) => measureEditText(prompt.text.slice(0, index), { widthMethod })
+  const convert = <M extends { mention?: PromptMention }>(item: M): M => {
+    const mention = item.mention
+    if (!mention?.text || prompt.text.slice(mention.start, mention.end) !== mention.text) return item
+    for (let at = prompt.text.indexOf(mention.text); at !== -1; at = prompt.text.indexOf(mention.text, at + 1))
+      if (cells(at) === mention.start) return item
+    return { ...item, mention: { ...mention, start: cells(mention.start), end: cells(mention.end) } }
+  }
+  return {
+    ...prompt,
+    files: prompt.files?.map(convert),
+    agents: prompt.agents?.map(convert),
+    skills: prompt.skills?.map(convert),
+  }
+}
+
 export function expandPromptInputPastedText(
   input: PromptInput.Prompt,
   pasted: readonly { text: string; source: { start: number; end: number } }[],
+  widthMethod: WidthMethod,
 ): EditablePromptInput {
   const ranges = pasted.map((part) => ({ ...part.source, text: part.text }))
   const shift = (mention: PromptMention | undefined) => {
     if (!mention) return
-    const offset = ranges.reduce(
-      (total, range) =>
-        range.end <= mention.start ? total + promptOffsetWidth(range.text) - (range.end - range.start) : total,
-      0,
-    )
+    const offset = ranges
+      .filter((range) => range.end <= mention.start)
+      .reduce((total, range) => total + measureEditText(range.text, { widthMethod }) - (range.end - range.start), 0)
     return { ...mention, start: mention.start + offset, end: mention.end + offset }
   }
 
   return {
-    text: expandTrackedPastedText(input.text, ranges),
+    text: expandTrackedPastedText(input.text, ranges, widthMethod),
     files: input.files?.map((file) => ({ ...file, mention: shift(file.mention) })),
     agents: input.agents?.map((agent) => ({ ...agent, mention: shift(agent.mention) })),
     skills: input.skills?.map((skill) => ({ ...skill, mention: shift(skill.mention) })),
   }
 }
 
-function mentionRanges(content: string, text: string): CandidateRange[] {
+function mentionRanges(content: string, text: string, widthMethod: WidthMethod): CandidateRange[] {
   const ranges: CandidateRange[] = []
   let searchFrom = 0
   while (true) {
     const start = content.indexOf(text, searchFrom)
     if (start === -1) return ranges
-    ranges.push({ start, end: start + text.length, offset: promptOffsetWidth(content.slice(0, start)) })
+    ranges.push({ start, end: start + text.length, offset: measureEditText(content.slice(0, start), { widthMethod }) })
     searchFrom = start + text.length
   }
 }

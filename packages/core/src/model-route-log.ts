@@ -2,7 +2,7 @@ export * as ModelRouteLog from "./model-route-log.js"
 
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm"
 import { Effect, Layer, Queue } from "effect"
-import { AIError, isRetryable, type HttpContext } from "@opencode/ai"
+import { AIError, isRetryable, type HttpContext } from "@opencode/ai/effect"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { ModelRouteLimits } from "./model-route-limits.js"
@@ -324,11 +324,7 @@ const persist = (db: PersistDb, events: readonly Event[]) =>
  * is the attempt that actually answered — the one whose response hit the output token limit. */
 const persistAttempt = (db: PersistDb, event: Extract<Event, { kind: "attempt" }>) =>
   Effect.gen(function* () {
-    const inserted = yield* db
-      .insert(RouteAttemptTable)
-      .values(event.row)
-      .returning({ id: RouteAttemptTable.id })
-      .get()
+    const inserted = yield* db.insert(RouteAttemptTable).values(event.row).returning({ id: RouteAttemptTable.id }).get()
     if (event.continuationOfMessageID === undefined) return
     yield* db
       .update(RouteAttemptTable)
@@ -447,12 +443,7 @@ export const restoreCooldownsFrom = (
         credentialID: RouteAttemptTable.credential_id,
       })
       .from(RouteAttemptTable)
-      .where(
-        and(
-          gte(RouteAttemptTable.time_ended, now - 86_400_000),
-          sql`${RouteAttemptTable.quota} is not null`,
-        ),
-      )
+      .where(and(gte(RouteAttemptTable.time_ended, now - 86_400_000), sql`${RouteAttemptTable.quota} is not null`))
       .orderBy(asc(RouteAttemptTable.time_ended))
       .all()
       .pipe(Effect.orElseSucceed(() => []))
@@ -498,10 +489,11 @@ export const restoreCooldownsFrom = (
           : undefined
       if (resetAt !== undefined && resetAt < row.until) latest.set(id, { ...row, until: resetAt })
     }
-    restoreCooldowns?.([...latest.values()].filter((row) => row.until > now), readings)
-    restoreLimits?.(
-      [...windows.values()].filter((row) => row.until > now || row.snapshot !== undefined),
+    restoreCooldowns?.(
+      [...latest.values()].filter((row) => row.until > now),
+      readings,
     )
+    restoreLimits?.([...windows.values()].filter((row) => row.until > now || row.snapshot !== undefined))
   })
 
 /** Usage of the last day, so budgets survive a restart. */
@@ -616,12 +608,14 @@ const persistRetryDelayMs = (attempt: number) => Math.min(250 * 2 ** (attempt - 
 const persistWithRetry = (db: Database.Interface["db"], events: readonly Event[]) =>
   Effect.gen(function* () {
     for (let attempt = 1; ; attempt++) {
-      const cause = yield* db.transaction((tx) => persist(tx, events)).pipe(
-        Effect.matchCause({
-          onSuccess: () => undefined,
-          onFailure: (failure) => failure,
-        }),
-      )
+      const cause = yield* db
+        .transaction((tx) => persist(tx, events))
+        .pipe(
+          Effect.matchCause({
+            onSuccess: () => undefined,
+            onFailure: (failure) => failure,
+          }),
+        )
       if (cause === undefined) return true
       if (attempt >= maxPersistAttempts) {
         yield* Effect.logError("dropping model route telemetry batch after repeated persistence failures", {
@@ -655,8 +649,56 @@ const notifyAttemptsPersisted = (events: readonly Event[]) => {
   }
 }
 
-const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>) =>
-  Queue.takeAll(queue).pipe(
+/**
+ * Bounded telemetry backlog (#2335). Pending events live in a dropping queue
+ * capped at `maxPendingEvents`, so a slow or stalled database writer can no
+ * longer grow process memory with the event rate: while the writer is busy,
+ * at most `maxPendingEvents` events wait in memory. Overflow policy is
+ * DROP-NEWEST — `offer` never blocks and never fails, recording stays off the
+ * model-request path, and a full backlog drops the incoming event. Drops are
+ * counted on the backlog and the writer logs the running total whenever it
+ * advances, so the loss is observable, never silent (the same explicit-loss
+ * rule the batch retry in #2331 follows). Events already queued are never
+ * evicted: what fits drains in FIFO order once the writer catches up.
+ */
+export const maxPendingEvents = 1_024
+
+export interface WriterBacklog {
+  readonly queue: Queue.Queue<Event>
+  /** Offer one event without blocking; returns false when the backlog is full and the event was dropped. */
+  readonly offer: (event: Event) => boolean
+  /** Total events dropped since this backlog was created. */
+  readonly dropped: () => number
+}
+
+export const makeWriterBacklog = (capacity: number = maxPendingEvents): Effect.Effect<WriterBacklog> =>
+  Effect.gen(function* () {
+    const queue = yield* Queue.dropping<Event>(capacity)
+    let dropped = 0
+    return {
+      queue,
+      offer: (event: Event) => {
+        if (Queue.offerUnsafe(queue, event)) return true
+        dropped++
+        return false
+      },
+      dropped: () => dropped,
+    }
+  })
+
+const writerLoop = (db: Database.Interface["db"], backlog: WriterBacklog) => {
+  let reported = 0
+  const reportDrops = Effect.sync(() => backlog.dropped()).pipe(
+    Effect.flatMap((dropped) =>
+      dropped > reported
+        ? Effect.logWarning("model route telemetry backlog overflowed; newest events dropped", {
+            dropped_total: dropped,
+            capacity: maxPendingEvents,
+          }).pipe(Effect.tap(() => Effect.sync(() => (reported = dropped))))
+        : Effect.void,
+    ),
+  )
+  return Queue.takeAll(backlog.queue).pipe(
     Effect.flatMap((events) =>
       events.length
         ? persistWithRetry(db, events).pipe(
@@ -664,8 +706,10 @@ const writerLoop = (db: Database.Interface["db"], queue: Queue.Queue<Event>) =>
           )
         : Effect.void,
     ),
+    Effect.tap(() => reportDrops),
     Effect.forever,
   )
+}
 
 export const withDb = <A, E>(use: (db: Database.Interface["db"]) => Effect.Effect<A, E>) =>
   activeDb ? Effect.asSome(use(activeDb)) : Effect.succeedNone
@@ -679,10 +723,10 @@ const layer = Layer.effectDiscard(
     yield* restoreUsageFrom(db)
     yield* restoreCooldownsFrom(db, QuotaCurrent.readSnapshot(Global.Path.state))
     yield* restoreDemotionFrom(db)
-    const queue = yield* Queue.unbounded<Event>()
-    setSink((event) => void Queue.offerUnsafe(queue, event))
+    const backlog = yield* makeWriterBacklog()
+    setSink((event) => void backlog.offer(event))
     yield* Effect.addFinalizer(() => Effect.sync(() => setSink(undefined)))
-    yield* writerLoop(db, queue).pipe(Effect.forkScoped)
+    yield* writerLoop(db, backlog).pipe(Effect.forkScoped)
   }),
 )
 
@@ -1010,9 +1054,7 @@ export const sessionTargetUsage = (db: Database.Interface["db"], since: number, 
           ...usageColumns,
         })
         .from(RouteAttemptTable)
-        .where(
-          and(gte(RouteAttemptTable.time_started, since), inArray(RouteAttemptTable.session_id, [...sessionIDs])),
-        )
+        .where(and(gte(RouteAttemptTable.time_started, since), inArray(RouteAttemptTable.session_id, [...sessionIDs])))
         .groupBy(
           RouteAttemptTable.session_id,
           RouteAttemptTable.route_id,
