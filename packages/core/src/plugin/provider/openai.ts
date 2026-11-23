@@ -16,6 +16,7 @@ import type { PluginInternal } from "../internal.js"
 import { configuredSettings } from "./configured.js"
 import { eachInstance } from "./instance.js"
 import { storedCredential } from "./credential-settings.js"
+import { OpenAISubscriptionModels } from "./openai-subscription-models.js"
 import { ProviderRefresh } from "./refresh.js"
 
 const clientID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -26,7 +27,8 @@ const pollingSafetyMargin = 3000
 const codexBaseURL = "https://chatgpt.com/backend-api/codex"
 const browserMethodID = Integration.MethodID.make("chatgpt-browser")
 const headlessMethodID = Integration.MethodID.make("chatgpt-headless")
-// Codex rejects gpt-5.5 and older models, including gpt-5.3-codex-spark, for ChatGPT accounts.
+// Used when the catalog has no Codex list: Codex rejects gpt-5.5 and older models, including gpt-5.3-codex-spark,
+// for ChatGPT accounts.
 const codexDisallowed = new Set(["gpt-5.6"])
 // The image models the Codex client generates and edits with on the Codex login.
 const codexImageModels = new Set(["gpt-image-2"])
@@ -293,6 +295,8 @@ export const OpenAIPlugin = define({
           editor.method.update(headless(ctx.app, ids.integrationID))
         })
         yield* load()
+        // Temporary: the Codex list from models.dev, see openai-subscription-models.ts.
+        const plan = yield* OpenAISubscriptionModels.track("openai-codex", ctx.provider.reload())
         // Config applies after provider plugins, so read it here: a custom baseURL may not decode zstd.
         const configured = yield* configuredSettings(ids.providerID)
         yield* ctx.provider.transform((providers) => {
@@ -322,6 +326,11 @@ export const OpenAIPlugin = define({
             // subscription covers usage, so hide the rest and zero the cost.
             models.update(model.providerID, model.id, (draft) => {
               if (!chatgpt) return
+              if (plan.current) {
+                if (plan.current.has(draft.id)) draft.cost = []
+                else draft.enabled = false
+                return
+              }
               if (Schema.is(Schema.Struct({ mode: Schema.Literal("pro") }))(draft.body?.reasoning)) {
                 draft.enabled = false
                 return
