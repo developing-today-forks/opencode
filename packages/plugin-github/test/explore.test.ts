@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import { appendFileSync, writeFileSync } from "node:fs"
 import fs from "node:fs/promises"
 import path from "node:path"
 import { Effect } from "effect"
@@ -812,6 +813,119 @@ describe("github explore tools", () => {
           const error = yield* Effect.flip(run(tool("upload"), { path: "shot.gif", repo: "acme/widgets" }))
           expect(error.message).toContain("rejects GitHub App installation tokens")
           expect(error.message).toContain(`gh issue comment <number> --attach ${path.join(tmp.path, "shot.gif")}`)
+        }),
+      ),
+    ),
+  )
+
+  it.live("upload rejects an image that grows after the size check instead of uploading past the authorized size", () =>
+    withEnv(env, () =>
+      withTempDir((tmp) =>
+        Effect.gen(function* () {
+          const file = path.join(tmp.path, "shot.png")
+          yield* Effect.promise(() => fs.writeFile(file, "PNGDATA"))
+          const { github, tool } = yield* setup(
+            {
+              // The repository lookup sits between the size check and the read; grow the file there.
+              "GET /repos/acme/widgets": () => {
+                appendFileSync(file, "MORE")
+                return { body: repoPayload }
+              },
+              "POST /user-attachments/assets": {
+                status: 201,
+                body: { url: "https://github.com/user-attachments/assets/shot.png" },
+              },
+            },
+            tmp.path,
+          )
+          const error = yield* Effect.flip(run(tool("upload"), { path: "shot.png", repo: "acme/widgets" }))
+          expect(error).toMatchObject({ metadata: { kind: "validation" } })
+          expect(error.message).toContain("changed while being read")
+          expect(github.requests.filter((request) => request.method === "POST")).toEqual([])
+        }),
+      ),
+    ),
+  )
+
+  it.live("upload rejects a video that grows after the size check instead of uploading past the authorized size", () =>
+    withEnv(env, () =>
+      withTempDir((tmp) =>
+        Effect.gen(function* () {
+          const file = path.join(tmp.path, "demo.mp4")
+          yield* Effect.promise(() => fs.writeFile(file, "MP4DATA"))
+          const { github, tool } = yield* setup(
+            {
+              "GET /repos/acme/widgets": () => {
+                appendFileSync(file, "MORE")
+                return { body: repoPayload }
+              },
+              "POST /user-attachments/assets": {
+                status: 201,
+                body: { url: "https://github.com/user-attachments/assets/demo.mp4" },
+              },
+            },
+            tmp.path,
+          )
+          const error = yield* Effect.flip(run(tool("upload"), { path: "demo.mp4", repo: "acme/widgets" }))
+          expect(error).toMatchObject({ metadata: { kind: "validation" } })
+          expect(error.message).toContain("changed while being read")
+          expect(github.requests.filter((request) => request.method === "POST")).toEqual([])
+        }),
+      ),
+    ),
+  )
+
+  it.live("upload rejects a file replaced by one over the limit after the size check", () =>
+    withEnv(env, () =>
+      withTempDir((tmp) =>
+        Effect.gen(function* () {
+          const file = path.join(tmp.path, "shot.png")
+          yield* Effect.promise(() => fs.writeFile(file, "PNGDATA"))
+          const { github, tool } = yield* setup(
+            {
+              "GET /repos/acme/widgets": () => {
+                writeFileSync(file, Buffer.alloc(10 * 1024 * 1024 + 1))
+                return { body: repoPayload }
+              },
+              "POST /user-attachments/assets": {
+                status: 201,
+                body: { url: "https://github.com/user-attachments/assets/shot.png" },
+              },
+            },
+            tmp.path,
+          )
+          const error = yield* Effect.flip(run(tool("upload"), { path: "shot.png", repo: "acme/widgets" }))
+          expect(error).toMatchObject({ metadata: { kind: "validation" } })
+          expect(error.message).toContain("over the 10485760-byte upload limit")
+          expect(github.requests.filter((request) => request.method === "POST")).toEqual([])
+        }),
+      ),
+    ),
+  )
+
+  it.live("upload accepts a file exactly at the image limit and rejects one byte over before uploading", () =>
+    withEnv(env, () =>
+      withTempDir((tmp) =>
+        Effect.gen(function* () {
+          const max = 10 * 1024 * 1024
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "full.png"), Buffer.alloc(max, 1)))
+          yield* Effect.promise(() => fs.writeFile(path.join(tmp.path, "over.png"), Buffer.alloc(max + 1, 1)))
+          const { github, tool } = yield* setup(
+            {
+              "GET /repos/acme/widgets": { body: repoPayload },
+              "POST /user-attachments/assets": (request) => ({
+                status: 201,
+                body: { url: `https://github.com/user-attachments/assets/${request.query.name}` },
+              }),
+            },
+            tmp.path,
+          )
+          const image = yield* run<object, unknown>(tool("upload"), { path: "full.png", repo: "acme/widgets" })
+          expect(image).toMatchObject({ name: "full.png", bytes: max, content_type: "image/png" })
+          const error = yield* Effect.flip(run(tool("upload"), { path: "over.png", repo: "acme/widgets" }))
+          expect(error).toMatchObject({ metadata: { kind: "validation" } })
+          expect(error.message).toContain("may be at most 10 MB")
+          expect(github.requests.filter((request) => request.method === "POST")).toHaveLength(1)
         }),
       ),
     ),
