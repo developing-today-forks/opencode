@@ -13,7 +13,7 @@ afterEach(() => {
 describe("ModelRoute health", () => {
   test("starts with bounded first-token and rolling-window defaults", () => {
     expect(ModelRoute.policy()).toMatchObject({
-      firstTokenTimeoutMs: 10_000,
+      firstTokenTimeoutMs: 30_000,
       sampleWindow: 5,
       slowThreshold: 3,
       cooldownMs: 60_000,
@@ -327,6 +327,57 @@ describe("ModelRoute failure hints", () => {
     expect(ModelRoute.cooldownUntil(t, 1_000)).toBe(1_000 + 900_000)
     ModelRoute.failed(t, policy, 901_000, { auth: true })
     expect(ModelRoute.cooldownUntil(t, 901_000)).toBe(901_000 + 1_800_000)
+  })
+
+  test("three consecutive terminal auth failures gate the whole provider until a live success (#2519)", () => {
+    ModelRoute.resetHealth()
+    const alpha = ModelRoute.ref({ providerID: "acme", model: "alpha" })
+    const beta = ModelRoute.ref({ providerID: "acme", model: "beta" })
+    const gamma = ModelRoute.ref({ providerID: "acme", model: "gamma" })
+    const other = ModelRoute.ref({ providerID: "other", model: "delta" })
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    try {
+      ModelRoute.failed(alpha, policy, 1_000, { auth: true }, "cred-a")
+      ModelRoute.failed(beta, policy, 2_000, { auth: true }, "cred-b")
+      // Two refused legs are per-leg benches only: a third leg of the provider still deals.
+      expect(ModelRoute.cooldownUntil(gamma, 2_000)).toBe(0)
+      expect(ModelRoute.providerRootStartBlocked(gamma, 2_000)).toBeUndefined()
+
+      ModelRoute.failed(gamma, policy, 3_000, { auth: true }, "cred-a")
+      // The third refusal gates the provider itself, on every leg and for root starts,
+      // while a provider with no refusals is untouched.
+      const gatedUntil = 3_000 + 900_000
+      expect(ModelRoute.cooldownUntil(gamma, 3_000)).toBe(gatedUntil)
+      expect(ModelRoute.cooldownUntil(alpha, 3_000)).toBe(gatedUntil)
+      expect(ModelRoute.providerRootStartBlocked(beta, 3_000)).toEqual({ until: gatedUntil })
+      expect(ModelRoute.cooldownUntil(other, 3_000)).toBe(0)
+      expect(ModelRoute.providerRootStartBlocked(other, 3_000)).toBeUndefined()
+
+      // Further refusals extend the gate on the long ladder.
+      ModelRoute.failed(alpha, policy, 10_000, { auth: true }, "cred-a")
+      expect(ModelRoute.cooldownUntil(gamma, 10_000)).toBe(10_000 + 1_800_000)
+
+      // A live success on any leg of the provider clears the gate outright.
+      ModelRoute.completed(alpha, policy, { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 }, 20_000, "cred-a")
+      expect(ModelRoute.cooldownUntil(gamma, 20_000)).toBe(0)
+      expect(ModelRoute.providerRootStartBlocked(gamma, 20_000)).toBeUndefined()
+    } finally {
+      ModelRouteLog.setSink(undefined)
+    }
+    const health = events.flatMap((event) => (event.kind === "health" ? [event.row] : []))
+    expect(health.filter((row) => row.reason === "provider:acme hard-failure-gated")).toHaveLength(1)
+    expect(health.filter((row) => row.reason === "provider:acme hard-failure-cleared")).toHaveLength(1)
+  })
+
+  test("an ordinary failure between auth refusals does not count toward the provider hard-failure run (#2519)", () => {
+    ModelRoute.resetHealth()
+    const alpha = ModelRoute.ref({ providerID: "acme", model: "alpha" })
+    const gamma = ModelRoute.ref({ providerID: "acme", model: "gamma" })
+    ModelRoute.failed(alpha, policy, 1_000, { auth: true }, "cred-a")
+    ModelRoute.failed(alpha, policy, 2_000, { auth: true }, "cred-a")
+    ModelRoute.failed(alpha, policy, 3_000, undefined, "cred-a")
+    expect(ModelRoute.cooldownUntil(gamma, 3_000)).toBe(0)
   })
 
   test("a stated retry-after is never multiplied, even after repeated failures", () => {

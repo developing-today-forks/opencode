@@ -287,6 +287,9 @@ const asRecord = (value: unknown): Record<string, unknown> | undefined =>
  * in chat instead. A bare answer object (what a fake render tool in
  * tests returns) is accepted too. Anything else — a failed call, an
  * unanswered page, a malformed payload — is `none`, never a guess.
+ * A quota-fallback answer additionally requires the complete current
+ * provider/tier `context`: its wait/switch kind is derived from that
+ * comparison, so an incomplete context parses to `none` too.
  */
 export const parseRenderAnswer = (
   result: unknown,
@@ -300,12 +303,19 @@ export const parseRenderAnswer = (
   const answer = asRecord(data?.answer) ?? (data === undefined && root.data === undefined ? root : undefined)
   if (!answer) return { type: "none" }
   if (answer.answered === false) {
+    if (answer.reason !== "chat") return { type: "none" }
     return { type: "chat", note: typeof data?.note === "string" ? data.note : RENDER_PAGE_CLOSED_IN_CHAT_NOTE }
   }
   if (answer.action === "fallback") {
     if (typeof answer.provider !== "string" || !answer.provider || !isTier(answer.tier)) return { type: "none" }
-    const kind =
-      context?.currentProvider === answer.provider && context?.currentTier === answer.tier ? "wait" : "switch"
+    // The wait/switch distinction is a comparison against the *current*
+    // provider/tier: the payload carries no kind of its own. Without
+    // complete context there is nothing to compare against, and
+    // defaulting to "switch" would route the session to the very
+    // provider/tier the answer may be waiting on (#2621). An
+    // unclassifiable fallback answer is `none`, never a guess.
+    if (!context?.currentProvider || !context?.currentTier) return { type: "none" }
+    const kind = context.currentProvider === answer.provider && context.currentTier === answer.tier ? "wait" : "switch"
     return { type: "quota-fallback", choice: { provider: answer.provider, tier: answer.tier, kind } }
   }
   if (typeof answer.model === "string" && answer.model && isTier(answer.tier)) {

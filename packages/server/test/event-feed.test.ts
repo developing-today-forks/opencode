@@ -96,6 +96,31 @@ describe("EventFeed", () => {
     }),
   )
 
+  it.effect("delivers only the requested event types to filtered subscribers", () =>
+    Effect.gen(function* () {
+      const source = makeSource()
+      const feed = yield* EventFeed.make(source.observe, { encode: (event) => event.type })
+      const filtered = yield* feed.subscribe(undefined, [Credential.Event.Switched.type])
+      const all = yield* feed.subscribe()
+      const left = yield* filtered.pipe(Stream.take(1), Stream.runCollect, Effect.forkScoped)
+      const right = yield* all.pipe(Stream.take(2), Stream.runCollect, Effect.forkScoped)
+
+      yield* source.publish(event("ignored"))
+      yield* source.publish({
+        id: Event.ID.create(),
+        created: Date.now(),
+        type: Credential.Event.Switched.type,
+        data: {
+          credentialID: Credential.ID.make("cred_test"),
+          integrationID: IntegrationID.make("openai"),
+        },
+      })
+
+      expect(Array.from(yield* Fiber.join(left))).toEqual([Credential.Event.Switched.type])
+      expect(Array.from(yield* Fiber.join(right))).toEqual([Agent.Event.Updated.type, Credential.Event.Switched.type])
+    }),
+  )
+
   it.effect("fails only the subscriber that exceeds its lag capacity", () =>
     Effect.gen(function* () {
       const source = makeSource()

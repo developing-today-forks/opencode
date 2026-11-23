@@ -28,9 +28,13 @@ export interface Interface {
   /**
    * Subscribes to live frames. A `lastEventID` from this process's current instance is answered with
    * the frames after it; a foreign or evicted id is answered with one `server.resync` frame. Either
-   * way the frames that follow are live, with no gap or duplicate between replay and live.
+   * way the frames that follow are live, with no gap or duplicate between replay and live. With `types`, only
+   * events of those types are sent, replayed or live; `server.resync` always is.
    */
-  readonly subscribe: (lastEventID?: string) => Effect.Effect<Stream.Stream<string, Error>, never, Scope.Scope>
+  readonly subscribe: (
+    lastEventID?: string,
+    types?: ReadonlyArray<string>,
+  ) => Effect.Effect<Stream.Stream<string, Error>, never, Scope.Scope>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/server/EventFeed") {}
@@ -43,7 +47,7 @@ export function frame(event: OpenCodeEvent, id?: string) {
   return `${id === undefined ? "" : `id: ${id}\n`}data: ${JSON.stringify(event)}\n\n`
 }
 
-type Retained = { readonly seq: number; readonly frame: string }
+type Retained = { readonly seq: number; readonly type: string; readonly frame: string }
 
 export const make = Effect.fn("EventFeed.make")(function* (
   observe: (subscriber: Bus.Subscriber) => Effect.Effect<Bus.Unsubscribe>,
@@ -59,7 +63,7 @@ export const make = Effect.fn("EventFeed.make")(function* (
   const replayFrames = options?.replayFrames ?? ReplayCapacity
   const replayBytes = options?.replayBytes ?? ReplayBytes
   const instance = crypto.randomUUID()
-  const subscribers = new Set<Queue.Queue<string, Error>>()
+  const subscribers = new Map<Queue.Queue<string, Error>, ReadonlySet<string> | undefined>()
   // Contiguous by sequence: a cursor can be replayed only if no frame after it has been evicted.
   const retained: Retained[] = []
   let retainedBytes = 0
@@ -92,18 +96,20 @@ export const make = Effect.fn("EventFeed.make")(function* (
 
   // Undefined means the cursor cannot be honoured: foreign instance, malformed, from the future, or
   // evicted. The frame just before the window still counts, because nothing after it is missing.
-  const replayAfter = (lastEventID: string) => {
+  const replayAfter = (lastEventID: string, types: ReadonlySet<string> | undefined) => {
     const cursor = cursorOf(lastEventID)
     const oldest = retained[0]?.seq ?? sequence + 1
     if (cursor === undefined || cursor < oldest - 1 || cursor > sequence) return undefined
-    return retained.filter((entry) => entry.seq > cursor).map((entry) => entry.frame)
+    return retained
+      .filter((entry) => entry.seq > cursor && (!types || types.has(entry.type)))
+      .map((entry) => entry.frame)
   }
 
   const resync = () => frame({ id: Event.ID.create(), type: "server.resync", data: {} } as const, idOf(sequence))
 
   const fail = (error: Error) =>
     Effect.sync(() => {
-      const current = Array.from(subscribers)
+      const current = Array.from(subscribers.keys())
       subscribers.clear()
       for (const subscriber of current) Queue.failCauseUnsafe(subscriber, Cause.fail(error))
     })
@@ -137,8 +143,9 @@ export const make = Effect.fn("EventFeed.make")(function* (
     )
     if (encoded === undefined) return
     sequence = seq
-    retain({ seq, frame: encoded })
-    for (const subscriber of subscribers) {
+    retain({ seq, type: event.type, frame: encoded })
+    for (const [subscriber, types] of subscribers) {
+      if (types && !types.has(event.type)) continue
       if (Queue.offerUnsafe(subscriber, encoded)) continue
       subscribers.delete(subscriber)
       Queue.failCauseUnsafe(subscriber, Cause.fail(new SubscriberOverflowError({ capacity })))
@@ -149,7 +156,7 @@ export const make = Effect.fn("EventFeed.make")(function* (
   yield* Effect.addFinalizer(() => unsubscribe)
 
   return Service.of({
-    subscribe: (lastEventID) =>
+    subscribe: (lastEventID, types) =>
       Effect.acquireRelease(
         // Replay is taken and the subscriber registered in one synchronous step, so a publish either lands in
         // the replay or goes live, never both and never neither. A resuming subscriber gets room for a full replay
@@ -157,9 +164,10 @@ export const make = Effect.fn("EventFeed.make")(function* (
         Queue.dropping<string, Error>(lastEventID ? capacity + replayFrames + 1 : capacity).pipe(
           Effect.tap((queue) =>
             Effect.sync(() => {
-              const replay = lastEventID ? (replayAfter(lastEventID) ?? [resync()]) : []
+              const selected = types?.length ? new Set(types) : undefined
+              const replay = lastEventID ? (replayAfter(lastEventID, selected) ?? [resync()]) : []
               for (const item of replay) Queue.offerUnsafe(queue, item)
-              subscribers.add(queue)
+              subscribers.set(queue, selected)
             }),
           ),
         ),

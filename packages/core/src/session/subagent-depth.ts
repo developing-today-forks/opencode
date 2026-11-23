@@ -110,3 +110,18 @@ export const readout = Effect.fn("SubagentDepth.readout")(function* (
 
 export const formatDepthLine = (info: { depth: number; cap: number; remaining: number }) =>
   `Your session is at depth ${info.depth} of the subagent depth cap ${info.cap}: ${info.remaining} nesting level(s) remain from here.`
+
+/**
+ * The cap another generation of children under `parent` would exceed, or undefined when one more level fits. Judged
+ * by the same effective cap `assertWithinLimit` enforces.
+ */
+export const reached = Effect.fnUntraced(function* (
+  parent: SessionSchema.Info,
+  sessions: Pick<Session.Interface, "get">,
+  config: Pick<Config.Interface, "entries">,
+) {
+  const { depth, limit, binding } = yield* resolve(sessions, config, parent)
+  if (depth >= limit) return limit
+  if (binding !== undefined && depth + 1 > binding.cap) return binding.cap
+  return undefined
+})

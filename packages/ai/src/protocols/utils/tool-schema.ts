@@ -2,6 +2,8 @@ import { ToolDefinition, type JsonSchema, type LanguageModel, type LLMRequest } 
 import { isRecord } from "../../utils/record.js"
 import { GeminiJsonSchema } from "./gemini-json-schema.js"
 
+const { SCHEMA_MAPS, VALUES, mapValues } = GeminiJsonSchema
+
 const tupleItemsSchema = (items: ReadonlyArray<unknown>) => {
   const projected = items.map(moonshotNode)
   if (projected.length === 0) return {}
@@ -19,30 +21,24 @@ const enumType = (values: ReadonlyArray<unknown>) => {
   return undefined
 }
 
-// Value keys carry literal data, not schemas: their contents pass through
-// verbatim, as in the gemini and antigravity walkers (#1952). Recursing into
-// them rewrites structured enum/default/const values as if they were schemas.
-const VALUE_KEYS = new Set(["const", "default", "enum", "examples"])
-
 const moonshotNode = (schema: unknown): unknown => {
   if (Array.isArray(schema)) return schema.map(moonshotNode)
   if (!isRecord(schema)) return schema
   if (typeof schema.$ref === "string") return { $ref: schema.$ref }
   const type = schema.type === undefined && Array.isArray(schema.enum) ? enumType(schema.enum) : undefined
-  // With both present (the 2020-12 tuple form), the prefix positions fold
-  // together with the trailing `items` schema into one anyOf (#1574);
-  // dropping the prefix would let `items` contradict position 0.
-  const prefixItems =
-    Array.isArray(schema.prefixItems) && schema.prefixItems.length > 0 ? schema.prefixItems : undefined
   return Object.fromEntries([
     ...(type === undefined ? [] : [["type", type]]),
     ...Object.entries(schema).flatMap(([key, value]) => {
-      if (VALUE_KEYS.has(key)) return [[key, value]]
-      if (key === "items" && Array.isArray(value)) return [[key, tupleItemsSchema(value)]]
-      if (key === "items" && prefixItems) return [[key, tupleItemsSchema([...prefixItems, value])]]
+      if (VALUES.has(key)) return [[key, value]]
+      if (SCHEMA_MAPS.has(key) && isRecord(value)) return [[key, mapValues(value, moonshotNode)]]
+      if (key === "items") {
+        if (Array.isArray(schema.prefixItems)) return []
+        if (Array.isArray(value)) return [[key, tupleItemsSchema(value)]]
+      }
       if (key === "prefixItems") {
-        if ("items" in schema) return []
-        return [["items", tupleItemsSchema(Array.isArray(value) ? value : [])]]
+        if (!Array.isArray(value)) return "items" in schema ? [] : [["items", {}]]
+        const rest = isRecord(schema.items) ? [schema.items] : Array.isArray(schema.items) ? schema.items : []
+        return [["items", tupleItemsSchema([...value, ...rest])]]
       }
       if (key === "unevaluatedItems") return []
       return [[key, moonshotNode(value)]]
@@ -54,9 +50,6 @@ const moonshot = (schema: JsonSchema): JsonSchema => {
   const projected = moonshotNode(schema)
   return isRecord(projected) ? projected : {}
 }
-
-const openAI = (schema: JsonSchema): JsonSchema => schema
-const responses = openAI
 
 const gemini = GeminiJsonSchema.normalize
 
@@ -119,7 +112,5 @@ export const ToolSchemaProjection = {
   gemini,
   moonshot,
   objectRoot,
-  openAI,
-  responses,
   tools,
 } as const

@@ -174,6 +174,45 @@ describe("ModelRouteOverrides storage", () => {
     expect(ModelRouteOverrides.current()).toEqual([])
   })
 
+  test("an external replace that restores the old mtime is still re-read (#2605)", () => {
+    const file = ModelRouteOverrides.filePath()
+    ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)
+    // Pin the store to a whole-millisecond mtime so the restored value below round-trips
+    // exactly; the cache fills against this stamp.
+    const stamp = new Date(now)
+    fs.utimesSync(file, stamp, stamp)
+    expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["a"])
+    const before = fs.statSync(file)
+
+    // Another writer (OpenChamber edits the same store) replaces the file the way save()
+    // does — a fresh file renamed over the old one — and the rewrite lands inside the same
+    // timestamp tick, so the new file's mtime is put back to the one the cache holds.
+    const temporary = path.join(dir, ".external-replace")
+    fs.writeFileSync(
+      temporary,
+      JSON.stringify({ version: 1, overrides: [draft({ id: "b", providers: ["openai"] })] }, null, 2),
+    )
+    fs.renameSync(temporary, file)
+    fs.utimesSync(file, stamp, stamp)
+    expect(fs.statSync(file).mtimeMs).toBe(before.mtimeMs)
+    expect(fs.statSync(file).ino).not.toBe(before.ino)
+
+    expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["b"])
+  })
+
+  test("an unchanged file is served from the cache without re-reading (#2605)", () => {
+    ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)
+    const read = spyOn(fs, "readFileSync")
+    try {
+      expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["a"])
+      expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["a"])
+      const reads = read.mock.calls.filter((call) => call[0] === ModelRouteOverrides.filePath()).length
+      expect(reads).toBe(1)
+    } finally {
+      read.mockRestore()
+    }
+  })
+
   test("the file is separate from the config and holds only overrides", () => {
     ModelRouteOverrides.add(draft({ id: "a", providers: ["openai"] }), now)
     const stored = JSON.parse(fs.readFileSync(ModelRouteOverrides.filePath(), "utf8"))

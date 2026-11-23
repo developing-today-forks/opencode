@@ -5,9 +5,13 @@ import { Bus } from "@opencode/core/bus"
 import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionRestart } from "@opencode/core/session/execution/restart"
 import { Config } from "@opencode/core/config"
+import { Automation } from "@opencode/core/automation"
+import { SessionSearchBuild } from "@opencode/core/session/search-build"
 import { InstallationEvent } from "@opencode/schema/installation-event"
 import { hasPtyConnectTicketURL } from "@opencode/protocol/groups/pty"
 import { hasPersistentPtyConnectTicketURL } from "@opencode/protocol/groups/persistent-pty"
+import { hasMcpClientTicketURL } from "@opencode/protocol/groups/mcp"
+import { isMachineLinkUpgrade } from "@opencode/protocol/groups/machine"
 import { isPairingConnectURL } from "@opencode/protocol/groups/server"
 import { Global } from "@opencode/util/global"
 import { Cause, Context, Duration, Effect, Exit, Latch, Layer, Option, Ref, Scope } from "effect"
@@ -19,8 +23,10 @@ import { ServerAuth } from "./auth"
 import { closeTrackedPtySockets, terminateTrackedPtySockets, trackedPtySocketCount } from "./handlers/pty-socket"
 import { isAllowedCorsOrigin } from "./cors"
 import { adoptInheritedSocket } from "./inherited-socket"
+import { machinesEnabled } from "./handlers/machine"
 import { authorizedRequest, unauthorizedResponse } from "./middleware/authorization"
 import { withoutParentSpan } from "./request-tracing"
+import { RequestSite } from "./request-site"
 import { createRoutes } from "./routes"
 import { ServerInfo } from "./server-info"
 import { PluginServerUrl } from "@opencode/core/plugin/server-url"
@@ -97,11 +103,22 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
   const activeUrl = urls()[0]
   PluginServerUrl.setServerUrl(activeUrl)
   const application = yield* Ref.make(Option.none<App>())
-  const app = dispatch(password, status, application, options.app?.version ?? "unknown", urls, Global.Path.tmp)
+  // Off until the routes are up, which is when the flag can be read.
+  const machinesFlag = yield* Ref.make(Effect.succeed(false))
+  const app = dispatch(
+    password,
+    status,
+    application,
+    machinesFlag,
+    options.app?.version ?? "unknown",
+    urls,
+    Global.Path.tmp,
+  )
   // Request fibers may continue inbound trace context, but must not inherit the server startup parent.
   yield* bound.http
     .serve(
       (transform ? transform(app) : app).pipe(
+        RequestSite.middleware(options),
         HttpMiddleware.compression(),
         HttpMiddleware.cors({ allowedOrigins: (origin) => isAllowedCorsOrigin(origin, options), maxAge: 86_400 }),
       ),
@@ -130,6 +147,8 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
     ),
   )
 
+  // Built without the startup span: route handlers and background fibers capture this context, and would
+  // otherwise nest every request and session turn for the life of the process under one trace.
   const boot = Effect.gen(function* () {
     const context = yield* Layer.buildWithScope(
       createRoutes(
@@ -146,6 +165,11 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
         Effect.provideService(Scope.Scope, applicationScope),
       )
     }
+    // Automations run from any server process (`service`, `opencode serve`, or `--standalone`); the table holds all their state.
+    yield* Effect.forkIn(Context.get(context, Automation.Service).run, applicationScope)
+    // Likewise the one-time session search build, once a location has sqlite_fts on.
+    yield* Effect.forkIn(Context.get(context, SessionSearchBuild.Service).run, applicationScope)
+    yield* Ref.set(machinesFlag, yield* machinesEnabled.pipe(Effect.provide(context)))
     yield* Ref.set(application, Option.some(Context.get(context, HttpRouter.HttpRouter).asHttpEffect()))
     yield* status.ready
     const bus = Context.get(context, Bus.Service)
@@ -216,6 +240,7 @@ export const start = Effect.fn("ServerProcess.start")(function* <E, R>(
         }),
     }
   }).pipe(
+    withoutParentSpan,
     Effect.catchCause((cause) => {
       if (!lifecycle || Cause.hasInterruptsOnly(cause)) return Effect.failCause(cause)
       return status.fail.pipe(
@@ -288,6 +313,7 @@ function dispatch(
   password: string,
   status: Status.Interface,
   application: Ref.Ref<Option.Option<App>>,
+  machinesFlag: Ref.Ref<Effect.Effect<boolean>>,
   version: string,
   urls: () => ReadonlyArray<string>,
   tmp: string,
@@ -302,6 +328,7 @@ function dispatch(
     if (!info) yield* status.awaitStartup.pipe(Effect.interruptible)
     const state = yield* status.current
     const app = yield* Ref.get(application)
+    const machines = yield* Ref.get(machinesFlag)
     const ready = state.type === "ready" && Option.isSome(app)
     // A draining server stops listening, but it still answers the requests already accepted on its connections:
     // a 503 there would look like a failed request to a client that a successor is about to serve.
@@ -312,7 +339,12 @@ function dispatch(
     }
     if (
       !isPairingConnectURL(url) &&
-      (!serving || (!hasPtyConnectTicketURL(url) && !hasPersistentPtyConnectTicketURL(url))) &&
+      (!serving ||
+        (!hasPtyConnectTicketURL(url) &&
+          !hasPersistentPtyConnectTicketURL(url) &&
+          !hasMcpClientTicketURL(url) &&
+          // With machines off the link's path is an unknown route, and gets this 401 like one.
+          !(isMachineLinkUpgrade(request) && (yield* machines)))) &&
       !(yield* authorizedRequest(request, auth))
     )
       return unauthorizedResponse(request)

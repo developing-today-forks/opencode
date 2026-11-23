@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { LLM, LanguageModel } from "../src/index.js"
+import { ai, LanguageModel } from "../src/effect.js"
 import * as OpenAIResponses from "../src/protocols/openai-responses.js"
 import { ProviderShared } from "../src/protocols/shared.js"
 import { ToolEntry } from "../src/schema/index.js"
@@ -53,8 +53,9 @@ describe("flattenTools namespace flattening (#2233)", () => {
   })
 
   test("flattenToolRequest projects the same collision onto the request tools", () => {
-    const request = LLM.request({
+    const request = ai.request({
       model: LanguageModel.make({ id: "fake-model", provider: "fake", route: OpenAIResponses.route }),
+      messages: [],
       tools: [
         {
           type: "namespace",

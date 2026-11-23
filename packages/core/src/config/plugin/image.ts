@@ -11,7 +11,7 @@ export const Plugin = define({
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
     const image = yield* Image.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["media"], image.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, image.reload(), ["media"])
     yield* image.transform((editor) => {
       for (const entry of loaded.entries) {
         if (entry.type !== "document") continue

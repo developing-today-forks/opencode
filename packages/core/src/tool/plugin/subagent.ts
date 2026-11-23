@@ -1,6 +1,6 @@
 export * as SubagentTool from "./subagent.js"
 
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import type { SessionHooks } from "@opencode/plugin/effect/session"
 import { Effect, Predicate, Schema } from "effect"
@@ -24,9 +24,10 @@ const backgroundResult = (sessionID: SessionSchema.ID) => ({
   sessionID,
   status: "running" as const,
   output: [
-    `The subagent is working in the background (sessionID: ${sessionID}). You will be notified automatically when it finishes.`,
-    "DO NOT sleep, poll for progress, ask the subagent for status, or duplicate this subagent's work; avoid working with the same files or topics it is using.",
+    `The subagent is working in the background (sessionID: ${sessionID}). You will receive a <background-result kind="subagent"> message when it goes idle, and again after each later round of work.`,
+    "DO NOT sleep, poll, proactively check on its progress, or duplicate this subagent's work.",
     "Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.",
+    "To send it follow-ups or change its instructions while it runs, call subagent again with this sessionID.",
   ].join("\n"),
 })
 
@@ -39,15 +40,14 @@ export const Input = Schema.Struct({
   prompt: Schema.String.annotate({ description: "The task for the subagent to perform" }),
   model: Schema.optionalKey(Schema.String).annotate({
     description:
-      'Set this when the user asks for a particular model or the task clearly warrants a different one. The value is a model ref ("providerID/modelID", or "providerID/modelID#variant" to include a variant), a configured alias or route name, or "auto" for the default chain (the agent\'s configured model, then the inherited model). Do not guess the ID: look unfamiliar models up with the models tool.',
+      'Set this when the user asks for a particular model or the task clearly warrants a different one. It must be a chat model; image and decision models can\'t run subagents. The value is a model ref ("providerID/modelID", or "providerID/modelID#variant" to include a variant), a configured alias or route name, or "auto" for the default chain (the agent\'s configured model, then the inherited model). Do not guess the ID: look unfamiliar models up with the models tool.',
   }),
   force: Schema.optionalKey(Schema.Boolean).annotate({
     description:
       "Set true only to explicitly override the agent definition's model lists for this call. Ancestor session policies still apply and cannot be forced past.",
   }),
   sessionID: Schema.optionalKey(SessionSchema.ID).annotate({
-    description:
-      "Continue a specific previous subagent conversation by passing its sessionID. Calls without a sessionID start a new conversation.",
+    description: "Send a follow-up to an existing subagent, running or finished. Omit to start a new one.",
   }),
   background: Schema.optionalKey(Schema.Boolean).annotate({
     description:
@@ -68,17 +68,15 @@ export const description = [
   "Spawns an agent in a child session to work on the specified task.",
   "Spawn subagents only when the user or applicable AGENTS.md/skill instructions explicitly ask for subagents, delegation, or parallel agent work.",
   "A subagent may itself launch subagents, subject to the depth limit and to model governance; governance failures name the allowed models, so pick a permitted one and retry.",
-  "The output includes a sessionID you can pass back later to continue that specific conversation with the subagent.",
   "New child sessions start with fresh context, so include all relevant context and instructions when you don't pass a sessionID.",
+  "Pass the returned sessionID to continue that specific child conversation. A follow-up to a running child joins its current run.",
   "Foreground (default) runs the subagent to completion and returns its final response.",
-  "Background mode (background=true) launches it asynchronously and returns immediately; you are notified when it finishes.",
+  'Background mode (background=true) returns immediately with a sessionID, and you receive a `<background-result kind="subagent">` message each time the child goes idle, including after later work. Keep working on non-overlapping tasks, or briefly tell the user what you launched and end your response. Do not sleep, poll, or proactively check on the child\'s progress.',
   "Use background only for independent work that can run while you continue elsewhere.",
   "Background launches accept stopPolicy: independent (default) keeps running when the parent is interrupted, cascade stops with the parent, detached survives plain and cascade stops until force-stopped.",
-  "Subagents may background their own subagents; a background child notifies its direct parent when it finishes.",
   "Children inherit your working directory: a child runs in the same directory as the session that launched it.",
   "Children inherit your model and route when you pass no model argument, unless the chosen agent definition configures its own model, which then wins; pass model to override either. The child result confirms only the sessionID, so rely on this inheritance rule, not on the result, for the directory and model a child actually got.",
   "Nesting depth is capped by experimental.subagent_depth (default 5): a top-level session is depth 0 and can nest 5 levels deep, and a max_depth on an agent definition can lower the cap for its subtree. The section appended below states your current depth and how many nesting levels remain from your session.",
-  "Background completion is delivered, not polled: when a background child finishes, its result is delivered to its direct parent unprompted as a synthetic turn, and a background child that errors reports that error the same way, verbatim as its result.",
   "Warning: a child that calls the question tool blocks until an external actor answers. A foreground subagent call waits on that answer, and in a detached or background context nobody may ever answer, stalling the child and its caller. Tell children in their prompt to record open questions and keep working with a documented default instead of calling question.",
 ].join("\n")
 
@@ -98,9 +96,9 @@ export const Plugin = {
       const aliases = Config.latest(yield* config.entries(), "aliases")
       // An explicit subagent model request is execution, not discovery (#230): a
       // hidden model stays selectable here; only the picker list hides it.
-      const availableModels = (yield* models.all()).filter((model) => model.enabled)
+      const catalog = yield* models.catalog()
       const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
-        availableModels.some((m) => m.providerID === providerID && m.id === modelID)
+        catalog.some((m) => m.providerID === providerID && m.id === modelID)
       let resolved = input
       try {
         resolved = ModelAlias.resolve(aliases, input, exists)
@@ -112,13 +110,17 @@ export const Plugin = {
             message: `Invalid model "${input}". Use "providerID/modelID" or "providerID/modelID#variant".`,
           }),
       })
-      const model = availableModels.find(
-        (model) => model.providerID === ref.providerID && model.id === ref.id,
-      )
-      if (model === undefined)
+      const model = catalog.find((model) => model.providerID === ref.providerID && model.id === ref.id)
+      if (model === undefined) {
+        const other = (yield* models.available(["image", "video", "decision"])).find(
+          (model) => model.providerID === ref.providerID && model.id === ref.id,
+        )
         return yield* new ToolFailure({
-          message: `Model "${ref.providerID}/${ref.id}" is not available. Use the models tool to see what is available.`,
+          message: other
+            ? `Model "${ref.providerID}/${ref.id}" is ${other.type === "image" ? "an image" : other.type === "video" ? "a video" : "a decision"} model; subagents need a chat model. Use the models tool to find one.`
+            : `Model "${ref.providerID}/${ref.id}" is not available. Use the models tool to see what is available.`,
         })
+      }
       if (ref.variant !== undefined && !model.variants.some((variant) => variant.id === ref.variant))
         return yield* new ToolFailure({
           message:
@@ -158,13 +160,7 @@ export const Plugin = {
                   action: name,
                   resources: [agent.id],
                   save: [agent.id],
-                  sessionID: context.sessionID,
-                  agent: context.agent,
-                  source: {
-                    type: "tool",
-                    messageID: context.messageID,
-                    id: context.id,
-                  },
+                  ...Permission.invocation(context),
                 })
                 .pipe(Effect.mapError((error) => new ToolFailure({ message: `Subagent denied: ${agent.id}`, error })))
 
@@ -220,7 +216,7 @@ export const Plugin = {
                   .create({
                     parentID: context.sessionID,
                     title: input.description,
-                    agent: Agent.ID.make(input.agent),
+                    agent: agent.id,
                     model,
                     ...(override !== undefined || input.force !== undefined
                       ? {
@@ -244,14 +240,13 @@ export const Plugin = {
                 childID: child.id,
               }).pipe(Effect.catch(() => Effect.void))
 
-              // Background launches are allowed at any depth; each background child
-              // notifies its direct parent, so nested background work reports back
-              // to the subagent that launched it.
-              const background = input.background === true
+              // A child that is not draining yet must be admitted without waking: the job's resume
+              // owns the start, so the period cannot run before its boundary is registered.
+              const running =
+                existing !== undefined &&
+                ((yield* sessions.active).has(existing.id) || (yield* jobs.get(existing.id))?.status === "running")
               yield* context.progress({ sessionID: child.id, status: "running" })
 
-              // Standard prompt admission outside the job: Job.start joining a running child skips
-              // its run effect, and the default wake starts an idle child or steers a running one.
               yield* sessions
                 .prompt({
                   sessionID: child.id,
@@ -259,7 +254,7 @@ export const Plugin = {
                     existing === undefined
                       ? ["You are a subagent spawned by another session.", input.prompt].join("\n")
                       : input.prompt,
-                  ...(background && existing === undefined ? { resume: false } : {}),
+                  ...(running ? {} : { resume: false }),
                 })
                 .pipe(
                   Effect.mapError(
@@ -275,13 +270,17 @@ export const Plugin = {
                 description: input.description,
                 stopPolicy: input.stopPolicy ?? ("independent" as const),
               }
-              yield* subagents.start(recovery)
-
-              if (background) {
-                yield* subagents.background(recovery)
+              // Background launches are allowed at any depth; each background child
+              // reports to its direct parent, so nested background work reports back
+              // to the subagent that launched it.
+              if (input.background === true) {
+                yield* subagents.start(recovery)
                 return backgroundResult(child.id)
               }
 
+              // Foreground: the call blocks until the child finishes. A job moved to the background meanwhile reports
+              // like a background launch.
+              yield* subagents.start(recovery, { background: false })
               const result = yield* jobs.block({ id: child.id, sessionID: context.sessionID }).pipe(
                 Effect.onInterrupt(() =>
                   Effect.all(
@@ -290,16 +289,11 @@ export const Plugin = {
                       jobs.cancel(child.id),
                       McpxSubagent.releaseSubagentSession(child.id).pipe(Effect.catch(() => Effect.void)),
                     ],
-                    {
-                      discard: true,
-                    },
+                    { discard: true },
                   ),
                 ),
               )
-              if (result?.type === "backgrounded") {
-                yield* subagents.notify(recovery, result.info.started_at)
-                return backgroundResult(child.id)
-              }
+              if (result?.type === "backgrounded") return backgroundResult(child.id)
               yield* McpxSubagent.releaseSubagentSession(child.id).pipe(Effect.catch(() => Effect.void))
               // Failure surfaces keep the sessionID visible so the model can continue the child.
               if (result?.info.status === "error")
@@ -308,10 +302,17 @@ export const Plugin = {
                 })
               if (result?.info.status === "cancelled")
                 return yield* new ToolFailure({ message: `Subagent cancelled (sessionID: ${child.id})` })
+              const messages = yield* sessions
+                .messages({ sessionID: child.id, order: "desc", limit: 20 })
+                .pipe(Effect.orElseSucceed(() => []))
+              const assistant = messages.find(
+                (message) =>
+                  message.type === "assistant" && message.time.completed !== undefined && message.error === undefined,
+              )
               return {
                 sessionID: child.id,
                 status: "completed" as const,
-                output: result?.info.output ?? SubagentCompletion.NO_TEXT,
+                output: SubagentCompletion.text(assistant) || SubagentCompletion.NO_TEXT,
               }
             }).pipe(
               Effect.map((output) => ({

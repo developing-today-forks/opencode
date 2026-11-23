@@ -3,8 +3,8 @@ import { onMount } from "solid-js"
 import { createStore, produce, unwrap } from "solid-js/store"
 import { createSimpleContext } from "../context/helper"
 import { useTuiPaths } from "../context/runtime"
-import { appendText, readText, writeText } from "../util/persistence"
 import { parsePromptInfo, type PromptInfo } from "./history"
+import { createJsonlFile, mergeLoadedEntries } from "./jsonl"
 
 export type StashEntry = {
   prompt: PromptInfo
@@ -38,14 +38,27 @@ export const { use: usePromptStash, provider: PromptStashProvider } = createSimp
   init: () => {
     const paths = useTuiPaths()
     const stashPath = path.join(paths.state, "prompt-stash.jsonl")
-    onMount(async () => {
-      const lines = parsePromptStash(await readText(stashPath).catch(() => ""))
-      setStore("entries", lines)
-      if (lines.length > 0)
-        writeText(stashPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
+    const file = createJsonlFile<StashEntry>({
+      file: stashPath,
+      locks: path.join(paths.state, "locks"),
+      parse: parsePromptStash,
+      serialize: (entries) => (entries.length > 0 ? entries.map((line) => JSON.stringify(line)).join("\n") + "\n" : ""),
     })
 
     const [store, setStore] = createStore({ entries: [] as StashEntry[] })
+
+    onMount(async () => {
+      // Rewrite valid retained entries to self-heal corruption and enforce
+      // the limit, re-reading under the file lock so entries another TUI
+      // pushed after this instance started are preserved.
+      const lines = await file.update((current) => (current.length > 0 ? current : undefined)).catch(() => file.read())
+      // Merge rather than replace: pushes recorded while the load was in
+      // flight are already in the store and must not be wiped by it.
+      setStore(
+        "entries",
+        mergeLoadedEntries(lines, [...store.entries], (entry) => JSON.stringify(entry), MAX_STASH_ENTRIES),
+      )
+    })
 
     return {
       list() {
@@ -53,40 +66,52 @@ export const { use: usePromptStash, provider: PromptStashProvider } = createSimp
       },
       push(entry: Omit<StashEntry, "timestamp">) {
         const stash = structuredClone(unwrap({ ...entry, timestamp: Date.now() }))
-        let trimmed = false
         setStore(
           produce((draft) => {
             draft.entries.push(stash)
             if (draft.entries.length > MAX_STASH_ENTRIES) {
               draft.entries = draft.entries.slice(-MAX_STASH_ENTRIES)
-              trimmed = true
             }
           }),
         )
 
-        if (trimmed) {
-          writeText(stashPath, store.entries.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
-          return
-        }
-        appendText(stashPath, JSON.stringify(stash) + "\n").catch(() => {})
+        file.update((current) => [...current, stash].slice(-MAX_STASH_ENTRIES)).catch(() => {})
       },
       pop() {
         if (store.entries.length === 0) return undefined
         const entry = store.entries[store.entries.length - 1]
         setStore(produce((draft) => void draft.entries.pop()))
-        writeText(
-          stashPath,
-          store.entries.length > 0 ? store.entries.map((line) => JSON.stringify(line)).join("\n") + "\n" : "",
-        ).catch(() => {})
+        // Remove the popped entry from the fresh on-disk state, keeping any
+        // entries another TUI pushed in the meantime.
+        file
+          .update((current) => {
+            const serialized = current.map((line) => JSON.stringify(line))
+            const at = serialized.lastIndexOf(JSON.stringify(entry))
+            if (at === -1) return undefined
+            return current.filter((_, index) => index !== at)
+          })
+          .catch(() => {})
         return entry
       },
       remove(index: number) {
         if (index < 0 || index >= store.entries.length) return
+        const entry = store.entries[index]
+        // Position of the target among equal entries in this instance's
+        // snapshot, so the matching occurrence is removed from disk even if
+        // another TUI changed the file since the snapshot was taken.
+        const ordinal = store.entries
+          .slice(0, index)
+          .filter((candidate) => JSON.stringify(candidate) === JSON.stringify(entry)).length
         setStore(produce((draft) => void draft.entries.splice(index, 1)))
-        writeText(
-          stashPath,
-          store.entries.length > 0 ? store.entries.map((line) => JSON.stringify(line)).join("\n") + "\n" : "",
-        ).catch(() => {})
+        file
+          .update((current) => {
+            const serialized = current.map((line) => JSON.stringify(line))
+            const matches = serialized.flatMap((line, at) => (line === JSON.stringify(entry) ? [at] : []))
+            if (matches.length === 0) return undefined
+            const at = matches[Math.min(ordinal, matches.length - 1)]!
+            return current.filter((_, candidate) => candidate !== at)
+          })
+          .catch(() => {})
       },
     }
   },

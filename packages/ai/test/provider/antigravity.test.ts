@@ -1,6 +1,6 @@
 import { expect } from "bun:test"
 import { Effect } from "effect"
-import { LLM, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/index.js"
+import { ai, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/effect.js"
 import { Antigravity } from "../../src/providers/antigravity.js"
 import {
   Antigravity as AntigravityProtocol,
@@ -26,7 +26,7 @@ const event = (parts: ReadonlyArray<Record<string, unknown>>, extra: Record<stri
 
 it.effect("Antigravity route points at the v1internal stream endpoint", () =>
   Effect.gen(function* () {
-    const request = LLM.request({ model, prompt: "Hello" })
+    const request = ai.request({ model, prompt: "Hello" })
     const compiled = yield* compileRequest(request)
     const url = Endpoint.render(model.route.endpoint, { request, body: compiled.body }).toString()
     expect(url).toBe("https://daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse")
@@ -37,7 +37,7 @@ it.effect("Antigravity route points at the v1internal stream endpoint", () =>
 it.effect("Antigravity envelope matches the door's buildV1Request shape", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         system: "You are helpful.",
         messages: [Message.user("weather?")],
@@ -60,7 +60,7 @@ it.effect("Antigravity envelope matches the door's buildV1Request shape", () =>
         ],
         toolChoice: { type: "tool", name: "get_weather" },
         providerOptions: { reasoning_effort: "low" },
-        generation: { maxTokens: 1024, temperature: 0.5 },
+        maxTokens: 1024, temperature: 0.5,
       }),
     )
     const body = compiled.body as Record<string, never>
@@ -105,7 +105,7 @@ it.effect("Antigravity envelope matches the door's buildV1Request shape", () =>
 
 it.effect("Antigravity defaults mirror the door: 65536 output cap, medium effort", () =>
   Effect.gen(function* () {
-    const compiled = yield* compileRequest(LLM.request({ model, prompt: "hi" }))
+    const compiled = yield* compileRequest(ai.request({ model, prompt: "hi" }))
     const body = compiled.body as Record<string, never>
     expect(body.model).toBe("gemini-3.8-flash-medium")
     const request = body.request as Record<string, never>
@@ -195,7 +195,7 @@ it.effect("Antigravity sends wire-complete model ids bare, effort as thinkingLev
   Effect.gen(function* () {
     const bareModel = Antigravity.configure({ accessToken: "fixture-token" }).model("gemini-2.5-flash")
     const compiled = yield* compileRequest(
-      LLM.request({ model: bareModel, prompt: "hi", providerOptions: { reasoning_effort: "high" } }),
+      ai.request({ model: bareModel, prompt: "hi", providerOptions: { reasoning_effort: "high" } }),
     )
     const body = compiled.body as Record<string, never>
     expect(body.model).toBe("gemini-2.5-flash")
@@ -735,7 +735,7 @@ it.effect("convertSchema leaves format-only roots self-describing (#2235)", () =
 it.effect("Antigravity lowers tool results as proto Structs, exactly like the door", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         messages: [
           Message.user("weather?"),
@@ -763,6 +763,32 @@ it.effect("Antigravity lowers tool results as proto Structs, exactly like the do
   }),
 )
 
+it.effect("Antigravity marks failed tool results with the Gemini error key", () =>
+  Effect.gen(function* () {
+    const compiled = yield* compileRequest(
+      ai.request({
+        model,
+        messages: [
+          Message.user("weather?"),
+          Message.assistant([ToolCallPart.make({ id: "call_1", name: "get_weather", input: { city: "Oslo" } })]),
+          Message.tool({ id: "call_1", name: "get_weather", result: '{"temp": 3}', resultType: "error" }),
+          Message.assistant([ToolCallPart.make({ id: "call_2", name: "get_weather", input: { city: "Oslo" } })]),
+          Message.tool({ id: "call_2", name: "get_weather", result: { code: 503 }, resultType: "error" }),
+        ],
+      }),
+    )
+    const request = (compiled.body as Record<string, never>).request as Record<string, never>
+    const contents = request.contents as ReadonlyArray<Record<string, never>>
+    const responses = contents
+      .flatMap((content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [])
+      .filter((part) => "functionResponse" in part)
+      .map((part) => (part.functionResponse as Record<string, never>).response)
+    // Wire oracle (#2226): functionResponse.response is a Struct; a failed result
+    // is { error: <text> } where text is the same encoding as the success path.
+    expect(responses).toEqual([{ error: '{"temp": 3}' }, { error: '{"code":503}' }])
+  }),
+)
+
 it.effect("Antigravity recovers chat-carried signatures when replaying tool history after a leaf switch", () =>
   Effect.gen(function* () {
     const history = [
@@ -785,7 +811,7 @@ it.effect("Antigravity recovers chat-carried signatures when replaying tool hist
       Message.tool({ id: "call_2", name: "lookup", result: "Rainy" }),
       Message.user("And tomorrow?"),
     ]
-    const compiled = yield* compileRequest(LLM.request({ model, messages: history }))
+    const compiled = yield* compileRequest(ai.request({ model, messages: history }))
     const contents = (compiled.body as Record<string, never>).request as Record<string, never>
     const calls = (contents.contents as ReadonlyArray<Record<string, never>>)
       .flatMap((content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [])
@@ -798,7 +824,7 @@ it.effect("Antigravity recovers chat-carried signatures when replaying tool hist
 it.effect("Antigravity assigns a signature or the skip sentinel to every unsigned tool call", () =>
   Effect.gen(function* () {
     const compiled = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         messages: [
           Message.user("Do these things"),
@@ -827,7 +853,7 @@ it.effect("Antigravity assigns a signature or the skip sentinel to every unsigne
     ])
 
     const unsigned = yield* compileRequest(
-      LLM.request({
+      ai.request({
         model,
         messages: [
           Message.user("Do these things"),
@@ -870,14 +896,14 @@ it.effect("Antigravity history tool calls carry their ids for Claude targets onl
         (content) => (content.parts as ReadonlyArray<Record<string, never>>) ?? [],
       )
     const claudeModel = Antigravity.configure({ accessToken: "fixture-token" }).model("claude-sonnet-5-5")
-    const claudeCompiled = yield* compileRequest(LLM.request({ model: claudeModel, messages: history }))
+    const claudeCompiled = yield* compileRequest(ai.request({ model: claudeModel, messages: history }))
     const claudeParts = partsOf(claudeCompiled.body as Record<string, never>)
     const claudeCall = claudeParts.find((part) => "functionCall" in part) as Record<string, never>
     const claudeResp = claudeParts.find((part) => "functionResponse" in part) as Record<string, never>
     expect((claudeCall.functionCall as Record<string, never>).id).toBe("call_1")
     expect((claudeResp.functionResponse as Record<string, never>).id).toBe("call_1")
 
-    const geminiCompiled = yield* compileRequest(LLM.request({ model, messages: history }))
+    const geminiCompiled = yield* compileRequest(ai.request({ model, messages: history }))
     const geminiParts = partsOf(geminiCompiled.body as Record<string, never>)
     const geminiCall = geminiParts.find((part) => "functionCall" in part) as Record<string, never>
     const geminiResp = geminiParts.find((part) => "functionResponse" in part) as Record<string, never>
@@ -888,7 +914,7 @@ it.effect("Antigravity history tool calls carry their ids for Claude targets onl
 
 it.effect("Antigravity stream: wrapped SSE events become text, reasoning, tool calls, usage", () =>
   Effect.gen(function* () {
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "weather?" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "weather?" })).pipe(
       Effect.provide(
         fixedResponse(
           sseEvents(
@@ -931,7 +957,7 @@ it.effect("Antigravity stream: finish reasons map like the door's finishReasonMa
       ["MAX_TOKENS", "length"],
       ["SAFETY", "content-filter"],
     ] as const) {
-      const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+      const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
         Effect.provide(fixedResponse(sseEvents(event([{ text: "x" }], { finishReason: wire })))),
       )
       expect(response.finishReason?.normalized).toBe(expected)
@@ -941,7 +967,7 @@ it.effect("Antigravity stream: finish reasons map like the door's finishReasonMa
 
 it.effect("Antigravity upstream 429 with quota body classifies as a quota failure", () =>
   Effect.gen(function* () {
-    const result = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const result = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.succeed(
@@ -970,7 +996,7 @@ it.effect("Antigravity upstream 429 with quota body classifies as a quota failur
 
 it.effect("Antigravity in-stream error event fails with the upstream message", () =>
   Effect.gen(function* () {
-    const result = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const result = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         fixedResponse(
           sseEvents({ error: { code: 403, message: "permission denied for project", status: "PERMISSION_DENIED" } }),
@@ -988,7 +1014,7 @@ it.effect("Antigravity in-stream error event fails with the upstream message", (
 it.effect("Antigravity retries exactly once on a 401 with a refreshed credential", () =>
   Effect.gen(function* () {
     let calls = 0
-    const response = yield* LLMClient.generate(LLM.request({ model, prompt: "hi" })).pipe(
+    const response = yield* LLMClient.generate(ai.request({ model, prompt: "hi" })).pipe(
       Effect.provide(
         dynamicResponse((input) =>
           Effect.sync(() => {
@@ -1025,12 +1051,12 @@ it.effect("Antigravity tool_choice: string forms keep the door's bare modes", ()
       ["required", "ANY"],
     ] as const) {
       const compiled = yield* compileRequest(
-        LLM.request({ model, messages: [Message.user("weather?")], tools, toolChoice: choice }),
+        ai.request({ model, messages: [Message.user("weather?")], tools, toolChoice: choice }),
       )
       const request = (compiled.body as Record<string, never>).request as Record<string, never>
       expect(request.toolConfig).toEqual({ functionCallingConfig: { mode } })
     }
-    const noChoice = yield* compileRequest(LLM.request({ model, messages: [Message.user("weather?")], tools }))
+    const noChoice = yield* compileRequest(ai.request({ model, messages: [Message.user("weather?")], tools }))
     expect(((noChoice.body as Record<string, never>).request as Record<string, never>).toolConfig).toBeUndefined()
   }),
 )
@@ -1046,7 +1072,7 @@ it.effect("Antigravity tool_choice naming an undeclared function fails closed be
     ]
     for (const withTools of [true, false]) {
       const result = yield* compileRequest(
-        LLM.request({
+        ai.request({
           model,
           messages: [Message.user("weather?")],
           ...(withTools ? { tools } : {}),

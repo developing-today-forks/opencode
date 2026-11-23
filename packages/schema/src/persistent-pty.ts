@@ -9,6 +9,7 @@ import { Session } from "./session.js"
 export const Info = Schema.Struct({
   ...Pty.Info.fields,
   sessionID: Session.ID,
+  userTitle: Schema.NullOr(Schema.String),
   foregroundProcess: Schema.NullOr(Schema.String),
   size: Schema.Struct({ cols: PositiveInt, rows: PositiveInt }),
   output: Schema.Struct({ head: NonNegativeInt, tail: NonNegativeInt }),
@@ -48,7 +49,8 @@ export type AttachmentID = typeof AttachmentID.Type
 
 export const UpdateInput = Schema.Struct({
   attachmentID: optional(AttachmentID),
-  size: Schema.Struct({ cols: PositiveInt, rows: PositiveInt }),
+  size: optional(Schema.Struct({ cols: PositiveInt, rows: PositiveInt })),
+  title: optional(Schema.NullOr(Schema.String)),
 }).annotate({ identifier: "PersistentPty.UpdateInput" })
 export interface UpdateInput extends Schema.Schema.Type<typeof UpdateInput> {}
 
@@ -80,4 +82,5 @@ export interface ReadResult extends Schema.Schema.Type<typeof ReadResult> {}
 
 export const Added = ephemeral({ type: "persistent-pty.added", schema: { sessionID: Session.ID, terminal: Info } })
 export const Removed = ephemeral({ type: "persistent-pty.removed", schema: { sessionID: Session.ID, ptyID: Pty.ID } })
-export const Event = { Added, Removed, Definitions: inventory(Added, Removed) }
+export const Updated = ephemeral({ type: "persistent-pty.updated", schema: { sessionID: Session.ID, terminal: Info } })
+export const Event = { Added, Removed, Updated, Definitions: inventory(Added, Removed, Updated) }

@@ -15,12 +15,13 @@ import { State } from "@opencode/core/state"
 import { Vcs } from "@opencode/core/vcs"
 import { VcsGitPlugin } from "@opencode/core/plugin/vcs/git"
 import { branchListLimit, listBranches } from "@opencode/core/plugin/vcs/branch-list"
+import { listStatus, statusListLimit } from "@opencode/core/plugin/vcs/status-list"
 import type { VcsDefinition, VcsDiffInput } from "@opencode/plugin/effect/vcs"
 import { FileSystem } from "@opencode/schema/filesystem"
 import { VcsEvent } from "@opencode/schema/vcs-event"
 import { initGit } from "./fixture/git"
 import { location } from "./fixture/location"
-import { tmpdir } from "./fixture/tmpdir"
+import { tmpdirScoped } from "./fixture/tmpdir"
 import { it, testEffect } from "./lib/effect"
 import { host } from "./plugin/host"
 
@@ -55,10 +56,7 @@ const provide = (directory: string, input: { git?: boolean; worktree?: string } 
   )
 
 const withTmp = <A, E, R>(f: (directory: string) => Effect.Effect<A, E, R>) =>
-  Effect.acquireRelease(
-    Effect.promise(() => tmpdir()),
-    (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-  ).pipe(Effect.flatMap((tmp) => f(tmp.path)))
+  tmpdirScoped().pipe(Effect.flatMap((tmp) => f(tmp.path)))
 
 const withGit = <A, E, R>(f: (directory: string) => Effect.Effect<A, E, R>, input: { scope?: string } = {}) =>
   withTmp((directory) =>
@@ -621,6 +619,92 @@ describe("Vcs", () => {
     ),
   )
 
+  it.live("status pages bound the result and mark the last row when truncated", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await fs.writeFile(path.join(directory, "tracked.txt"), "one\n")
+          await commitAll(directory, "initial")
+          for (let index = 1; index <= 12; index++) {
+            await fs.writeFile(path.join(directory, `f${String(index).padStart(2, "0")}.txt`), "x\n")
+          }
+        })
+        const vcs = yield* Vcs.Service
+        expect(Vcs.statusLimit()).toBe(200)
+        expect(Vcs.statusLimit(0)).toBe(1)
+        expect(Vcs.statusLimit(-5)).toBe(1)
+        expect(Vcs.statusLimit(1.5)).toBe(1)
+        expect(Vcs.statusLimit(2.9)).toBe(2)
+        expect(Vcs.statusLimit(Number.NaN)).toBe(200)
+        expect(Vcs.statusLimit(Number.POSITIVE_INFINITY)).toBe(200)
+        expect(Vcs.statusLimit(5_000)).toBe(1000)
+        expect(statusListLimit()).toBe(200)
+        expect(statusListLimit(5_000)).toBe(1000)
+        // Unbounded callers see every changed file, unmarked.
+        const all = yield* vcs.status()
+        expect(all.length).toBe(12)
+        expect(all.every((row) => row.more === undefined)).toBe(true)
+        // A page stops at the limit; only its last row carries the marker.
+        const page = yield* vcs.status({ limit: 5 })
+        expect(page.length).toBe(5)
+        expect(page.map((row) => row.file)).toEqual(["f01.txt", "f02.txt", "f03.txt", "f04.txt", "f05.txt"])
+        expect(page.slice(0, 4).every((row) => row.more === undefined)).toBe(true)
+        expect(page[4]?.more).toBe(true)
+        // The plugin surface normalises the same way.
+        const pluginPage = yield* listStatus(vcs, { limit: 3 })
+        expect(pluginPage.length).toBe(3)
+        expect(pluginPage[2]?.more).toBe(true)
+        expect((yield* listStatus(vcs)).length).toBe(12)
+      }),
+    ),
+  )
+
+  it.live("service bounds a provider that ignores the status limit", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        const vcs = yield* Vcs.Service
+        const rows = Array.from({ length: 10 }, (_, index) => ({
+          file: `f${String(index + 1).padStart(2, "0")}.txt`,
+          additions: 1,
+          deletions: 0,
+          status: "added" as const,
+        }))
+        yield* vcs.transform((editor) => {
+          editor.add(provider({ status: () => Effect.succeed(rows) }))
+          editor.default.set("custom")
+        })
+        const page = yield* vcs.status({ limit: 4 })
+        expect(page.length).toBe(4)
+        expect(page.slice(0, 3).every((row) => row.more === undefined)).toBe(true)
+        expect(page[3]?.more).toBe(true)
+        expect((yield* vcs.status()).length).toBe(10)
+      }).pipe(provide(directory)),
+    ),
+  )
+
+  it.live("lists remote branches without remote HEAD symrefs", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await fs.writeFile(path.join(directory, "file.txt"), "one\n")
+          await commitAll(directory, "initial")
+          await $`git tag main`.cwd(directory).quiet()
+          await $`git remote add origin ${directory}`.cwd(directory).quiet()
+          await $`git remote add fork ${directory}`.cwd(directory).quiet()
+          await $`git fetch --quiet origin`.cwd(directory).quiet()
+          await $`git fetch --quiet fork`.cwd(directory).quiet()
+          await $`git remote set-head origin main`.cwd(directory).quiet()
+          await $`git remote set-head fork main`.cwd(directory).quiet()
+        })
+        const vcs = yield* Vcs.Service
+        expect(yield* vcs.branches()).toEqual(["main", "fork/main", "origin/main"])
+        expect(yield* vcs.branches({ limit: 2 })).toEqual(["main", "fork/main"])
+        expect(yield* vcs.branches({ search: "origin" })).toEqual(["origin/main"])
+        expect(yield* vcs.branches({ search: "MAIN", limit: 2 })).toEqual(["main", "fork/main"])
+      }),
+    ),
+  )
+
   it.live("reports modified, deleted, and untracked files", () =>
     withGit((directory) =>
       Effect.gen(function* () {
@@ -702,6 +786,136 @@ describe("Vcs", () => {
     ),
   )
 
+  it.live("lists an untracked folder as one entry and its entries from inside it when asked for folders", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await initGit(directory, "-b", "main")
+          await fs.writeFile(path.join(directory, "keep.txt"), "one\n")
+          await fs.writeFile(path.join(directory, ".gitignore"), "artifacts/\nresearch/noisy/a-*\n")
+          await commitAll(directory, "initial")
+          await fs.writeFile(path.join(directory, "keep.txt"), "two\n")
+          await fs.mkdir(path.join(directory, "artifacts"))
+          await fs.mkdir(path.join(directory, "research/deep"), { recursive: true })
+          await fs.mkdir(path.join(directory, "research/wide"), { recursive: true })
+          await fs.mkdir(path.join(directory, "research/noisy"), { recursive: true })
+          await fs.writeFile(path.join(directory, "research/noisy/z-important.ts"), "keep\n")
+          await fs.writeFile(path.join(directory, "research/deep/inner.md"), "inner\n")
+          await Promise.all(
+            Array.from({ length: 505 }, (_, index) =>
+              Promise.all([
+                fs.writeFile(path.join(directory, `research/wide/${String(index).padStart(3, "0")}.md`), "wide\n"),
+                fs.writeFile(path.join(directory, `research/noisy/a-${index}.log`), "ignored\n"),
+              ]),
+            ),
+          )
+          await Promise.all(
+            Array.from({ length: 50 }, (_, index) =>
+              Promise.all([
+                fs.writeFile(path.join(directory, `artifacts/${index}.txt`), "ignored\n"),
+                fs.writeFile(path.join(directory, `research/${index}.md`), `line ${index}\n`),
+              ]),
+            ),
+          )
+        })
+        const review = (scope: string) =>
+          Effect.gen(function* () {
+            const vcs = yield* Vcs.Service
+            const context = host()
+            yield* VcsGitPlugin.Plugin.effect({
+              ...context,
+              vcs: { ...context.vcs, transform: vcs.transform, reload: vcs.reload },
+            })
+            return {
+              diff: yield* vcs.diff("working", { untracked: "folders" }),
+              all: yield* vcs.diff("working"),
+              status: yield* vcs.status(),
+              statusAll: yield* vcs.status({ limit: 1000 }),
+            }
+          }).pipe(provide(path.join(directory, scope), { git: true, worktree: directory }))
+
+        const root = yield* review(".")
+        expect(root.diff.map((row) => row.file)).toEqual(["keep.txt", "research/"])
+        expect(root.diff[1]).toMatchObject({ status: "added", additions: 0, deletions: 0 })
+        // Callers that do not ask for folders, such as the TUI and plugins, still get every file.
+        expect(root.all).toHaveLength(1 + 50 + 1 + 505 + 1)
+        expect(root.statusAll).toHaveLength(1 + 50 + 1 + 505 + 1)
+        // The default status page is bounded and marks its last row.
+        expect(root.status).toHaveLength(200)
+        expect(root.status.at(-1)?.more).toBe(true)
+
+        const folder = yield* review("research")
+        expect(folder.diff).toHaveLength(53)
+        expect(folder.diff.find((row) => row.file === "research/7.md")).toMatchObject({
+          status: "added",
+          additions: 1,
+        })
+        expect(folder.diff.find((row) => row.file === "research/7.md")?.patch).toContain("+line 7")
+        expect(folder.diff.filter((row) => row.file.endsWith("/")).map((row) => row.file)).toEqual([
+          "research/deep/",
+          "research/noisy/",
+          "research/wide/",
+        ])
+        expect(folder.diff.some((row) => row.more)).toBeFalse()
+        expect((yield* review("research/deep")).diff.map((row) => row.file)).toEqual(["research/deep/inner.md"])
+
+        const wide = (yield* review("research/wide")).diff
+        expect(wide).toHaveLength(501)
+        expect(wide.at(-2)?.file).toBe("research/wide/499.md")
+        expect(wide.at(-1)).toMatchObject({ file: "research/wide/", more: true })
+
+        // 505 ignored entries sort before the one that lists.
+        expect((yield* review("research/noisy")).diff.map((row) => [row.file, row.more])).toEqual([
+          ["research/noisy/z-important.ts", undefined],
+        ])
+      }),
+    ),
+  )
+
+  it.live("stops listing an untracked folder after its scan budget and says more were not checked", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await initGit(directory, "-b", "main")
+          await fs.writeFile(path.join(directory, ".gitignore"), "huge/a-*\n")
+          await commitAll(directory, "initial")
+          await fs.mkdir(path.join(directory, "huge"))
+          await Promise.all(
+            Array.from({ length: 5_000 }, (_, index) =>
+              fs.writeFile(path.join(directory, `huge/a-${String(index).padStart(4, "0")}.log`), ""),
+            ),
+          )
+          await fs.writeFile(path.join(directory, "huge/z-visible.ts"), "visible\n")
+        })
+        const vcs = yield* Vcs.Service
+        const processes = yield* AppProcess.Service
+        const context = host()
+        let statuses = 0
+        yield* VcsGitPlugin.Plugin.effect({
+          ...context,
+          vcs: { ...context.vcs, transform: vcs.transform, reload: vcs.reload },
+        }).pipe(
+          Effect.provideService(
+            AppProcess.Service,
+            AppProcess.Service.of({
+              ...processes,
+              run: (command, options) => {
+                if ("args" in command && command.args.includes("status")) statuses++
+                return processes.run(command, options)
+              },
+            }),
+          ),
+        )
+
+        const diff = yield* vcs.diff("working", { untracked: "folders" })
+        expect(diff.map((row) => [row.file, row.more])).toEqual([["huge/", true]])
+        // One status for the folder, then at most ten batches of 500.
+        expect(statuses).toBeGreaterThan(1)
+        expect(statuses).toBeLessThanOrEqual(11)
+      }).pipe(provide(path.join(directory, "huge"), { git: true, worktree: directory })),
+    ),
+  )
+
   it.live("caches branch info and publishes HEAD changes", () =>
     withGit((directory) =>
       Effect.gen(function* () {
@@ -752,6 +966,45 @@ describe("Vcs", () => {
         expect(diff[0].deletions).toBe(1)
         expect(diff[1].patch).toContain("+hello")
         expect(diff[1].additions).toBe(1)
+      }),
+    ),
+  )
+
+  it.live("respects the repository's line-ending conversion", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        const body = Array.from({ length: 20 }, (_, index) => `line-${index}`).join("\r\n") + "\r\n"
+        yield* Effect.promise(async () => {
+          await fs.appendFile(path.join(directory, ".git", "config"), "[core]\n\tautocrlf = true\n")
+          await fs.writeFile(path.join(directory, "file.txt"), body)
+          await fs.writeFile(path.join(directory, "same.txt"), body)
+          await commitAll(directory, "initial")
+          await fs.writeFile(path.join(directory, "file.txt"), body.replace("line-10", "changed"))
+        })
+        const vcs = yield* Vcs.Service
+        expect(yield* vcs.status()).toEqual([{ file: "file.txt", additions: 1, deletions: 1, status: "modified" }])
+        const diff = yield* vcs.diff("working")
+        expect(diff.map((item) => [item.file, item.additions, item.deletions])).toEqual([["file.txt", 1, 1]])
+        expect(diff[0].patch).toContain("-line-10")
+        expect(diff[0].patch).toContain("+changed")
+      }),
+    ),
+  )
+
+  it.live("respects the repository's symlink setting", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          // Git checks a symlink out as a plain file holding its target when the checkout cannot create symlinks.
+          await fs.appendFile(path.join(directory, ".git", "config"), "[core]\n\tsymlinks = false\n")
+          await fs.writeFile(path.join(directory, "link"), "target.txt")
+          const hash = (await $`git hash-object -w link`.cwd(directory).text()).trim()
+          await $`git update-index --add --cacheinfo 120000,${hash},link`.cwd(directory).quiet()
+          await $`git commit -m initial`.cwd(directory).quiet()
+        })
+        const vcs = yield* Vcs.Service
+        expect(yield* vcs.status()).toEqual([])
+        expect(yield* vcs.diff("working")).toEqual([])
       }),
     ),
   )

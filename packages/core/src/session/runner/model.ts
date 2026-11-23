@@ -1,14 +1,17 @@
 export * as SessionRunnerModel from "./model.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { LanguageModel } from "@opencode/ai"
+import { LanguageModel } from "@opencode/ai/effect"
 import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/schema/provider"
 import { Context, Effect, Layer, Option, Schema } from "effect"
+import type { SessionRequestKind } from "@opencode/plugin/effect/session"
+import { Agent } from "../../agent.js"
 import { Config } from "../../config.js"
 import { ModelAlias } from "../../model-alias.js"
 import { ModelResolver } from "../../model-resolver.js"
 import { ConfigModelRoutesPlugin } from "../../config/plugin/model-routes.js"
+import { PluginHooks } from "../../plugin/hooks.js"
 import { SessionSchema } from "../schema.js"
 
 export class ModelNotSelectedError extends Schema.TaggedError<ModelNotSelectedError>()(
@@ -26,7 +29,8 @@ export class ModelUnavailableError extends Schema.TaggedError<ModelUnavailableEr
 ) {
   override get message() {
     // A bare alias target carries an empty model id; name the original input, not a trailing slash.
-    if (!this.modelID) return `Model unavailable: ${this.providerID}`
+    if (!this.modelID)
+      return this.detail ? `Model unavailable: ${this.providerID}. ${this.detail}` : `Model unavailable: ${this.providerID}`
     if (this.providerID === "azure-cognitive-services")
       return `Model unavailable: ${this.providerID}/${this.modelID}. This provider has been deprecated; use azure/${this.modelID} instead.`
     if (this.providerID === "google-vertex-anthropic")
@@ -40,10 +44,18 @@ export type Error = ModelNotSelectedError | ModelUnavailableError | ModelResolve
 export type Resolved = ModelResolver.Resolved
 
 export interface Interface {
+  readonly select: (
+    session: SessionSchema.Info,
+    available: () => Effect.Effect<ReadonlyArray<Model.Info>>,
+  ) => Effect.Effect<
+    { readonly info: Model.Info; readonly variant: Model.VariantID | undefined },
+    ModelNotSelectedError | ModelUnavailableError
+  >
   /** Availability is sampled lazily for each explicitly selected model resolution. */
   readonly resolve: (
     session: SessionSchema.Info,
     available: () => Effect.Effect<ReadonlyArray<Model.Info>>,
+    request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
     /** The live request's context size in tokens, when known: route targets whose per-target
      * ceiling it exceeds are skipped (over-limit). Unknown (undefined) never filters. */
     requestTokens?: number,
@@ -102,57 +114,104 @@ export const layer = Layer.effect(
   Effect.gen(function* () {
     const resolver = yield* ModelResolver.Service
     const config = yield* Effect.serviceOption(Config.Service)
-    return Service.of({
-      resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session, available, requestTokens) {
-        // Location plugins populate and filter the catalog asynchronously during layer startup.
-        if (!session.model) {
-          // The session context travels with the default-model resolution so the
-          // #566 root-start gate judges this start (#2622); the explicit-model
-          // path below passes the same context through resolveModel.
-          const resolved = yield* resolver.resolve(undefined, requestTokens, session.id, session.parentID)
-          if (resolved) return resolved
-          return yield* new ModelNotSelectedError({ sessionID: session.id })
-        }
-        let target = session.model
-        if (Option.isSome(config)) {
-          const cfg = config.value
-          const entries = yield* cfg.entries()
-          const aliases = Config.latest(entries, "aliases")
-          if (aliases) {
-            const allModels = yield* available()
-            const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
-              allModels.some((m) => m.providerID === providerID && m.id === modelID)
-            // A bare alias arrives as the provider field with an empty model id (PR #382's
-            // CLI passthrough); build the reference from the alias name alone, keeping any
-            // variant, instead of a trailing-slash string alias resolution rejects.
-            const refStr = ModelAlias.refString(target)
-            try {
-              const res = ModelAlias.resolveRef(aliases, refStr, exists)
-              target = Model.Ref.make({
-                providerID: Provider.ID.make(res.providerID),
-                id: Model.ID.make(res.id),
-                ...(res.variant ? { variant: Model.VariantID.make(res.variant) } : {}),
-              })
-            } catch {}
-          }
-        }
-        const catalog = yield* available()
-        const selected = catalog.find((model) => model.providerID === target.providerID && model.id === target.id)
-        if (!selected) {
-          const declared = Option.isSome(config)
-            ? ConfigModelRoutesPlugin.declaredProviderRouteIDs(yield* config.value.entries())
-            : new Set<string>()
-          const detail = providerRouteDetail(target, declared, catalog)
+    const agents = yield* Agent.Service
+    const hooks = yield* PluginHooks.Service
+    // A configured alias names the model it stands for; a real model keeps precedence over an alias of its name.
+    const dealias = Effect.fn("SessionRunnerModel.dealias")(function* (
+      ref: Model.Ref,
+      available: () => Effect.Effect<ReadonlyArray<Model.Info>>,
+    ) {
+      if (Option.isNone(config)) return ref
+      const aliases = Config.latest(yield* config.value.entries(), "aliases")
+      if (!aliases) return ref
+      const allModels = yield* available()
+      const exists = ({ providerID, modelID }: { providerID: string; modelID: string }) =>
+        allModels.some((m) => m.providerID === providerID && m.id === modelID)
+      // A bare alias arrives as the provider field with an empty model id (PR #382's
+      // CLI passthrough); build the reference from the alias name alone, keeping any
+      // variant, instead of a trailing-slash string alias resolution rejects.
+      try {
+        const res = ModelAlias.resolveRef(aliases, ModelAlias.refString(ref), exists)
+        return Model.Ref.make({
+          providerID: Provider.ID.make(res.providerID),
+          id: Model.ID.make(res.id),
+          ...(res.variant ? { variant: Model.VariantID.make(res.variant) } : {}),
+        })
+      } catch (error) {
+        // An alias cycle or depth overrun is a configuration error: name it in the
+        // unavailable-model error instead of silently using the unresolved ref (#2567).
+        if (error instanceof ModelAlias.AliasCycleError || error instanceof ModelAlias.AliasMaxDepthError)
           return yield* new ModelUnavailableError({
-            providerID: target.providerID,
-            modelID: target.id,
-            ...(detail ? { detail } : {}),
+            providerID: ref.providerID,
+            modelID: ref.id,
+            detail: error.message,
           })
-        }
-        return yield* resolver.resolveModel(selected, target.variant, session.id, requestTokens, session.parentID)
+        return ref
+      }
+    })
+    // Location plugins populate and filter the catalog asynchronously during layer startup.
+    const select = Effect.fn("SessionRunnerModel.select")(function* (
+      session: SessionSchema.Info,
+      available: () => Effect.Effect<ReadonlyArray<Model.Info>>,
+    ) {
+      const find = (ref: Model.Ref) =>
+        available().pipe(
+          Effect.map((models) => models.find((model) => model.providerID === ref.providerID && model.id === ref.id)),
+        )
+      if (session.model) {
+        const target = yield* dealias(session.model, available)
+        const info = yield* find(target)
+        if (info) return { info, variant: target.variant }
+        const declared = Option.isSome(config)
+          ? ConfigModelRoutesPlugin.declaredProviderRouteIDs(yield* config.value.entries())
+          : new Set<string>()
+        const detail = providerRouteDetail(target, declared, yield* available())
+        return yield* new ModelUnavailableError({
+          providerID: target.providerID,
+          modelID: target.id,
+          ...(detail ? { detail } : {}),
+        })
+      }
+      const agent = (yield* agents.select(session.agent)).info?.model
+      const preferred = agent && (yield* find(agent))
+      if (preferred) return { info: preferred, variant: agent.variant }
+      const info = yield* resolver.fallback()
+      if (info) return { info, variant: undefined }
+      return yield* new ModelNotSelectedError({ sessionID: session.id })
+    })
+    return Service.of({
+      select,
+      resolve: Effect.fn("SessionRunnerModel.resolve")(function* (session, available, request, requestTokens) {
+        const selected = yield* select(session, available)
+        const ref = Model.Ref.make({
+          providerID: selected.info.providerID,
+          id: selected.info.id,
+          ...(selected.variant === undefined ? {} : { variant: selected.variant }),
+        })
+        const model = (yield* hooks.trigger("session", "experimental.model.resolve", {
+          sessionID: session.id,
+          agent: request.agent,
+          kind: request.kind,
+          model: ref,
+        })).model
+        // The session context travels with every resolution so routing judges root-session starts (#566, #2622)
+        // and sizes route targets by the live request (#891).
+        if (model.providerID === ref.providerID && model.id === ref.id && model.variant === ref.variant)
+          return yield* resolver.resolveModel(selected.info, selected.variant, session.id, requestTokens, session.parentID)
+        // Same provider only: the model may be hidden from the picker, and its credentials and hooks stay the selection's.
+        const resolved =
+          model.providerID === ref.providerID
+            ? yield* resolver.resolve(model, requestTokens, session.id, session.parentID)
+            : undefined
+        if (resolved) return resolved
+        return yield* new ModelUnavailableError({ providerID: model.providerID, modelID: model.id })
       }),
     })
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [ModelResolver.node] })
+export const node = makeLocationNode({
+  service: Service,
+  layer,
+  deps: [ModelResolver.node, Agent.node, PluginHooks.node],
+})

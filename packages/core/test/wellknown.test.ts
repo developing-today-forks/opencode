@@ -150,7 +150,7 @@ it.live("substitutes real process.env values", () =>
   ),
 )
 
-serviceIt.live("persists sources in one KV value", () =>
+serviceIt.live("persists sources in one KV value and skips unreachable ones", () =>
   Effect.acquireUseRelease(
     Effect.sync(() =>
       Bun.serve({
@@ -176,6 +176,9 @@ serviceIt.live("persists sources in one KV value", () =>
         yield* wellknown.remove(server.url.origin)
         expect(yield* kv.get("wellknown:sources")).toEqual([])
         expect(yield* wellknown.entries()).toEqual([])
+
+        yield* kv.set("wellknown:sources", ["http://127.0.0.1:1", server.url.origin])
+        expect((yield* wellknown.entries()).map((entry) => entry.origin)).toEqual([server.url.origin])
       }),
     (server) => Effect.promise(() => server.stop(true)),
   ),

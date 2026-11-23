@@ -705,7 +705,10 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
       if (!ProviderShared.supportsContent(part, ["tool-result"]))
         return yield* ProviderShared.unsupportedContent("Antigravity", "tool", ["tool-result"])
       let response: unknown
-      if (part.result.type === "json" && ProviderShared.isRecord(part.result.value)) {
+      if (part.result.type === "error") {
+        // Gemini's documented error convention: functionResponse.response carries an `error` key instead of `result`.
+        response = { error: ProviderShared.toolResultText(part) }
+      } else if (part.result.type === "json" && ProviderShared.isRecord(part.result.value)) {
         response = part.result.value
       } else {
         const text = ProviderShared.toolResultText(part)
@@ -732,7 +735,7 @@ const fromRequest = Effect.fn("Antigravity.fromRequest")(function* (request: LLM
     return yield* ProviderShared.invalidRequest(
       `tool_choice names function "${request.toolChoice.name}" which is not among the declared tools`,
     )
-  const generation = request.generation
+  const generation = request
   const inner: typeof InnerRequest.Type = {
     contents,
     systemInstruction: systemParts.length ? { role: "user", parts: systemParts } : undefined,

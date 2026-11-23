@@ -58,6 +58,21 @@ describe("partial JSON", () => {
     expect(parse('{"e":5,"a":1e}', Allow.ALL)).toEqual({ e: 5, a: 1 })
   })
 
+  test("uppercase exponent trim matches lowercase (issue #2558)", () => {
+    // Oracle: issue #2558 — 1E/1e are equally valid JSON prefixes, so an
+    // uppercase-truncated exponent recovers to the mantissa exactly as the
+    // lowercase form does, under the same Allow.NUM gating.
+    expect(parse("1E", Allow.NUM)).toBe(1)
+    expect(parse("-1E", Allow.NUM)).toBe(-1)
+    expect(parse("[1E]", Allow.ARR | Allow.NUM)).toEqual([1])
+    expect(parse("[-1E]", Allow.ARR | Allow.NUM)).toEqual([-1])
+    expect(parse("[1E]", Allow.ARR)).toEqual([])
+    expect(parse('{"a":1E}', Allow.ALL)).toEqual({ a: 1 })
+    // Control: complete uppercase exponents are untouched.
+    expect(parse("[1E5]", Allow.ALL)).toEqual([100000])
+    expect(parse("1E5", Allow.ALL)).toBe(100000)
+  })
+
   test("distinguishes disallowed partial values from malformed values", () => {
     expect(() => parse("[", Allow.STR)).toThrow(PartialJSON)
     expect(() => parse("n", ~Allow.NULL)).toThrow(MalformedJSON)

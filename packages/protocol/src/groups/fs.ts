@@ -3,7 +3,7 @@ import { Location } from "@opencode/schema/location"
 import { PositiveInt } from "@opencode/schema/schema"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
-import { FileNotFoundError, FileTooLargeError } from "../errors.js"
+import { FileNotFoundError, FileTooLargeError, ServiceUnavailableError } from "../errors.js"
 import { LocationQuery, locationQueryOpenApi } from "./location.js"
 
 const ListQuery = Schema.Struct({
@@ -21,11 +21,21 @@ const WriteQuery = Schema.Struct({
   }),
 })
 
+const WatchPayload = Schema.Struct({
+  path: Schema.String.annotate({ description: "A file path relative to the requested location." }),
+})
+
+// The page ceiling for file finds, mirroring the session-list cap of 200:
+// one request must not be able to materialise the whole file index.
+const FindLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(200))
+
 const FindQuery = Schema.Struct({
   ...LocationQuery.fields,
   query: FileSystem.FindInput.fields.query,
   type: FileSystem.FindInput.fields.type,
-  limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional),
+  limit: Schema.NumberFromString.pipe(Schema.decodeTo(FindLimit), Schema.optional).annotate({
+    description: "Maximum number of entries to return, at most 200. Defaults to 50.",
+  }),
 })
 
 export const FileSystemGroup = HttpApiGroup.make("server.fs")
@@ -89,6 +99,39 @@ export const FileSystemGroup = HttpApiGroup.make("server.fs")
           summary: "Write file",
           description:
             "Write the raw request body to an absolute path or a path relative to the requested location, creating parent directories, and return the resolved absolute path. Bodies over 10 MiB are rejected with 413 before any directory or file is created. Unlike read, the target is not confined to the location. Experimental: may change without compatibility guarantees.",
+        }),
+      ),
+  )
+  .add(
+    HttpApiEndpoint.post("fs.watch", "/api/experimental/fs/watch", {
+      query: LocationQuery,
+      payload: WatchPayload,
+      success: HttpApiSchema.NoContent,
+      error: [FileNotFoundError, ServiceUnavailableError],
+    })
+      .annotateMerge(locationQueryOpenApi)
+      .annotateMerge(
+        OpenApi.annotations({
+          identifier: "experimental.fs.watch",
+          summary: "Watch file",
+          description:
+            "Watch one file relative to the requested location for 24 hours, publishing filesystem.changed on that location when it changes. Watching an already watched file resets its expiry. Paths follow read confinement. Experimental: may change without compatibility guarantees.",
+        }),
+      ),
+  )
+  .add(
+    HttpApiEndpoint.delete("fs.unwatch", "/api/experimental/fs/watch", {
+      query: LocationQuery,
+      payload: WatchPayload,
+      success: HttpApiSchema.NoContent,
+    })
+      .annotateMerge(locationQueryOpenApi)
+      .annotateMerge(
+        OpenApi.annotations({
+          identifier: "experimental.fs.unwatch",
+          summary: "Unwatch file",
+          description:
+            "Stop watching one file relative to the requested location. Experimental: may change without compatibility guarantees.",
         }),
       ),
   )

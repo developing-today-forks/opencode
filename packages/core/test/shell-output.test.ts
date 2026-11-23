@@ -138,9 +138,10 @@ if (process.platform !== "win32") {
     ),
   )
 
-  // Coverage for #2486: capture is bounded by a total cap and one page is clamped, so a
-  // runaway command cannot exhaust the disk and one output request cannot allocate the
-  // whole capture. The oracle is the documented constants: size stops at MAX_OUTPUT_BYTES
+  // Coverage for #2486: capture is bounded by a total cap and one page is clamped, so a runaway
+  // command cannot exhaust the disk and one output request cannot allocate the whole capture. This
+  // runs on the process daemon, whose file the server cuts back to the cap (shell-daemon.test.ts
+  // covers the cut itself). The oracle is the documented constants: size stops at MAX_OUTPUT_BYTES
   // with truncated reported, and a page never exceeds MAX_OUTPUT_PAGE_BYTES while paging
   // still reconstructs the capture byte-identically.
   it.live("capture stops growing at the total cap and reports truncated", () =>

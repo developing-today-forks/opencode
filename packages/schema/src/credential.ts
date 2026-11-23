@@ -6,7 +6,6 @@ import { ephemeral, inventory } from "./event.js"
 import { IntegrationID, IntegrationMethodID } from "./integration-id.js"
 import { ascending } from "./identifier.js"
 import { NonNegativeInt, statics } from "./schema.js"
-import { Form } from "./form.js"
 
 export const ID = Schema.String.pipe(
   Schema.brand("Credential.ID"),
@@ -15,9 +14,10 @@ export const ID = Schema.String.pipe(
 )
 export type ID = typeof ID.Type
 
+// A login was added, renamed or removed. Every change is to exactly one credential.
 const Updated = ephemeral({
   type: "credential.updated",
-  schema: {},
+  schema: { integrationID: IntegrationID, credentialID: ID },
 })
 const Switched = ephemeral({
   type: "credential.switched",
@@ -44,7 +44,6 @@ export const Key = Schema.Struct({
   type: Schema.Literal("key"),
   key: Schema.String,
   metadata: optional(Schema.Record(Schema.String, Schema.Unknown)),
-  configuration: optional(Form.Answer),
 }).annotate({ identifier: "Credential.Key" })
 
 /** References a credential source whose secrets and renewal are managed outside the credential store. */
@@ -55,7 +54,21 @@ export const External = Schema.Struct({
   metadata: optional(Schema.Record(Schema.String, Schema.Unknown)),
 }).annotate({ identifier: "Credential.External" })
 
-export const Value = Schema.Union([OAuth, Key, External])
+/**
+ * A provider session cookie plus the workspace it belongs to, held by the server for
+ * provider-only surfaces (a provider's quota API). The cookie is a secret the generic
+ * credential read path must never disclose: generic readers receive metadata only.
+ * Renewal is owned outside the store when the metadata carries `externalRefresh`.
+ */
+export interface SessionCookie extends Schema.Schema.Type<typeof SessionCookie> {}
+export const SessionCookie = Schema.Struct({
+  type: Schema.Literal("session-cookie"),
+  cookie: Schema.String,
+  workspaceID: Schema.String,
+  metadata: optional(Schema.Record(Schema.String, Schema.Unknown)),
+}).annotate({ identifier: "Credential.SessionCookie" })
+
+export const Value = Schema.Union([OAuth, Key, External, SessionCookie])
   .pipe(Schema.toTaggedUnion("type"))
   .annotate({ identifier: "Credential.Value" })
 export type Value = Schema.Schema.Type<typeof Value>

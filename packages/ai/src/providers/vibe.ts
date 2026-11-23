@@ -25,7 +25,7 @@ import { Effect } from "effect"
 import type { ProviderPackage } from "../provider-package.js"
 import { MistralChat } from "../protocols/mistral-chat.js"
 import { Auth } from "../route/auth.js"
-import type { RouteDefaultsInput } from "../route/client.js"
+import type { RequestOptions } from "../schema/index.js"
 import { HttpTransport, type Transport, type TransportPrepareInput } from "../route/transport/index.js"
 import { mergeJsonRecords, ProviderID, type ModelID } from "../schema/index.js"
 import { VibeAuth, type CredentialSources } from "./vibe-auth.js"
@@ -35,7 +35,7 @@ export const id = ProviderID.make("_vibe")
 export type ProviderOptionsInput = MistralChat.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput
 
-export type Config = Omit<RouteDefaultsInput, "providerOptions"> & {
+export type Config = Omit<RequestOptions, "providerOptions"> & {
   readonly baseURL?: string
   /** Explicit auth override (tests, embedding hosts). Wins over every credential tier. */
   readonly auth?: Auth.Definition
@@ -118,14 +118,11 @@ const withPresetDefaults = (input: Config, modelID: string): Config => {
   if (!defaults) return input
   return {
     ...input,
-    generation: {
-      // Mistral rejects temperature and top_p together, so caller topP
-      // suppresses this preset-only temperature default.
-      ...(defaults.temperature === undefined || input.generation?.topP !== undefined
-        ? {}
-        : { temperature: defaults.temperature }),
-      ...input.generation,
-    },
+    // Mistral rejects temperature and top_p together, so caller topP
+    // suppresses this preset-only temperature default.
+    ...(defaults.temperature === undefined || input.topP !== undefined || input.temperature !== undefined
+      ? {}
+      : { temperature: defaults.temperature }),
     providerOptions: {
       ...(defaults.reasoningEffort === undefined ? {} : { reasoningEffort: defaults.reasoningEffort }),
       ...input.providerOptions,

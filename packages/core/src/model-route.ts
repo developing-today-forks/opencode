@@ -4,6 +4,7 @@ import { Model } from "@opencode/schema/model"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Provider } from "@opencode/schema/provider"
+import { DEFAULT_CHUNK_TIMEOUT_MS } from "./provider.js"
 import { Schema } from "effect"
 import { ModelRouteLimits } from "./model-route-limits.js"
 import { ownValue } from "./util/record.js"
@@ -21,6 +22,9 @@ export const SETTING = "opencodeRoute"
 
 const Policy = Schema.Struct({
   firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]),
+  /** How long the last target that can take a request may stay silent once firstTokenTimeoutMs has
+   * passed (see lastTargetTimeout). Optional so a policy written without it keeps decoding. */
+  lastTargetTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
   maxResponseTimeMs: PositiveInt.pipe(optional),
   minOutputTokensPerSecond: Schema.Finite.check(Schema.isGreaterThan(0)).pipe(optional),
   sampleWindow: PositiveInt,
@@ -147,6 +151,9 @@ const Definition = Schema.Struct({
   id: Model.ID,
   /** The route's carried system prompt (config `system`, #1413), when one is declared. */
   system: Schema.String.pipe(optional),
+  /** The route's cost/capability class (config `class`), when one is declared. Cross-route
+   * failover substitutes only within a class (#12228); a route without one takes no part. */
+  class: Schema.String.pipe(optional),
   targets: Schema.Array(Model.Ref),
   targetVariants: Schema.Array(TargetVariant),
   /** Parallel to `targets`; the resolved prompt-cache format for each leaf, an empty object when unset. */
@@ -170,6 +177,13 @@ const Definition = Schema.Struct({
   ).pipe(optional),
   /** Weight changes in force across every route, from experimental.routes.schedules. */
   schedules: Schema.Array(WeightRule).pipe(optional),
+  /** Parallel to `targets`, stored only for a route with `nestedTimeout: "own"`: the first-output wait of
+   * the nested route a leaf was reached through, or an empty object for the route's own leaves. */
+  targetFirstTokenTimeouts: Schema.Array(
+    Schema.Struct({
+      firstTokenTimeoutMs: Schema.Union([PositiveInt, Schema.Literal(false)]).pipe(optional),
+    }),
+  ).pipe(optional),
   nodes: Schema.Array(Node),
 })
 
@@ -197,8 +211,18 @@ export type Node = typeof Node.Type
 export type Policy = typeof Policy.Type
 export type Definition = typeof Definition.Type
 
+/** How long a target may take to produce its first output before the route fails over, when
+ * neither the route nor its nested routes name a wait. Long enough for a model that reasons
+ * before it answers; a nested route's longer wait wins by default (config plugin firstTokenTimeout). */
+export const DEFAULT_FIRST_TOKEN_TIMEOUT_MS = 30_000
+
+/** How long the last target that can take a request may go without output. The first-output wait only
+ * moves a request to another target; with none left, ending the attempt would only turn a slow answer
+ * into an error, so the target gets the silence the transport allows any streaming response. */
+export const DEFAULT_LAST_TARGET_TIMEOUT_MS = DEFAULT_CHUNK_TIMEOUT_MS
+
 const DEFAULT_POLICY: Policy = {
-  firstTokenTimeoutMs: 10_000,
+  firstTokenTimeoutMs: DEFAULT_FIRST_TOKEN_TIMEOUT_MS,
   sampleWindow: 5,
   slowThreshold: 3,
   cooldownMs: 60_000,
@@ -208,6 +232,7 @@ const DEFAULT_POLICY: Policy = {
 export const policy = (
   input?: {
     readonly firstTokenTimeoutMs?: number | false
+    readonly lastTargetTimeoutMs?: number | false
     readonly maxResponseTimeMs?: number
     readonly minOutputTokensPerSecond?: number
     readonly sampleWindow?: number
@@ -221,6 +246,7 @@ export const policy = (
   const ladder = currentConstants(location).bench
   return {
     firstTokenTimeoutMs: input?.firstTokenTimeoutMs ?? DEFAULT_POLICY.firstTokenTimeoutMs,
+    lastTargetTimeoutMs: input?.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS,
     // Unset thresholds are omitted, not undefined: the stored definition rejects explicit undefined.
     ...(input?.maxResponseTimeMs !== undefined ? { maxResponseTimeMs: input.maxResponseTimeMs } : {}),
     ...(input?.minOutputTokensPerSecond !== undefined
@@ -231,6 +257,30 @@ export const policy = (
     cooldownMs: Math.min(input?.cooldownMs ?? DEFAULT_POLICY.cooldownMs, ladder.cooldownCapMs),
     quotaCooldownMs: Math.min(input?.quotaCooldownMs ?? DEFAULT_POLICY.quotaCooldownMs, ladder.quotaCooldownCapMs),
   }
+}
+
+/** How long the last target that can take a request may go without output, from the request's start.
+ * Never shorter than the first-output wait itself, so a value at or below it changes nothing. */
+export const lastTargetTimeout = (policy: Policy): number | false => {
+  const last = policy.lastTargetTimeoutMs ?? DEFAULT_LAST_TARGET_TIMEOUT_MS
+  const first = policy.firstTokenTimeoutMs
+  if (last === false || first === false) return false
+  return Math.max(last, first)
+}
+
+/** The policy an attempt on one target runs under: the route's, with the target's own first-output
+ * wait when the route lets nested routes keep theirs (`nestedTimeout: "own"`). */
+export const targetPolicy = (definition: Definition, index: number): Policy => {
+  const wait = definition.targetFirstTokenTimeouts?.[index]?.firstTokenTimeoutMs
+  return wait === undefined ? definition.health : { ...definition.health, firstTokenTimeoutMs: wait }
+}
+
+/** The cost/capability class a route declares, normalized for comparison: class names match
+ * in any case, as route references do throughout route config. Undefined when the route
+ * declares none — such a route neither substitutes nor is substituted into (#12228). */
+export const routeClass = (definition: Definition): string | undefined => {
+  const name = definition.class?.trim().toLowerCase()
+  return name ? name : undefined
 }
 
 /** The route definition a model carries. Route models under the routes provider carry one, and so
@@ -623,7 +673,28 @@ export const networkSuspect = (now = Date.now(), location?: string) =>
       .map((failure) => failure.provider),
   ).size >= currentConstants(location).network.providers
 
+/** Consecutive terminal Authentication refusals a provider may collect across its legs
+ * before the provider itself is gated (#2519). */
+const PROVIDER_HARD_FAILURE_LIMIT = 3
+
+/** Provider-scope terminal-auth gate (#2519). An auth bench lives on the leg that served
+ * the refused attempt, so a provider whose every leg answers 401/403 keeps being dealt
+ * one fresh leg per session wave: _commandcode took 545 attempts across 95 sessions in
+ * one 08:41-10:30Z wave, 412 of them ending with no failover. This record counts
+ * consecutive auth refusals at provider scope; at the limit the whole provider is held
+ * out on the long quota ladder, extended by each further refusal, and cleared only by a
+ * live provider success. The gate lapses at its `until` like any bench — the lapse is the
+ * provider's next probe window, not a success — so a dead provider cannot wall itself
+ * forever on a record no success may ever reach. */
+const providerHardFailures = new Map<string, { failures: number; until: number }>()
+
+const providerHardFailure = (providerID: string, now: number) => {
+  const state = providerHardFailures.get(providerID)
+  return state && state.failures >= PROVIDER_HARD_FAILURE_LIMIT && state.until > now ? state : undefined
+}
+
 const providerCooldownUntil = (providerID: string, now: number, location?: string) => {
+  const hard = providerHardFailure(providerID, now)?.until ?? 0
   const prefix = `${providerID}/`
   // The corroboration count is per MODEL: a model cooling at several efforts is
   // still one model. Traffic benches live on the leg's own map now, so both maps
@@ -641,7 +712,7 @@ const providerCooldownUntil = (providerID: string, now: number, location?: strin
     models.add(id.slice(0, id.lastIndexOf("@")))
     until = Math.max(until, state.cooldownUntil)
   }
-  return models.size >= currentConstants(location).network.providerModels ? until : 0
+  return Math.max(hard, models.size >= currentConstants(location).network.providerModels ? until : 0)
 }
 
 export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string, variant?: string) =>
@@ -2177,6 +2248,24 @@ export const failed = (
     }
     return
   }
+  // A terminal auth refusal is provider-scope evidence: the auth bench above holds the
+  // leg that served it, but a provider whose every leg is refused keeps being dealt
+  // anew (#2519). Count the refusals across the provider's legs; at the limit the
+  // provider gate takes over. Any live success clears the run in completed().
+  if (hint?.auth) {
+    const previous = providerHardFailures.get(target.providerID)
+    const failures = (previous?.failures ?? 0) + 1
+    const ladder = currentConstants(location).bench
+    const until =
+      now +
+      Math.min(
+        policy.quotaCooldownMs * ladder.multiplier ** Math.max(0, failures - PROVIDER_HARD_FAILURE_LIMIT),
+        ladder.maxCooldownMs,
+      )
+    providerHardFailures.set(target.providerID, { failures, until })
+    if (failures === PROVIDER_HARD_FAILURE_LIMIT)
+      logHealth(target, "cooldown-start", `provider:${target.providerID} hard-failure-gated`, until)
+  }
   // With a credential dimension the failure belongs to the credential that served the attempt:
   // benching the target as well would bench every other credential behind the provider too (#6).
   // The scope within that rule follows the signal: a quota failure benches the pool scope
@@ -2572,6 +2661,15 @@ export const giveUps = (target: Model.Ref, credentialID?: string, location?: str
   const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
   const window = currentConstants(location).escalation.outcomeWindow
   return (state?.outcomes ?? []).slice(-window).filter((answered) => !answered).length
+}
+
+/** A target's measured recent record: requests answered and attempted in the retained
+ * outcome window — the in-process successor of the #12228 five-door measurement. The
+ * cross-route substitution order ranks a candidate route by the measured record of the
+ * doors it would send the session to. */
+export const measured = (target: Model.Ref): { readonly answered: number; readonly attempts: number } => {
+  const outcomes = health.get(key(target))?.outcomes ?? []
+  return { answered: outcomes.filter((answered) => answered).length, attempts: outcomes.length }
 }
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */
@@ -3450,6 +3548,10 @@ export const providerRootStartBlocked = (
   now = Date.now(),
   location?: string,
 ): { readonly until: number | null } | undefined => {
+  // A provider whose legs are terminally refused refuses a root start on any leg, even
+  // when the quota root-start switch is off: this is auth evidence, not quota (#2519).
+  const hard = providerHardFailure(target.providerID, now)
+  if (hard) return { until: hard.until }
   const gate = currentConstants(location).quotaGate
   if (!gate.rootStartEnabled) return undefined
   const state = providerQuota.get(target.providerID)
@@ -3549,6 +3651,14 @@ export const completed = (
   state.outcomes = pushOutcome(state.outcomes, true)
   state.consecutiveFailures = 0
   state.consecutiveRateLimits = 0
+  // A live provider success ends the provider-scope terminal-auth run (#2519): whatever
+  // leg of the provider served, the provider is not dead and may be dealt again.
+  const hardFailure = providerHardFailures.get(target.providerID)
+  if (hardFailure) {
+    providerHardFailures.delete(target.providerID)
+    if (hardFailure.failures >= PROVIDER_HARD_FAILURE_LIMIT)
+      logHealth(target, "cooldown-end", `provider:${target.providerID} hard-failure-cleared`)
+  }
   // The leg's traffic scope settles on the same success: its failure and rate-limit
   // runs end, and a probe claim this pick spent there ends its bench — a success at
   // one effort says nothing about a sibling effort's bench, so only the serving
@@ -3622,6 +3732,7 @@ export const resetHealth = () => {
   credentialQuota.clear()
   providerQuota.clear()
   gatheredProviderQuota.clear()
+  providerHardFailures.clear()
   quotaEvents.clear()
   restoredDemotionAttempts.clear()
   quotaFailureSources.clear()
@@ -4395,6 +4506,10 @@ export const nextTarget = (
   random: () => number = Math.random,
   credentialOf?: (index: number) => string | undefined,
   location?: string,
+  /** The session's pinned leaf (#2671), passed only when the caller judged it healthy. It goes
+   * first at every node on its path while it is still ready, untried and gate-open; otherwise the
+   * normal order applies. */
+  preferred?: number,
 ): number | undefined => {
   const leaves = (nodeIndex: number): number[] => {
     const node = definition.nodes[nodeIndex]
@@ -4423,6 +4538,7 @@ export const nextTarget = (
     )
   }
   const hasReady = (nodeIndex: number): boolean => openLeaves(nodeIndex).length > 0
+  const pinned = preferred !== undefined && openLeaves(0).includes(preferred) ? preferred : undefined
   /** Whether any gate on the path from this node down to the leaf is closed at `now`. */
   const gateClosedOnPath = (nodeIndex: number, leafIndex: number): boolean => {
     const node = definition.nodes[nodeIndex]
@@ -4642,7 +4758,20 @@ export const nextTarget = (
     const sorted = node.selection === "round-robin" ? byTier(positions) : rank(positions)
     let ordered = sorted
     let decisionReason = sorted.some((position, index) => position !== positions[index]) ? "adjusted" : "ordered"
-    if (node.selection === "ordered" && currentPosition !== undefined) {
+    // The session's pinned member (#2671) leads while it can serve, ahead of continuity, the
+    // sticky pick and the draw — no draw is consumed, so clearing the pin resumes the session's
+    // normal selection. The rest keep their normal order as the failover tail.
+    const pinnedPosition =
+      pinned === undefined
+        ? undefined
+        : positions.find((position) => {
+            const child = node.children[position]
+            return child.leaf === pinned || (child.node !== undefined && leaves(child.node).includes(pinned))
+          })
+    if (pinnedPosition !== undefined) {
+      ordered = [pinnedPosition, ...sorted.filter((position) => position !== pinnedPosition)]
+      decisionReason = "pinned"
+    } else if (node.selection === "ordered" && currentPosition !== undefined) {
       ordered = [currentPosition, ...positions.filter((position) => position !== currentPosition)]
       decisionReason = "sticky"
     } else if (sessionID && sessionScoped(node.selection)) {
@@ -4754,7 +4883,56 @@ export const forgetSession = (routeID: string, sessionID: string) => {
   selection.get(routeID)?.sessions.delete(sessionID)
 }
 
-export const resetSelection = () => selection.clear()
+/** A session's preferred pool member per route (#2671): the member the session uses while it is
+ * healthy, without leaving the pool, so failover and the return to the member work as usual.
+ *
+ * Kept in memory, like the sticky picks and continuity it sits beside, rather than on the session
+ * record. The pin is advice to selection, not session history: it needs no durable event, no
+ * projection column and no migration, and losing it on a restart is safe — the session is still
+ * on its pool and simply selects normally until a client sets the pin again. Clients read the
+ * current value back from the API. Bounded like the other per-session maps. */
+const pins = new Map<string, Map<string, Model.Ref>>()
+
+export const resetSelection = () => {
+  selection.clear()
+  pins.clear()
+}
+
+/** Sets or clears (`undefined`) a session's preferred member on one route. */
+export const pinTarget = (routeID: string, sessionID: string, target: Model.Ref | undefined) => {
+  const routes = new Map(pins.get(sessionID))
+  if (target === undefined) routes.delete(routeID)
+  else routes.set(routeID, target)
+  pins.delete(sessionID)
+  if (routes.size === 0) return
+  pins.set(sessionID, routes)
+  while (pins.size > SESSION_LIMIT) pins.delete(pins.keys().next().value!)
+}
+
+/** The session's pins, one per route. */
+export const pinnedTargets = (sessionID: string) =>
+  Array.from(pins.get(sessionID) ?? [], ([routeID, target]) => ({ routeID, target }))
+
+/** Drops every pin a session holds, e.g. when the session is deleted. */
+export const forgetPins = (sessionID: string) => {
+  pins.delete(sessionID)
+}
+
+/** The leaf a target names on this route: the exact member (variant included), or — for a target
+ * without a variant — the first member of that provider/model. Undefined when it is not a member. */
+export const memberIndex = (definition: Definition, target: Model.Ref) => {
+  const exact = definition.targets.findIndex((item) => key(item) === key(target) && item.variant === target.variant)
+  if (exact >= 0) return exact
+  if (target.variant !== undefined) return undefined
+  const loose = definition.targets.findIndex((item) => key(item) === key(target))
+  return loose >= 0 ? loose : undefined
+}
+
+/** The leaf the session pinned on this route, while it is still a member. */
+export const pinnedLeaf = (definition: Definition, sessionID: string) => {
+  const target = pins.get(sessionID)?.get(definition.id)
+  return target === undefined ? undefined : memberIndex(definition, target)
+}
 
 /** Where a session has been answered on a route. `origin` is the target it moved away from after a
  * failover; `away` counts requests answered since on the target it moved to. */

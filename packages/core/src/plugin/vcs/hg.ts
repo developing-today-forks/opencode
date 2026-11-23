@@ -9,7 +9,8 @@ import { FileStatus, Info, Mode } from "@opencode/schema/vcs"
 import { FSUtil } from "@opencode/util/fs-util"
 import { AppProcess } from "@opencode/util/process"
 import { Location } from "../../location.js"
-import type { Adapter, DiffOptions } from "../../vcs.js"
+import type { Adapter, DiffOptions, StatusOptions } from "../../vcs.js"
+import { statusLimit } from "../../vcs.js"
 import { DiffError } from "../../vcs.js"
 import {
   addPatch,
@@ -54,7 +55,7 @@ export const Plugin = define({
           }),
         info: () => adapter.info(),
         branches: (input) => adapter.branches({ search: input.search, limit: input.limit }),
-        status: () => adapter.status(),
+        status: (input) => adapter.status({ limit: input.limit }),
         diff: (input) => adapter.diff(input.mode, { context: input.context, base: input.base }),
       })
     })
@@ -93,14 +94,18 @@ function make(
     return emptyPatch(item.file)
   })
 
-  const diffAgainst = Effect.fnUntraced(function* (rev: string | undefined, options?: DiffOptions) {
+  const diffAgainst = Effect.fnUntraced(function* (rev: string | undefined, options?: DiffOptions, limit?: number) {
     const [items, batch] = yield* Effect.all(
       [hg.status(rev, scope), hg.diff(rev, scope, { context: options?.context ?? PATCH_CONTEXT_LINES })],
       { concurrency: 2 },
     )
     const chunks = chunksByFile(batch, () => undefined)
     const list: FileDiff.Info[] = []
-    for (const item of items.toSorted((a, b) => a.file.localeCompare(b.file))) {
+    // Page before any per-file patch work: rows beyond the page are never
+    // read or counted, and the last row of a truncated page is marked `more`.
+    const sorted = items.toSorted((a, b) => a.file.localeCompare(b.file))
+    const page = limit === undefined ? sorted : sorted.slice(0, statusLimit(limit))
+    for (const item of page) {
       const patch = yield* patchFor(item, rev, chunks.get(item.file))
       const counts = countPatch(patch)
       list.push({
@@ -111,6 +116,8 @@ function make(
         status: item.status,
       })
     }
+    const last = list[list.length - 1]
+    if (last && page.length < sorted.length) list[list.length - 1] = { ...last, more: true }
     return list
   })
 
@@ -121,14 +128,15 @@ function make(
     branches: Effect.fn("VcsHg.branches")(function* () {
       return []
     }),
-    status: Effect.fn("VcsHg.status")(function* () {
-      return (yield* diffAgainst(undefined, { context: 0 })).map(
+    status: Effect.fn("VcsHg.status")(function* (options?: StatusOptions) {
+      return (yield* diffAgainst(undefined, { context: 0 }, options?.limit)).map(
         (item) =>
           ({
             file: item.file,
             additions: item.additions,
             deletions: item.deletions,
             status: item.status,
+            ...(item.more ? { more: item.more } : {}),
           }) satisfies FileStatus,
       )
     }),

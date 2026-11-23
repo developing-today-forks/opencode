@@ -7,6 +7,7 @@ import { Session } from "@opencode/schema/session"
 import { Context, Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiMiddleware, HttpApiSchema, OpenApi } from "effect/http-api"
 import {
+  ConflictError,
   LocationNotFoundError,
   PermissionNotFoundError,
   PermissionSavedNotFoundError,
@@ -29,6 +30,7 @@ export const makePermissionGroup = <
         query: LocationQuery,
         success: Location.response(Schema.Array(Permission.Request)),
       })
+        .middleware(locationMiddleware)
         .annotateMerge(locationQueryOpenApi)
         .annotateMerge(
           OpenApi.annotations({
@@ -42,11 +44,31 @@ export const makePermissionGroup = <
       HttpApiEndpoint.get("permission.saved.list", "/api/permission/saved", {
         query: Schema.Struct({ projectID: Project.ID.pipe(Schema.optional) }),
         success: Schema.Struct({ data: Schema.Array(PermissionSaved.Info) }),
+      })
+        .middleware(locationMiddleware)
+        .annotateMerge(
+          OpenApi.annotations({
+            identifier: "permission.saved.list",
+            summary: "List saved permissions",
+            description: "Retrieve saved permissions, optionally filtered by project.",
+          }),
+        ),
+    )
+    .add(
+      HttpApiEndpoint.patch("permission.saved.update", "/api/permission/saved/:id", {
+        params: { id: PermissionSaved.ID },
+        payload: Schema.Struct({
+          action: Schema.String.pipe(Schema.optional),
+          resource: Schema.String.pipe(Schema.optional),
+        }),
+        success: Schema.Struct({ data: PermissionSaved.Info }),
+        error: [PermissionSavedNotFoundError, ConflictError],
       }).annotateMerge(
         OpenApi.annotations({
-          identifier: "permission.saved.list",
-          summary: "List saved permissions",
-          description: "Retrieve saved permissions, optionally filtered by project.",
+          identifier: "permission.saved.update",
+          summary: "Update saved permission",
+          description:
+            "Change the action or resource of a saved permission. Fails with a conflict when the project already has a saved permission with the same action and resource.",
         }),
       ),
     )
@@ -63,8 +85,6 @@ export const makePermissionGroup = <
         }),
       ),
     )
-    // Effect applies group middleware only to endpoints already added; session endpoints use session placement below.
-    .middleware(locationMiddleware)
     .add(
       HttpApiEndpoint.post("session.permission.create", "/api/session/:sessionID/permission", {
         params: { sessionID: Session.ID },

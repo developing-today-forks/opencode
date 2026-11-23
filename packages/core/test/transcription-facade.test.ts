@@ -4,7 +4,7 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { RequestExecutor } from "@opencode/ai/route"
 import { TranscriptionFacade } from "@opencode/core/transcription-facade"
 import { ModelRouteLog } from "@opencode/core/model-route-log"
-import { TranscriptionResponse, type TranscriptionEvent } from "@opencode/ai"
+import { TranscriptionResponse, type TranscriptionEvent } from "@opencode/ai/experimental"
 
 const mp3 = { bytes: new Uint8Array([0x49, 0x44, 0x33, 1, 2, 3]), mediaType: "audio/mpeg", filename: "note.mp3" }
 

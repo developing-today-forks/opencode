@@ -414,7 +414,7 @@ const fromRequest = Effect.fn("CommandCode.fromRequest")(function* (request: LLM
     if (content.length) messages.push({ role: "tool", content })
   }
 
-  const generation = request.generation
+  const generation = request
   const effort = options.reasoningEffort ?? options.reasoning_effort
   return {
     config: options.serverConfig ?? buildServerConfig(),

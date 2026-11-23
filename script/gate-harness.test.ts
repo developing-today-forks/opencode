@@ -5,6 +5,7 @@ import { join } from "node:path"
 import {
   collect,
   evaluateGate,
+  hitKey,
   parseAllowlist,
   scanSource,
   staleEntries,
@@ -98,9 +99,9 @@ describe("treesOnDisk (shared inventory, #1425/#1494 shape)", () => {
       }
       tree("packages/ai/src", true)
       tree("packages/ai/script", true)
-      tree("packages/console/app/src", true)
+      tree("packages/data/app/src", true)
       tree("packages/plugins/figma/skills/example/src", false)
-      expect(treesOnDisk(root, ["src"])).toEqual(["packages/ai/src", "packages/console/app/src"])
+      expect(treesOnDisk(root, ["src"])).toEqual(["packages/ai/src", "packages/data/app/src"])
       expect(treesOnDisk(root, ["script", "scripts"])).toEqual(["packages/ai/script"])
     } finally {
       rmSync(root, { recursive: true, force: true })
@@ -168,5 +169,19 @@ describe("gate declarations", () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe("hitKey whitespace normalization (#2630)", () => {
+  test("internal whitespace runs collapse to a single space", () => {
+    expect(hitKey("f.ts", "const a = \t TABLE[key]")).toBe(hitKey("f.ts", "const a = TABLE[key]"))
+    expect(hitKey("f.ts", "const a = TABLE[key]")).toBe("f.ts :: const a = TABLE[key]")
+  })
+
+  test("a disposition recorded against one spacing covers a hit with another", () => {
+    const allowlist = parseAllowlist("f.ts :: const a =  TABLE[key] :: guarded\n")
+    const hits: Hit[] = [{ file: "f.ts", line: 1, text: "const a = TABLE[key]" }]
+    expect(unlistedHits(hits, allowlist)).toEqual([])
+    expect(staleEntries(hits, allowlist)).toEqual([])
   })
 })

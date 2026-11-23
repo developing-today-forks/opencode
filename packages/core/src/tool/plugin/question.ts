@@ -1,7 +1,7 @@
 export * as QuestionTool from "./question.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import { Duration, Effect, Schema } from "effect"
 import { Form } from "../../form.js"
 import { Permission } from "../../permission.js"
@@ -70,9 +70,7 @@ export const Plugin = {
               .assert({
                 action: "question",
                 resources: ["*"],
-                sessionID: context.sessionID,
-                agent: context.agent,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
+                ...Permission.invocation(context),
               })
               .pipe(
                 Effect.mapError(
@@ -124,7 +122,7 @@ export const Plugin = {
                     answers: input.questions.map((_, index): Question.Answer => {
                       const value = state.answer[`q${index}`]
                       if (value === undefined) return []
-                      if (typeof value === "object") return Array.from(value)
+                      if (Array.isArray(value)) return Array.from(value)
                       return [String(value)]
                     }),
                   }

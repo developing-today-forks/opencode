@@ -18,7 +18,7 @@ export const EventHandler = HttpApiBuilder.group(Api, "server.event", (handlers)
         // The connected frame has no SSE id, so it never moves the client's cursor.
         const output = Stream.unwrap(
           feed
-            .subscribe(ctx.request.headers["last-event-id"])
+            .subscribe(ctx.headers["last-event-id"], ctx.query.types)
             .pipe(Effect.map((live) => Stream.make(EventFeed.frame(connected)).pipe(Stream.concat(live)))),
         )
         const heartbeat = Stream.tick("15 seconds").pipe(Stream.map(() => ": heartbeat\n\n"))

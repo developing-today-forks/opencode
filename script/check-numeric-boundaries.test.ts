@@ -62,12 +62,8 @@ describe("SCAN_ROOTS", () => {
       "packages/client/src",
       "packages/cli/src",
       "packages/codemode/src",
-      "packages/console/app/src",
-      "packages/console/function/src",
       "packages/core/src",
       "packages/desktop/src",
-      "packages/function/src",
-      "packages/gui-extensions/src",
       "packages/http-recorder/src",
       "packages/httpapi-codegen/src",
       "packages/latex/src",
@@ -75,7 +71,6 @@ describe("SCAN_ROOTS", () => {
       "packages/plugin/src",
       "packages/plugin-browser/src",
       "packages/plugin-github/src",
-      "packages/posts/src",
       "packages/protocol/src",
       "packages/schema/src",
       "packages/script/src",
@@ -83,47 +78,50 @@ describe("SCAN_ROOTS", () => {
       "packages/server/src",
       "packages/session-ui/src",
       "packages/simulation/src",
-      "packages/stats/app/src",
-      "packages/stats/core/src",
-      "packages/stats/server/src",
       "packages/theme/src",
       "packages/tui/src",
       "packages/ui/src",
       "packages/util/src",
-      "packages/web/src",
-      "services/changelog/src",
       "services/files/src",
       "services/update/src",
-      "services/www/src",
       "script",
       "packages/ai/script",
       "packages/client/script",
       "packages/cli/script",
       "packages/codemode/script",
-      "packages/console/app/script",
-      "packages/containers/script",
       "packages/core/script",
-      "packages/desktop/scripts",
       "packages/http-recorder/script",
       "packages/merman/script",
       "packages/plugin/script",
       "packages/plugin-browser/script",
       "packages/plugin-github/script",
       "packages/plugins/figma/script",
-      "packages/posts/script",
       "packages/protocol/script",
       "packages/schema/script",
       "packages/sdk/script",
       "packages/server/script",
-      "packages/session-ui/script",
       "packages/simulation/script",
       "packages/theme/script",
       "packages/ui/script",
       "packages/util/script",
-      "services/www/script",
-      "github/script",
       "sdks/vscode/script",
       "sdks/vscode/src",
+      "packages/cli-rs/script",
+      "packages/data/app/script",
+      "packages/data/app/src",
+      "packages/data/core/src",
+      "packages/data/server/src",
+      "packages/desktop/script",
+      "packages/gui-plugins/src",
+      "packages/nav-menus/script",
+      "packages/nav-menus/src",
+      "packages/patchmark/scripts",
+      "packages/patchmark/src",
+      "packages/stories/src",
+      "services/data/script",
+      "services/legacy/src",
+      "services/site/script",
+      "services/site/src",
     ])
   })
 })
@@ -190,12 +188,12 @@ describe("src trees (#1494)", () => {
         if (pkg) writeFileSync(join(root, rel, "..", "package.json"), "{}\n")
       }
       tree("packages/ai/src", true)
-      tree("packages/console/app/src", true)
+      tree("packages/data/app/src", true)
       tree("services/update/src", true)
       tree("packages/plugins/figma/skills/example/src", false)
-      expect(srcTreesOnDisk(root)).toEqual(["packages/ai/src", "packages/console/app/src", "services/update/src"])
+      expect(srcTreesOnDisk(root)).toEqual(["packages/ai/src", "packages/data/app/src", "services/update/src"])
       expect(unscannedSrcTrees(root, ["packages/ai/src", "services/update/src"])).toEqual([
-        "packages/console/app/src",
+        "packages/data/app/src",
       ])
       expect(unscannedSrcTrees(root, SCAN_ROOTS)).toEqual([])
     } finally {
@@ -209,11 +207,11 @@ describe("src trees (#1494)", () => {
 })
 
 describe("script trees (#1517)", () => {
-  test("SCAN_ROOTS covers the nested console/app and plugins/figma script trees", () => {
+  test("SCAN_ROOTS covers the nested data/app and plugins/figma script trees", () => {
     expect(SCAN_ROOTS).toContain("script")
-    expect(SCAN_ROOTS).toContain("packages/console/app/script")
+    expect(SCAN_ROOTS).toContain("packages/data/app/script")
     expect(SCAN_ROOTS).toContain("packages/plugins/figma/script")
-    expect(SCAN_ROOTS).toContain("services/www/script")
+    expect(SCAN_ROOTS).toContain("services/site/script")
   })
 
   test("scriptTreesOnDisk finds package script trees at any depth and ignores non-package folders", () => {
@@ -225,11 +223,11 @@ describe("script trees (#1517)", () => {
         if (pkgAt === "self") writeFileSync(join(root, rel, "package.json"), "{}\n")
       }
       tree("packages/ai/script", "parent")
-      tree("packages/console/app/script", "parent")
+      tree("packages/data/app/script", "parent")
       tree("packages/plugins/figma/script", "parent")
-      tree("packages/containers/script", "self")
-      tree("packages/desktop/scripts", "parent")
-      tree("services/www/script", "parent")
+      tree("packages/cli-rs/script", "self")
+      tree("packages/patchmark/scripts", "parent")
+      tree("services/site/script", "parent")
       // Not package script trees: the packages/script package itself and
       // a skill asset folder with no package.json at either level.
       mkdirSync(join(root, "packages/script/src"), { recursive: true })
@@ -237,18 +235,18 @@ describe("script trees (#1517)", () => {
       tree("packages/plugins/figma/skills/figma-generate-library/scripts", "none")
       expect(scriptTreesOnDisk(root)).toEqual([
         "packages/ai/script",
-        "packages/console/app/script",
-        "packages/containers/script",
-        "packages/desktop/scripts",
+        "packages/cli-rs/script",
+        "packages/data/app/script",
+        "packages/patchmark/scripts",
         "packages/plugins/figma/script",
-        "services/www/script",
+        "services/site/script",
       ])
       expect(unscannedScriptTrees(root, ["packages/ai/script"])).toEqual([
-        "packages/console/app/script",
-        "packages/containers/script",
-        "packages/desktop/scripts",
+        "packages/cli-rs/script",
+        "packages/data/app/script",
+        "packages/patchmark/scripts",
         "packages/plugins/figma/script",
-        "services/www/script",
+        "services/site/script",
       ])
       expect(unscannedScriptTrees(root, SCAN_ROOTS)).toEqual([])
     } finally {

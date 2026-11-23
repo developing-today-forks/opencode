@@ -1,7 +1,7 @@
 import { Credential } from "@opencode/schema/credential"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
-import { ConflictError, CredentialNotFoundError } from "../errors.js"
+import { ConflictError, CredentialNotFoundError, InvalidRequestError } from "../errors.js"
 
 export const CredentialGroup = HttpApiGroup.make("server.credential")
   .add(
@@ -11,7 +11,8 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
       OpenApi.annotations({
         identifier: "credential.list",
         summary: "List credentials",
-        description: "List every stored integration credential, including its secret value.",
+        description:
+          "List every stored integration credential, including its secret value. Session-cookie credentials are provider-only: listings return their metadata with the cookie redacted.",
       }),
     ),
   )
@@ -19,13 +20,13 @@ export const CredentialGroup = HttpApiGroup.make("server.credential")
     HttpApiEndpoint.post("credential.create", "/api/credential", {
       payload: Credential.CreateInput,
       success: Schema.Struct({ data: Credential.Entry }),
-      error: ConflictError,
+      error: [ConflictError, InvalidRequestError],
     }).annotateMerge(
       OpenApi.annotations({
         identifier: "credential.create",
         summary: "Create credential",
         description:
-          "Store an integration credential. It becomes the integration's active credential unless activate is false and the integration already has one. Fails with a conflict when the requested ID already exists.",
+          "Store an integration credential. It becomes the integration's active credential unless activate is false and the integration already has one. Fails with a conflict when the requested ID already exists, and with an invalid request when an `integration.connect` policy denies the integration.",
       }),
     ),
   )

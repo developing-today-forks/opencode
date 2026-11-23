@@ -14,7 +14,7 @@ import { VcsHgPlugin } from "@opencode/core/plugin/vcs/hg"
 import { FileSystem } from "@opencode/schema/filesystem"
 import { VcsEvent } from "@opencode/schema/vcs-event"
 import { location } from "./fixture/location"
-import { tmpdir } from "./fixture/tmpdir"
+import { tmpdirScoped } from "./fixture/tmpdir"
 import { it } from "./lib/effect"
 import { host } from "./plugin/host"
 
@@ -40,10 +40,7 @@ const provide = (directory: string) =>
   )
 
 const withTmp = <A, E, R>(f: (directory: string) => Effect.Effect<A, E, R>) =>
-  Effect.acquireRelease(
-    Effect.promise(() => tmpdir()),
-    (tmp) => Effect.promise(() => tmp[Symbol.asyncDispose]()),
-  ).pipe(Effect.flatMap((tmp) => f(tmp.path)))
+  tmpdirScoped().pipe(Effect.flatMap((tmp) => f(tmp.path)))
 
 const withHg = <A, E, R>(f: (directory: string) => Effect.Effect<A, E, R>) =>
   withTmp((directory) =>
@@ -109,6 +106,28 @@ describeHg("Vcs mercurial", () => {
           { file: "keep.txt", additions: 1, deletions: 1, status: "modified" },
           { file: "new.txt", additions: 2, deletions: 0, status: "added" },
         ])
+      }),
+    ),
+  )
+
+  it.live("status pages bound the result and mark the last row when truncated", () =>
+    withHg((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await fs.writeFile(path.join(directory, "tracked.txt"), "one\n")
+          await commitAll(directory, "initial")
+          for (let index = 1; index <= 6; index++) {
+            await fs.writeFile(path.join(directory, `f${String(index).padStart(2, "0")}.txt`), "x\n")
+          }
+        })
+        const vcs = yield* Vcs.Service
+        const all = yield* vcs.status()
+        expect(all.length).toBe(6)
+        expect(all.every((row) => row.more === undefined)).toBe(true)
+        const page = yield* vcs.status({ limit: 2 })
+        expect(page.map((row) => row.file)).toEqual(["f01.txt", "f02.txt"])
+        expect(page[0]?.more).toBeUndefined()
+        expect(page[1]?.more).toBe(true)
       }),
     ),
   )

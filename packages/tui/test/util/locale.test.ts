@@ -54,3 +54,15 @@ test("length truncators never split a surrogate pair (#2133)", () => {
   expect(Locale.truncateLeft("abcd\u{1F600}ef", 4)).toBe("…ef")
   expect(Locale.truncateMiddle("a\u{1F600}bcdefgh", 4)).toBe("a…h")
 })
+
+test("truncates text in the middle without overflowing small widths", () => {
+  expect(Locale.truncateMiddle("abcdefghij", 0)).toBe("")
+  expect(Locale.truncateMiddle("abcdefghij", 1)).toBe("…")
+  expect(Locale.truncateMiddle("abcdefghij", 2)).toBe("a…")
+  expect(Locale.truncateMiddle("abcdefghij", 3)).toBe("a…j")
+  expect(Locale.truncateMiddle("abcdefghij", 4)).toBe("ab…j")
+  expect(Locale.truncateMiddle("abcdefghij", 9)).toBe("abcd…ghij")
+  expect(Locale.truncateMiddle("abcd", 4)).toBe("abcd")
+  expect(Locale.truncateMiddle("abcd", 10)).toBe("abcd")
+  expect(Locale.truncateMiddle("a", 1)).toBe("a")
+})

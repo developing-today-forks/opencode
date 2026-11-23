@@ -23,7 +23,7 @@
  * (route → route chains and their `triedRefs` seeding). Scenarios that live at that altitude
  * are called out in the tests that need them.
  */
-import { AIError, TransportError, isRetryable } from "@opencode/ai"
+import { AIError, TransportError, isRetryable } from "@opencode/ai/effect"
 import { ModelRoute } from "@opencode/core/model-route"
 import { ModelRouteAutonomy } from "@opencode/core/model-route-autonomy"
 import { ModelRouteLimits } from "@opencode/core/model-route-limits"

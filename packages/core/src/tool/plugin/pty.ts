@@ -1,6 +1,6 @@
 export * as PtyTool from "./pty.js"
 
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import type { Context } from "@opencode/plugin/effect/plugin"
 import { Pty } from "@opencode/schema/pty"
 import type { Tool } from "@opencode/schema/tool"

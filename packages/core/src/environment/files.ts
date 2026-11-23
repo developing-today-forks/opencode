@@ -28,12 +28,16 @@ export class Failed extends Schema.TaggedError<Failed>()("Environment.Failed", {
   cause: Schema.Defect(),
 }) {}
 
+/** The upper bound on a whole-file `read` (no range): 64 MiB. Larger files must be read with ranges. */
+export const MAX_WHOLE_FILE_BYTES = 64 * 1024 * 1024
+
 export interface FilesImpl {
   /**
    * Content operations (`read`, `list`) follow final symlinks; metadata operations (`stat` and entry
    * tags returned by `list`) do not. `info` describes the target file whose bytes are returned.
-   * The process-backed default caps collected output at 64 MiB; larger whole-file reads fail with
-   * `Failed`, so callers must use ranges for larger files.
+   * The process-backed default caps collected output at `MAX_WHOLE_FILE_BYTES` (64 MiB); every driver
+   * enforces the same bound on whole-file reads, which fail with `Failed`, so callers must use
+   * ranges for larger files.
    */
   readonly read: (
     path: string,
@@ -47,6 +51,8 @@ export interface FilesImpl {
   readonly remove: (path: string) => Effect.Effect<void, Failed>
   readonly move: (from: string, to: string) => Effect.Effect<void, NotFound | Failed>
   readonly mkdir: (path: string) => Effect.Effect<void, Failed>
+  /** Adds bytes to the end of a file, creating it when missing. */
+  readonly append: (path: string, bytes: Uint8Array) => Effect.Effect<void, Failed>
 }
 
 export interface Files extends FilesImpl {}
@@ -65,6 +71,13 @@ export const typeFollowing = (files: Files, path: string) =>
           )
         : Effect.succeed(info.type),
     ),
+  )
+
+/** Follows a final symlink, so a dangling symlink does not exist. */
+export const exists = (files: Files, path: string) =>
+  typeFollowing(files, path).pipe(
+    Effect.as(true),
+    Effect.catchTag("Environment.NotFound", () => Effect.succeed(false)),
   )
 
 export * as EnvironmentFiles from "./files.js"

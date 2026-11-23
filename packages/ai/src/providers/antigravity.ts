@@ -1,7 +1,7 @@
 import type { ProviderPackage } from "../provider-package.js"
 import { Antigravity } from "../protocols/antigravity.js"
 import { Auth } from "../route/auth.js"
-import type { RouteDefaultsInput } from "../route/client.js"
+import type { RequestOptions } from "../schema/index.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
 import { AntigravityAuth } from "./antigravity-auth.js"
 
@@ -10,7 +10,7 @@ export const id = ProviderID.make("_antigravity")
 export type ProviderOptionsInput = Antigravity.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput
 
-export type Config = Omit<RouteDefaultsInput, "providerOptions"> & {
+export type Config = Omit<RequestOptions, "providerOptions"> & {
   readonly baseURL?: string
   /** Explicit auth override (tests, embedding hosts). Wins over the keyring. */
   readonly auth?: Auth.Definition

@@ -1,6 +1,6 @@
 export * as McpxSecrets from "./mcpx-secrets.js"
 
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import { Effect, Option } from "effect"
 
 // Core never reads, logs, stores, or sends a secret value. It works with names, statuses, and request ids from the

@@ -27,7 +27,7 @@
 import type { ProviderPackage } from "../provider-package.js"
 import { CommandCode } from "../protocols/commandcode.js"
 import { Auth } from "../route/auth.js"
-import type { RouteDefaultsInput } from "../route/client.js"
+import type { RequestOptions } from "../schema/index.js"
 import { ProviderID, type ModelID } from "../schema/index.js"
 import { CommandCodeAuth, type CredentialSources } from "./commandcode-auth.js"
 
@@ -36,7 +36,7 @@ export const id = ProviderID.make("_commandcode")
 export type ProviderOptionsInput = CommandCode.ProviderOptionsInput
 export type OptionsInput = ProviderOptionsInput
 
-export type Config = Omit<RouteDefaultsInput, "providerOptions"> & {
+export type Config = Omit<RequestOptions, "providerOptions"> & {
   readonly baseURL?: string
   /** Explicit auth override (tests, embedding hosts). Wins over every credential tier. */
   readonly auth?: Auth.Definition

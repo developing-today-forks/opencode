@@ -1,7 +1,6 @@
 .DS_Store
 node_modules
 .worktrees
-.sst
 .env
 .env.local
 .idea
@@ -31,7 +30,6 @@ target
 
 # Local dev files
 opencode-dev
-UPCOMING_CHANGELOG.md
 RELEASE_REVIEW.md
 logs/
 *.bun-build
@@ -40,3 +38,5 @@ tsconfig.tsbuildinfo
 
 # Wrangler/Miniflare local dev state
 .wrangler/
+# Legal drafts pending review are kept outside the repository; never copy them in.
+legal-drafts-private/

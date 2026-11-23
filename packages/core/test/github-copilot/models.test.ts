@@ -1,7 +1,12 @@
 import { expect, test } from "bun:test"
 import { CopilotModels } from "@opencode/core/github-copilot/models"
+import { Effect } from "effect"
+import { FetchHttpClient, HttpClient } from "effect/http"
 import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
+
+const run = <A, E>(effect: (http: HttpClient.HttpClient) => Effect.Effect<A, E>) =>
+  Effect.runPromise(HttpClient.HttpClient.pipe(Effect.flatMap(effect), Effect.provide(FetchHttpClient.layer)))
 
 test("defensively syncs advertised Copilot models", async () => {
   const server = Bun.serve({
@@ -93,12 +98,12 @@ test("defensively syncs advertised Copilot models", async () => {
       ...Model.Info.default(Provider.ID.githubCopilot, Model.ID.make("stale")),
       modelID: Model.ID.make("stale"),
     })
-    const models = await CopilotModels.get(server.url.origin, {}, [existing, stale])
+    const models = await run((http) => CopilotModels.get(http, server.url.origin, {}, [existing, stale]))
     const model = models.get(Model.ID.make("gpt-5"))
 
     expect(model?.name).toBe("GPT-5 local")
-    expect(model?.package).toBe(Provider.aisdk("@ai-sdk/github-copilot"))
-    expect(model?.settings).toMatchObject({ baseURL: server.url.origin, endpoint: "responses" })
+    expect(model?.package).toBe("@opencode/ai/providers/openai-compatible-responses")
+    expect(model?.settings).toEqual({ baseURL: server.url.origin })
     expect(model?.cost[0]).toMatchObject({ input: 0, output: 0, cache: { read: 0, write: 0 } })
     expect(model?.variants.map((variant) => variant.id)).toEqual([
       Model.VariantID.make("low"),
@@ -106,10 +111,7 @@ test("defensively syncs advertised Copilot models", async () => {
     ])
     expect(model?.capabilities.input).toEqual(["text", "image", "pdf"])
     expect(models.get(Model.ID.make("claude-sonnet"))?.package).toBe("@opencode/ai/providers/anthropic")
-    expect(models.get(Model.ID.make("claude-sonnet"))?.settings).toMatchObject({
-      baseURL: `${server.url.origin}/v1`,
-      endpoint: "messages",
-    })
+    expect(models.get(Model.ID.make("claude-sonnet"))?.settings).toEqual({ baseURL: `${server.url.origin}/v1` })
     expect(models.get(Model.ID.make("vision-only"))?.capabilities.input).toEqual(["text", "image"])
     expect(models.get(Model.ID.make("utility"))?.enabled).toBe(false)
     expect(models.has(Model.ID.make("stale"))).toBe(false)
@@ -147,9 +149,17 @@ test("prices cache reads from either token price spelling", async () => {
   })
 
   try {
-    const models = await CopilotModels.get(server.url.origin, {}, [])
-    expect(models.get(Model.ID.make("renamed"))?.cost[0]).toMatchObject({ input: 2.5, output: 15, cache: { read: 0.25 } })
-    expect(models.get(Model.ID.make("legacy"))?.cost[0]).toMatchObject({ input: 2.5, output: 15, cache: { read: 0.25 } })
+    const models = await run((http) => CopilotModels.get(http, server.url.origin, {}, []))
+    expect(models.get(Model.ID.make("renamed"))?.cost[0]).toMatchObject({
+      input: 2.5,
+      output: 15,
+      cache: { read: 0.25 },
+    })
+    expect(models.get(Model.ID.make("legacy"))?.cost[0]).toMatchObject({
+      input: 2.5,
+      output: 15,
+      cache: { read: 0.25 },
+    })
     expect(models.get(Model.ID.make("unpriced"))?.cost[0]).toMatchObject({ cache: { read: 0 } })
   } finally {
     await server.stop(true)
@@ -185,7 +195,7 @@ test("does not roll calendar-invalid version dates over into release instants (#
   })
 
   try {
-    const models = await CopilotModels.get(server.url.origin, {}, [])
+    const models = await run((http) => CopilotModels.get(http, server.url.origin, {}, []))
     // Calendar-invalid suffixes are unknown dates (the 0 sentinel), not
     // rolled-over instants: Date.parse("2026-02-30") is 2026-03-02.
     expect(models.get(Model.ID.make("feb30"))?.time.released).toBe(0)
@@ -208,7 +218,7 @@ test("rejects an over-cap Copilot models body with a declared length (#1017)", a
     fetch: () => Response.json({ data: [], pad: "x".repeat(CopilotModels.modelsMaxResponseBytes) }),
   })
   try {
-    await expect(CopilotModels.load(server.url.origin, {})).rejects.toThrow(
+    await expect(run((http) => CopilotModels.load(http, server.url.origin, {}))).rejects.toThrow(
       `Copilot models response from ${server.url.origin}/models exceeded ${CopilotModels.modelsMaxResponseBytes} bytes`,
     )
   } finally {
@@ -228,7 +238,7 @@ test("rejects a streamed over-cap Copilot models body in flight (#1017)", async 
     fetch: () => new Response(stream, { headers: { "content-type": "application/json" } }),
   })
   try {
-    await expect(CopilotModels.load(server.url.origin, {})).rejects.toThrow(
+    await expect(run((http) => CopilotModels.load(http, server.url.origin, {}))).rejects.toThrow(
       `Copilot models response from ${server.url.origin}/models exceeded ${CopilotModels.modelsMaxResponseBytes} bytes`,
     )
   } finally {

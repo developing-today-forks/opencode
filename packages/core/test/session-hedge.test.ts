@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { AIError, LLMEvent, ProviderInternalError } from "@opencode/ai"
+import { AIError, LLMEvent, ProviderInternalError } from "@opencode/ai/effect"
 import { SessionHedge } from "@opencode/core/session/runner/hedge"
 import { Effect, Option, Stream } from "effect"
 import { it } from "./lib/effect"

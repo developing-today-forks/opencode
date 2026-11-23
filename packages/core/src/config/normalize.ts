@@ -1,7 +1,7 @@
 export * as ConfigNormalize from "./normalize.js"
 
 import { isDeepStrictEqual } from "node:util"
-import { isRecord } from "@opencode/ai/utils/record"
+import { isRecord } from "@opencode/util/record"
 import { Option, Result, Schema } from "effect"
 import { Info } from "@opencode/schema/config"
 import { ConfigAgent } from "@opencode/schema/config/agent"
@@ -32,7 +32,7 @@ import { ModelRouteMatch } from "../model-route-match.js"
 import { ModelRouteSchedule } from "../model-route-schedule.js"
 
 export interface Diagnostic {
-  readonly kind: "conflict" | "invalid" | "unsupported"
+  readonly kind: "conflict" | "invalid" | "removed" | "unsupported"
   readonly path: readonly string[]
   readonly message: string
 }
@@ -165,7 +165,19 @@ export function normalize(input: unknown): Result {
     canonical(ConfigAgent.Info, ConfigMigrateV1.migrateAgent({ ...value, mode: "primary" })),
   )
   const migratedAgents = mergeMaps(legacyAgents, modeAgents, ["agents"], diagnostics)
-  const nativeAgents = decodeMap(inputAgents, ConfigAgent.Info, ["agents"], diagnostics, decodeEncoded)
+  const nativeAgents = decodeMap(
+    isRecord(inputAgents)
+      ? mapValues(inputAgents, (agent) =>
+          isRecord(agent) && agent.permissions !== undefined
+            ? { ...agent, permissions: renameTools(agent.permissions) }
+            : agent,
+        )
+      : inputAgents,
+    ConfigAgent.Info,
+    ["agents"],
+    diagnostics,
+    decodeEncoded,
+  )
   diagnoseAgentUnsupported(inputAgent, ["agent"], diagnostics, aliases)
   diagnoseAgentUnsupported(inputMode, ["mode"], diagnostics, aliases)
   mergeMap(
@@ -190,7 +202,13 @@ export function normalize(input: unknown): Result {
 
   const toolRules = migrateTools(input.tools, diagnostics)
   const permissionRules = migratePermissions(input.permission, diagnostics)
-  const nativePermissions = decodeList(input.permissions, Permission.Rule, ["permissions"], diagnostics, decodeEncoded)
+  const nativePermissions = decodeList(
+    renameTools(input.permissions),
+    Permission.Rule,
+    ["permissions"],
+    diagnostics,
+    decodeEncoded,
+  )
   const permissions = [...toolRules, ...permissionRules, ...nativePermissions]
   if (permissions.length || Array.isArray(input.permissions)) encoded.permissions = permissions
 
@@ -210,7 +228,7 @@ export function normalize(input: unknown): Result {
   normalizeFormatter(input, encoded, diagnostics)
   normalizeLsp(input, encoded, diagnostics)
 
-  const rawModel = resolveModelString(input.model, aliases)
+  const rawModel = resolveModelString(input.model, aliases, diagnostics, ["model"])
   const model = own(input, "model")
     ? decodeValue(ConfigModel.Selection, rawModel, ["model"], diagnostics)
     : undefined
@@ -223,6 +241,8 @@ export function normalize(input: unknown): Result {
     share: Info.fields.share,
     enterprise: Info.fields.enterprise,
     username: Info.fields.username,
+    timezone: Info.fields.timezone,
+    automations: Info.fields.automations,
     snapshots: Info.fields.snapshots,
     media: Info.fields.media,
     tool_output: Info.fields.tool_output,
@@ -369,14 +389,15 @@ function normalizeCompaction(
   unsupportedIfPresent(input.compaction, "tail_turns", ["compaction", "tail_turns"], diagnostics)
   unsupportedIfPresent(input.compaction, "prune", ["compaction", "prune"], diagnostics)
   const result: Record<string, unknown> = {}
-  if (own(input.compaction, "auto")) {
+  for (const key of ["auto", "background"] as const) {
+    if (!own(input.compaction, key)) continue
     const value = decodeEncoded(
-      ConfigCompaction.Info.fields.auto,
-      input.compaction.auto,
-      ["compaction", "auto"],
+      ConfigCompaction.Info.fields[key],
+      input.compaction[key],
+      ["compaction", key],
       diagnostics,
     )
-    if (value !== undefined) result.auto = value
+    if (value !== undefined) result[key] = value
   }
   const legacyTokens = own(input.compaction, "preserve_recent_tokens")
     ? decodeEncoded(
@@ -462,6 +483,20 @@ function normalizePolicies(
     encoded.policies = [...generated, ...experimental, ...native]
 }
 
+// Experimental keys normalizeExperimental folds itself: the routing keys (flat and nested) into `routes`, and
+// `aliases` into the top-level aliases.
+const foldedExperimental = new Set([
+  "aliases",
+  "routes",
+  "model_routes",
+  "provider_routes",
+  "model_route_schedules",
+  "model_route_windows",
+  "model_route_tuning",
+  "model_route_log",
+  "model_route_settings",
+])
+
 function normalizeExperimental(
   input: Record<string, unknown>,
   encoded: Record<string, unknown>,
@@ -476,42 +511,20 @@ function normalizeExperimental(
       unsupportedExperimental.forEach((key) =>
         unsupportedIfPresent(experimental, key, ["experimental", key], diagnostics),
       )
-      if (own(experimental, "portable_shell_scanner")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.portable_shell_scanner,
-          experimental.portable_shell_scanner,
-          ["experimental", "portable_shell_scanner"],
-          diagnostics,
-        )
-        if (value !== undefined) result.portable_shell_scanner = value
+      for (const key of ["automations", "schedules"]) {
+        if (!own(experimental, key)) continue
+        diagnostics.push({
+          kind: "removed",
+          path: ["experimental", key],
+          message: "Use the top-level automations setting. Automations are enabled by default.",
+        })
       }
-      if (own(experimental, "subagent_depth")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.subagent_depth,
-          experimental.subagent_depth,
-          ["experimental", "subagent_depth"],
-          diagnostics,
-        )
-        if (value !== undefined) result.subagent_depth = value
-      }
-      if (own(experimental, "shell_timeout")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.shell_timeout,
-          experimental.shell_timeout,
-          ["experimental", "shell_timeout"],
-          diagnostics,
-        )
-        if (value !== undefined) result.shell_timeout = value
-      }
-      if (own(experimental, "model_route_demotion")) {
-        const value = decodeEncoded(
-          ConfigExperimental.Info.fields.model_route_demotion,
-          experimental.model_route_demotion,
-          ["experimental", "model_route_demotion"],
-          diagnostics,
-        )
-        if (value !== undefined) result.model_route_demotion = value
-      }
+      // `policies` merges into top-level `policies` in normalizePolicies; routing keys and aliases fold below.
+      Object.entries(ConfigExperimental.Info.fields).forEach(([key, schema]) => {
+        if (key === "policies" || foldedExperimental.has(key) || !own(experimental, key)) return
+        const value = decodeEncoded(schema, experimental[key], ["experimental", key], diagnostics)
+        if (value !== undefined) result[key] = value
+      })
       // Routing config (#1140): the canonical shape is `experimental.routes.*`; the flat
       // `experimental.model_routes` / `provider_routes` / `model_route_*` keys are the
       // deprecated spellings of the same keys and fold into the nested shape here, so
@@ -558,7 +571,7 @@ function normalizeExperimental(
       const models = routeSources("model_routes", "models", (value, path) => {
         if (value === undefined) return undefined
         const decoded = decodeMap(
-          resolveRouteTargets(value, aliases),
+          resolveRouteTargets(value, aliases, diagnostics, path),
           ConfigModelRoutes.Route,
           path,
           diagnostics,
@@ -633,11 +646,25 @@ function normalizeAliases(
   return undefined
 }
 
-function resolveModelString(model: unknown, aliases?: ModelAlias.Aliases): unknown {
+// Alias cycles and depth overruns are configuration errors the user can fix, so they are
+// named in a diagnostic instead of silently keeping the unresolved reference (#2567).
+// Other resolution errors (malformed references) keep the historical silent fallthrough.
+function aliasErrorDiagnostic(error: unknown, path: readonly string[], diagnostics: Diagnostic[]) {
+  if (error instanceof ModelAlias.AliasCycleError || error instanceof ModelAlias.AliasMaxDepthError)
+    diagnostics.push({ kind: "invalid", path, message: error.message })
+}
+
+function resolveModelString(
+  model: unknown,
+  aliases?: ModelAlias.Aliases,
+  diagnostics?: Diagnostic[],
+  path?: readonly string[],
+): unknown {
   if (typeof model === "string" && aliases) {
     try {
       return ModelAlias.resolve(aliases, model)
-    } catch {
+    } catch (error) {
+      if (diagnostics && path) aliasErrorDiagnostic(error, path, diagnostics)
       return model
     }
   }
@@ -656,7 +683,12 @@ function resolveEntryModels(map: unknown, aliases?: ModelAlias.Aliases): unknown
   )
 }
 
-function resolveRouteTargets(routes: unknown, aliases?: ModelAlias.Aliases): unknown {
+function resolveRouteTargets(
+  routes: unknown,
+  aliases?: ModelAlias.Aliases,
+  diagnostics?: Diagnostic[],
+  path: readonly string[] = [],
+): unknown {
   if (!isRecord(routes) || !aliases) return routes
   // Object.fromEntries, as in resolveEntryModels: a route named "__proto__"
   // must stay an entry, not become the result's prototype.
@@ -665,10 +697,10 @@ function resolveRouteTargets(routes: unknown, aliases?: ModelAlias.Aliases): unk
       if (isRecord(route) && Array.isArray(route.targets)) {
         const targets = route.targets.map((target) => {
           if (typeof target === "string") {
-            return resolveModelString(target, aliases)
+            return resolveModelString(target, aliases, diagnostics, [...path, k, "targets"])
           }
           if (isRecord(target) && typeof target.model === "string") {
-            return { ...target, model: resolveModelString(target.model, aliases) }
+            return { ...target, model: resolveModelString(target.model, aliases, diagnostics, [...path, k, "targets"]) }
           }
           return target
         })
@@ -727,6 +759,16 @@ function migrateTools(value: unknown, diagnostics: Diagnostic[]) {
     if (enabled === undefined) return []
     return [{ action: ConfigMigrateV1.normalizeAction(action), resource: "*", effect: enabled ? "allow" : "deny" }]
   })
+}
+
+// Native rules may still name the media tools by their old experimental names.
+function renameTools(rules: unknown) {
+  if (!Array.isArray(rules)) return rules
+  return rules.map((rule) =>
+    isRecord(rule) && typeof rule.action === "string"
+      ? { ...rule, action: ConfigMigrateV1.renamedTool(rule.action) }
+      : rule,
+  )
 }
 
 function migratePermissions(value: unknown, diagnostics: Diagnostic[]) {
@@ -849,9 +891,11 @@ function diagnoseSelection(
   if (modelStr && aliases) {
     try {
       modelStr = ModelAlias.resolve(aliases, modelStr)
-    } catch {}
+    } catch (error) {
+      aliasErrorDiagnostic(error, [...path, "model"], diagnostics)
+    }
   }
-  const modelValid = typeof modelStr === "string" && /^[^/#]+\/[^#]+$/.test(modelStr)
+  const modelValid = typeof modelStr === "string" && ConfigMigrateV1.modelSelection(modelStr) !== undefined
   if (own(value, "model") && typeof value.model === "string" && !modelValid)
     diagnostics.push({
       kind: "unsupported",

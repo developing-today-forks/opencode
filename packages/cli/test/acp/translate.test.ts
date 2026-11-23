@@ -47,10 +47,10 @@ const usage = (input: number, output: number, reasoning = 0, read = 0, write = 0
 const providerError = { type: "provider.error", message: "summary request failed" }
 const compaction = {
   started: (sessionID: string = root) =>
-    durableEvent("session.compaction.started", { sessionID, reason: "manual", recent: "", inputID: "msg_compact" }),
+    durableEvent("session.compaction.started", { sessionID, reason: "manual", inputID: "msg_compact" }),
   delta: (text: string, sessionID: string = root) => ephemeralEvent("session.compaction.delta", { sessionID, text }),
   ended: (text: string, sessionID: string = root) =>
-    durableEvent("session.compaction.ended", { sessionID, reason: "manual", text, recent: "" }),
+    durableEvent("session.compaction.ended", { sessionID, reason: "manual", text }),
   failed: (error: { type: string; message: string }, reason: "auto" | "manual" = "manual") =>
     durableEvent("session.compaction.failed", { sessionID: root, reason, error }),
 }

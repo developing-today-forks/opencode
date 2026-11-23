@@ -5,7 +5,11 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Array, Context, Effect, Layer, Schema } from "effect"
 import path from "path"
+import { Environment } from "./environment/index.js"
+import { Flag } from "./flag.js"
 import { Location } from "./location.js"
+import { Machines } from "./machine/machines.js"
+import { MachinePath } from "./machine/path.js"
 import { Permission } from "./permission.js"
 import { Project } from "./project.js"
 import { AbsolutePath } from "./schema.js"
@@ -15,16 +19,23 @@ import type { Tool } from "./tool.js"
 export const Kind = Schema.Literals(["file", "directory"])
 export type Kind = typeof Kind.Type
 
+/** @deprecated Use Environment.Place. Removed in the next minor. */
+export const Place = Environment.Place
+/** @deprecated Use Environment.Place. Removed in the next minor. */
+export type Place = Environment.Place
+
 export const ResolveInput = Schema.Struct({
   path: Schema.String,
   /** Selects the external approval boundary; it does not validate the target type. */
   kind: Kind.pipe(Schema.optional),
+  /** The directory and machine the text was written in, for a path derived from an existing target. */
+  base: Environment.Place.pipe(Schema.optional),
 })
 export type ResolveInput = typeof ResolveInput.Type
 
 export interface ExternalDirectoryAuthorization {
   readonly action: "external_directory"
-  /** Canonical directory used as the external approval boundary. */
+  /** Lexical directory used as the external approval boundary. */
   readonly directory: AbsolutePath
   readonly resource: string
   readonly save: string
@@ -35,7 +46,34 @@ export interface Target {
   /** Location-relative for internal paths, absolute for external paths. */
   readonly resource: string
   readonly externalDirectory?: ExternalDirectoryAuthorization
+  /** Where the target lives. Tools act on the target through this, not through a captured Environment. */
+  readonly environment: Environment.Interface
+  /** The machine the file is on, when it is not on this server. */
+  readonly machine?: Environment.ID
 }
+
+export function externalDirectoryRequest(targets: readonly Target[]) {
+  const external = Array.dedupeWith(
+    targets.flatMap((target) => (target.externalDirectory ? [target.externalDirectory] : [])),
+    (left, right) => left.resource === right.resource,
+  )
+  if (external.length === 0) return
+  return {
+    action: "external_directory",
+    resources: external.map((item) => item.resource),
+    save: external.map((item) => item.save),
+  }
+}
+
+/**
+ * Identifies a target's file: the same path in two environments is two files. The id's length comes first so no
+ * id and path can read as another pair's key, and the keys of one environment sort as its paths do.
+ */
+export const key = (target: { readonly absolute: string; readonly environment: { readonly id: Environment.ID } }) =>
+  `${target.environment.id.length}:${target.environment.id}:${target.absolute}`
+
+/** The rule "always" saves for a file action: every file on the target's machine. */
+export const always = (target: Target) => (target.machine ? MachinePath.format(target.machine, "*") : "*")
 
 export type Invocation = Pick<Tool.Context, "sessionID" | "agent" | "messageID" | "id">
 
@@ -45,20 +83,29 @@ export interface ReadOptions {
 }
 
 export interface Interface {
-  /** Resolve a path and its permission resources, without requesting approval. Classification is by canonical (symlink-resolved) location, per the symlink policy in the layer. */
-  readonly resolve: (input: ResolveInput) => Effect.Effect<Target, FSUtil.Error>
+  /**
+   * Where a typed path points, from its text: no disk is touched and no machine is called. Only a path that starts at
+   * a machine's home consults anything: the home in that machine's live hello, held in memory. It fails when the
+   * machine is unknown or offline.
+   */
+  readonly locate: (path: string, base?: Environment.Place) => Effect.Effect<Environment.Place, Environment.Failed>
+  /**
+   * Resolve a path and its permission resources, without requesting approval. A local path is classified by its
+   * canonical (symlink-resolved) location, per the symlink policy in the layer.
+   */
+  readonly resolve: (input: ResolveInput) => Effect.Effect<Target, Environment.Failed>
   /** Approve external directories in one batch, preserving first-seen resource order. */
   readonly authorizeExternal: (
     targets: readonly Target[],
     context: Invocation,
     metadata?: Permission.AssertInput["metadata"],
-  ) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
+  ) => Effect.Effect<void, Permission.Error | SessionErrors.NotFoundError>
   /** Resolve a read target and obtain external-directory approval before read approval. */
   readonly authorizeRead: (
     file: string,
     context: Invocation,
     options?: ReadOptions,
-  ) => Effect.Effect<Target, FSUtil.Error | Error | SessionErrors.NotFoundError>
+  ) => Effect.Effect<Target, Environment.Failed | Permission.Error | SessionErrors.NotFoundError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/FileAccess") {}
@@ -77,18 +124,18 @@ export const resolvePath = (directory: string, input: string, home = Global.Path
 }
 
 const slash = (value: string) => value.replaceAll("\\", "/")
-const invocation = (context: Invocation) => ({
-  sessionID: context.sessionID,
-  agent: context.agent,
-  source: { type: "tool" as const, messageID: context.messageID, id: context.id },
-})
 
 const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
-    const fs = yield* FSUtil.Service
+    const environment = yield* Environment.Service
+    const exists = (file: string) => Environment.exists(environment.files, file)
     const location = yield* Location.Service
+    const workingDirectory = yield* Environment.workingDirectory
     const permission = yield* Permission.Service
+    const flags = yield* Flag.Service
+    const machines = yield* Machines.Service
+    const fs = yield* FSUtil.Service
 
     // Symlink policy (#2286): classification uses the canonical path —
     // the path the filesystem will actually open — never the lexical
@@ -122,7 +169,9 @@ const layer = Layer.effect(
         // real filesystem error if the path is genuinely unusable.
         const info = yield* fs.stat(current).pipe(Effect.orElseSucceed(() => undefined))
         if (info) {
-          const resolved = yield* fs.resolve(current)
+          const resolved = yield* fs
+            .resolve(current)
+            .pipe(Effect.mapError((cause) => new Environment.Failed({ path: absolute, cause })))
           return {
             canonical: tail.length === 0 ? resolved : path.join(resolved, ...tail.reverse()),
             exists: tail.length === 0,
@@ -135,54 +184,129 @@ const layer = Layer.effect(
       }
     })
 
-    const resolveTarget = Effect.fn("FileAccess.resolveTarget")(function* (input: ResolveInput) {
-      const lexical = resolvePath(location.directory, input.path)
-      const target = yield* canonicalize(lexical)
-      const locationRoot = yield* canonicalize(path.resolve(location.directory))
+
+    // The flag is read once per operation by `locate` and `resolve`, which both call this.
+    const place = Effect.fnUntraced(function* (text: string, base: Environment.Place | undefined, enabled: boolean) {
+      // Only text the model typed can name a machine: text derived from a target is a plain path on that target's
+      // machine, and a shell there does not understand `gpu:`.
+      const machine =
+        !base && enabled
+          ? yield* MachinePath.typed(text, machines).pipe(
+              Effect.mapError((cause) => new Environment.Failed({ path: text, cause })),
+            )
+          : undefined
+      const from = base ?? workingDirectory
+      const id = machine?.machine ?? from.environment.id
+      if (!machine && id === environment.id)
+        return {
+          absolute: AbsolutePath.make(resolvePath(from.absolute, text)),
+          environment: { id },
+        } satisfies Environment.Place
+      // Another environment's paths follow its own path rules (falling back to POSIX when unknown), and `~` there is
+      // that machine's home, never this server's. Only `~` and `~/` are read: another user's home or a shell's `~+` is
+      // not known here. With the flag off no home is asked for, so a base on another machine refuses every `~`.
+      const target = enabled
+        ? yield* machines.get(id).pipe(Effect.catchTag("Machines.NotFound", () => Effect.undefined))
+        : undefined
+      const rules = target ? (target.path ?? path) : path.posix
+      const written = machine?.path ?? text
+      const rooted =
+        enabled && (written === "~" || written.startsWith("~/"))
+          ? rules.join(
+              yield* machines.home(id).pipe(Effect.mapError((cause) => new Environment.Failed({ path: text, cause }))),
+              written.slice(1),
+            )
+          : written
+      if (rooted.startsWith("~"))
+        return yield* new Environment.Failed({ path: text, cause: new MachinePath.NotAbsolute({ machine: id }) })
+      return {
+        absolute: AbsolutePath.make(base ? rules.resolve(base.absolute, rooted) : rules.normalize(rooted)),
+        environment: { id },
+      } satisfies Environment.Place
+    })
+
+    const locate = Effect.fn("FileAccess.locate")(function* (text: string, base?: Environment.Place) {
+      const enabled = yield* flags.enabled("machines")
+      return yield* place(text, base, enabled)
+    })
+
+    // A local path, classified by its canonical location (#2286). The lexical absolute is kept for an internal target
+    // (mutation consumers operate on the path as given, and their own link walks apply); an external target is
+    // reported by its canonical path, where its approval boundary sits.
+    const resolveLocal = Effect.fnUntraced(function* (absolute: AbsolutePath, kind: Kind | undefined, enabled: boolean) {
+      const target = yield* canonicalize(absolute)
+      const workingRoot = yield* canonicalize(path.resolve(workingDirectory.absolute))
       const worktree = yield* canonicalize(path.resolve(location.project.directory))
       const internal =
-        FSUtil.contains(locationRoot.canonical, target.canonical) ||
+        FSUtil.contains(workingRoot.canonical, target.canonical) ||
         (worktree.canonical !== path.parse(worktree.canonical).root &&
           FSUtil.contains(worktree.canonical, target.canonical))
+      const facts = { canonical: target.canonical, exists: target.exists, workingCanonical: workingRoot.canonical }
       if (internal) {
+        const relative = slash(path.relative(workingDirectory.absolute, absolute) || ".")
         return {
+          ...facts,
           target: {
-            absolute: AbsolutePath.make(lexical),
-            resource: slash(path.relative(location.directory, lexical) || "."),
+            absolute,
+            // With machines on, a local folder can be named like a machine path, and its permission name stays its own.
+            resource: enabled ? MachinePath.local(relative) : relative,
+            environment,
           } satisfies Target,
-          canonical: target.canonical,
-          exists: target.exists,
-          locationCanonical: locationRoot.canonical,
         }
       }
-      const absolute = AbsolutePath.make(target.canonical)
+      const canonical = AbsolutePath.make(target.canonical)
       const type =
-        input.kind === "directory"
-          ? "Directory"
-          : input.kind === "file"
-            ? "File"
-            : (yield* fs.stat(absolute).pipe(Effect.catchReason("PlatformError", "NotFound", () => Effect.undefined)))
-                ?.type
-      const directory = AbsolutePath.make(type === "Directory" ? absolute : path.dirname(absolute))
+        kind ??
+        (yield* Environment.typeFollowing(environment.files, canonical).pipe(
+          Effect.catchTag("Environment.NotFound", () => Effect.undefined),
+        ))
+      const directory = AbsolutePath.make(type === "directory" ? canonical : path.dirname(canonical))
       return {
+        ...facts,
         target: {
-          absolute,
-          resource: slash(absolute),
+          absolute: canonical,
+          resource: slash(canonical),
           externalDirectory: {
             action: "external_directory",
             directory,
             resource: slash(path.join(directory, "*")),
-            save: slash(path.join((yield* Project.root(fs, directory)) ?? directory, "*")),
+            save: slash(path.join((yield* Project.root({ exists }, directory)) ?? directory, "*")),
           },
+          environment,
         } satisfies Target,
-        canonical: target.canonical,
-        exists: target.exists,
-        locationCanonical: locationRoot.canonical,
       }
     })
 
     const resolve = Effect.fn("FileAccess.resolve")(function* (input: ResolveInput) {
-      return (yield* resolveTarget(input)).target
+      const enabled = yield* flags.enabled("machines")
+      const located = yield* place(input.path, input.base, enabled)
+      // A machine path is another machine's absolute path: it is never internal to this Location and never this server's.
+      if (located.environment.id !== environment.id) return yield* machineTarget(located, input.kind)
+      return (yield* resolveLocal(located.absolute, input.kind, enabled)).target
+    })
+
+    // A machine path is always external, and its resources carry the machine name so its rules never settle a local
+    // path's. Type detection runs over the machine's own files; a saved rule is the directory's own glob, which is
+    // what was shown, rather than a search upward from this server's platform.
+    const machineTarget = Effect.fnUntraced(function* (place: Environment.Place, kind: Kind | undefined) {
+      const machineEnvironment = yield* machines
+        .get(place.environment.id)
+        .pipe(Effect.mapError((cause) => new Environment.Failed({ path: place.absolute, cause })))
+      const rules = machineEnvironment.path ?? path
+      const type =
+        kind ??
+        (yield* Environment.typeFollowing(machineEnvironment.files, place.absolute).pipe(
+          Effect.catchTag("Environment.NotFound", () => Effect.undefined),
+        ))
+      const directory = AbsolutePath.make(type === "directory" ? place.absolute : rules.dirname(place.absolute))
+      const contents = MachinePath.format(place.environment.id, rules.join(directory, "*"))
+      return {
+        absolute: place.absolute,
+        resource: MachinePath.format(place.environment.id, place.absolute),
+        externalDirectory: { action: "external_directory", directory, resource: contents, save: contents },
+        environment: machineEnvironment,
+        machine: place.environment.id,
+      } satisfies Target
     })
 
     const authorizeExternal = Effect.fn("FileAccess.authorizeExternal")(function* (
@@ -190,18 +314,35 @@ const layer = Layer.effect(
       context: Invocation,
       metadata?: Permission.AssertInput["metadata"],
     ) {
-      const external = Array.dedupeWith(
-        targets.flatMap((target) => (target.externalDirectory ? [target.externalDirectory] : [])),
-        (left, right) => left.resource === right.resource,
-      )
-      if (external.length === 0) return
+      const request = externalDirectoryRequest(targets)
+      if (!request) return
       yield* permission.assert({
-        action: "external_directory",
-        resources: external.map((item) => item.resource),
-        save: external.map((item) => item.save),
+        ...request,
         ...(metadata === undefined ? {} : { metadata }),
-        ...invocation(context),
+        ...Permission.invocation(context),
       })
+    })
+
+    // For an existing local target the read operates on the canonical path: the file that was authorized is the file
+    // that is read, so swapping a symlink after authorization cannot redirect the read (#2286).
+    const readTarget = Effect.fnUntraced(function* (
+      file: string,
+      base: Environment.Place | undefined,
+      kind: Kind | undefined,
+    ) {
+      const enabled = yield* flags.enabled("machines")
+      const located = yield* place(file, base, enabled)
+      if (located.environment.id !== environment.id) return yield* machineTarget(located, kind)
+      const resolved = yield* resolveLocal(located.absolute, kind, enabled)
+      if (!resolved.exists) return resolved.target
+      if (resolved.target.externalDirectory)
+        return { ...resolved.target, absolute: AbsolutePath.make(resolved.canonical) } satisfies Target
+      const relative = slash(path.relative(resolved.workingCanonical, resolved.canonical) || ".")
+      return {
+        ...resolved.target,
+        absolute: AbsolutePath.make(resolved.canonical),
+        resource: enabled ? MachinePath.local(relative) : relative,
+      } satisfies Target
     })
 
     const authorizeRead = Effect.fn("FileAccess.authorizeRead")(function* (
@@ -209,33 +350,39 @@ const layer = Layer.effect(
       context: Invocation,
       options?: ReadOptions,
     ) {
-      const resolved = yield* resolveTarget({ path: file, kind: options ? "file" : undefined })
-      // For an existing target the read operates on the canonical path:
-      // the file that was authorized is the file that is read (#2286).
-      const target: Target = resolved.exists
-        ? {
-            ...resolved.target,
-            absolute: AbsolutePath.make(resolved.canonical),
-            resource: resolved.target.externalDirectory
-              ? resolved.target.resource
-              : slash(path.relative(resolved.locationCanonical, resolved.canonical) || "."),
-          }
-        : resolved.target
-      const sibling = options && path.dirname(target.absolute) === path.dirname(options.siblingOf.absolute)
+      // A local sibling keeps the Location's resolution exactly as without recovery; a machine's candidate has no
+      // Location to resolve against, so it takes the machine and the sibling's directory.
+      const siblingPath = options?.siblingOf.environment.path ?? path
+      const base =
+        options === undefined || options.siblingOf.environment.id === environment.id
+          ? undefined
+          : {
+              absolute: AbsolutePath.make(siblingPath.dirname(options.siblingOf.absolute)),
+              environment: options.siblingOf.environment,
+            }
+      const target = yield* readTarget(file, base, options ? "file" : undefined)
+      const sibling =
+        options !== undefined &&
+        target.environment.id === options.siblingOf.environment.id &&
+        (target.environment.path ?? path).dirname(target.absolute) === siblingPath.dirname(options.siblingOf.absolute)
 
       // Filename recovery shares the directory approval, but checks the recovered file's own read rules.
       if (!sibling) yield* authorizeExternal([target], context)
       yield* permission.assert({
         action: "read",
         resources: [target.resource],
-        save: ["*"],
-        ...invocation(context),
+        save: [always(target)],
+        ...Permission.invocation(context),
       })
       return target
     })
 
-    return Service.of({ resolve, authorizeExternal, authorizeRead })
+    return Service.of({ locate, resolve, authorizeExternal, authorizeRead })
   }),
 )
 
-export const node = makeLocationNode({ service: Service, layer, deps: [FSUtil.node, Location.node, Permission.node] })
+export const node = makeLocationNode({
+  service: Service,
+  layer,
+  deps: [Environment.node, Flag.node, FSUtil.node, Location.node, Machines.node, Permission.node],
+})

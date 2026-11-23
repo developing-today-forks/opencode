@@ -249,6 +249,28 @@ export const exhaustedWindowResetAt = (value: Snapshot, now: number, maxAgeMs: n
   return resets.length > 0 ? Math.max(...resets) : undefined
 }
 
+/** The reset a rate-limit failure's own headers state for the window that walled
+ * it (#12228): the reset headers (`x-ratelimit-reset-*`, `anthropic-ratelimit-*-reset`)
+ * a 429 may carry instead of a `retry-after`. An exhausted window's stated reset is
+ * the wall's own statement and binds directly. When no window states its remaining
+ * at all, the 429 itself is the exhaustion evidence and every stated reset is a
+ * candidate — the latest binds. When some window does state a remaining and none
+ * is exhausted, no stated reset is attributable to the wall, so there is none:
+ * the failure keeps the ordinary rate-limit ladder. */
+export const statedResetAt = (value: Snapshot, now: number): number | undefined => {
+  const exhausted = windows(value).flatMap((window) =>
+    window.remaining <= 0 && window.resetAt !== undefined && window.resetAt > now ? [window.resetAt] : [],
+  )
+  if (exhausted.length > 0) return Math.max(...exhausted)
+  if (value.remaining !== undefined && Object.keys(value.remaining).length > 0) return undefined
+  const resets = Object.values(value.reset ?? {}).flatMap((raw) => {
+    const ms = resetMs(raw, value.at)
+    return ms === undefined ? [] : [value.at + ms]
+  })
+  const future = resets.filter((at) => at > now)
+  return future.length > 0 ? Math.max(...future) : undefined
+}
+
 /**
  * When the provider's own numbers say a target should be left alone until: a window that is empty,
  * or nearly so with a stated reset, holds the target back until it resets. Zero when nothing needs

@@ -42,7 +42,7 @@ import { Route } from "../route/client.js"
 import { Auth } from "../route/auth.js"
 import { Endpoint } from "../route/endpoint.js"
 import { Protocol } from "../route/protocol.js"
-import { LLMRequest, SystemPart } from "../schema/index.js"
+import { type LLMRequest, SystemPart } from "../schema/index.js"
 import { AnthropicMessages } from "./anthropic-messages.js"
 
 const ADAPTER = "claude-code-messages"
@@ -94,7 +94,7 @@ const fromRequest = Effect.fn("ClaudeCodeMessages.fromRequest")(function* (reque
   // already leads with it (a façade replaying a captured Claude Code
   // request) is not double-stamped.
   const system = shaped[0]?.text === IDENTITY_SYSTEM_TEXT ? shaped : [SystemPart.make(IDENTITY_SYSTEM_TEXT), ...shaped]
-  return yield* AnthropicMessages.protocol.body.from(LLMRequest.update(request, { system }))
+  return yield* AnthropicMessages.protocol.body.from({ ...request, system })
 })
 
 export const protocol = Protocol.make({

@@ -1,6 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Effect } from "effect"
-import { LLM, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/index.js"
+import { ai, LLMClient, Message, ToolCallPart, ToolDefinition } from "../../src/effect.js"
 import { DeepSeek } from "../../src/providers/deepseek.js"
 import { compileRequest } from "../../src/route/client.js"
 import { it } from "../lib/effect.js"
@@ -26,12 +26,12 @@ const lookup = ToolDefinition.make({
 
 const model = DeepSeek.configure({ apiKey: "fixture" }).model("deepseek-reasoner")
 
-const request = LLM.request({
+const request = ai.request({
   id: "req_deepseek_1",
   model,
   prompt: "Look up the weather.",
   tools: [lookup],
-  generation: { maxTokens: 64 },
+  maxTokens: 64,
 })
 
 describe("DeepSeek provider", () => {
@@ -98,7 +98,7 @@ describe("DeepSeek provider", () => {
         completion_tokens_details: { reasoning_tokens: 4 },
       }
       const response = yield* LLMClient.generate(
-        LLM.request({ id: "req_deepseek_2", model, prompt: "Say hello." }),
+        ai.request({ id: "req_deepseek_2", model, prompt: "Say hello." }),
       ).pipe(
         Effect.provide(
           fixedResponse(
@@ -126,7 +126,7 @@ describe("DeepSeek provider", () => {
   it.effect("replays reasoning_content alongside tool calls on the next turn", () =>
     Effect.gen(function* () {
       const compiled = yield* compileRequest(
-        LLM.request({
+        ai.request({
           model,
           messages: [
             Message.user("Look up the weather."),

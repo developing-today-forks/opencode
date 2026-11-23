@@ -155,7 +155,13 @@ export const applies = (
   (item.fixed || scope.fixed !== true)
 
 let location: string | undefined
-let cache: { file: string; mtime: number; list: readonly Override[] } | undefined
+// The cache is keyed on the file's identity, not its mtime alone: an external writer replaces
+// the store by renaming a fresh file over it, and the new file can carry the same mtime as the
+// one the cache was filled from when both writes land inside one timestamp tick. dev and ino
+// change on every such replace; size also catches a same-inode rewrite (#2605).
+let cache:
+  | { file: string; dev: number; ino: number; size: number; mtime: number; list: readonly Override[] }
+  | undefined
 
 /** Where overrides are kept: a separate file in OpenCode's data directory, so the user's config keys
  * are never rewritten and OpenChamber can read the same file. */
@@ -171,20 +177,28 @@ export const setFilePath = (file: string | undefined) => {
  * overrides, never an error that would stop routing. */
 export const current = (): readonly Override[] => {
   const file = filePath()
-  let mtime: number
+  let stat: ReturnType<typeof fs.statSync>
   try {
-    mtime = fs.statSync(file).mtimeMs
+    stat = fs.statSync(file)
   } catch {
     return []
   }
-  if (cache && cache.file === file && cache.mtime === mtime) return cache.list
+  if (
+    cache &&
+    cache.file === file &&
+    cache.dev === stat.dev &&
+    cache.ino === stat.ino &&
+    cache.size === stat.size &&
+    cache.mtime === stat.mtimeMs
+  )
+    return cache.list
   let list: Override[] = []
   try {
     list = parse(JSON.parse(fs.readFileSync(file, "utf8")))
   } catch {
     list = []
   }
-  cache = { file, mtime, list }
+  cache = { file, dev: stat.dev, ino: stat.ino, size: stat.size, mtime: stat.mtimeMs, list }
   return list
 }
 

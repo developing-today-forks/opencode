@@ -1,14 +1,25 @@
 export * as ModelResolver from "./model-resolver.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { HttpOptions, LanguageModel, mergeHttpOptions, ProviderConfigurationError } from "@opencode/ai"
-import { Auth } from "@opencode/ai/route"
+import {
+  DecisionModel,
+  DecisionModelCompatibility,
+  DecisionModelSchema,
+  ImageModel,
+  ImageModelSchema,
+  LanguageModel,
+  ProviderConfigurationError,
+  type ProviderPackage,
+  VideoModel,
+  VideoModelSchema,
+} from "@opencode/ai/effect"
+import { Auth, mergeTransport } from "@opencode/ai/route"
 import type { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Context, Effect, Layer, Option, Result, Schema, Struct } from "effect"
 import { AISDK } from "./aisdk.js"
 import { Credential } from "./credential.js"
 import { Integration } from "./integration.js"
-import { Capabilities, ID, Info, Model, Ref, VariantID } from "./model.js"
+import { Capabilities, Compatibility, ID, Info, Model, Ref, VariantID } from "./model.js"
 import type { RuntimeInfo } from "./model.js"
 import { Npm } from "@opencode/util/npm"
 import { Provider } from "./provider.js"
@@ -120,7 +131,20 @@ export class RouteUnavailableError extends Schema.TaggedError<RouteUnavailableEr
   }
 }
 
+/** The requested ref names a model alias that cannot be resolved (a cycle or a depth
+ * overrun); the alias configuration is at fault, so the failure names it instead of
+ * silently falling back to the unresolved ref (#2567). */
+export class AliasResolutionError extends Schema.TaggedError<AliasResolutionError>()(
+  "SessionRunnerModel.AliasResolutionError",
+  { providerID: Provider.ID, modelID: ID, detail: Schema.String },
+) {
+  override get message() {
+    return `Model alias resolution failed for ${this.providerID}/${this.modelID}: ${this.detail}`
+  }
+}
+
 export type Error =
+  | AliasResolutionError
   | VariantUnavailableError
   | UnsupportedPackageError
   | ModelConfigurationError
@@ -143,6 +167,8 @@ export interface Resolved {
   readonly limit: Info["limit"]
   /** Model policy overrides the provider policy; omitted means summary compaction. */
   readonly compaction?: Provider.Compaction
+  /** Prompt-cache settings from the provider, model and variant; omitted keeps the provider defaults. */
+  readonly cache?: Provider.Cache
   /** Provider transport policy; omitted means HTTP. */
   readonly transport?: Provider.Transport
   /** Milliseconds without streamed data before a WebSocket exchange fails; `false` disables the limit. */
@@ -213,6 +239,14 @@ export interface Resolved {
   }
 }
 
+export type MediaError =
+  | VariantUnavailableError
+  | UnsupportedPackageError
+  | ModelConfigurationError
+  | ModelInitializationError
+  | UnresolvedProviderVariablesError
+  | Integration.AuthorizationError
+
 export interface Interface {
   /** `requestTokens` has the same meaning as on `resolveModel`: it also sizes the
    * default selection, so a session with no explicit model still filters route
@@ -239,6 +273,14 @@ export interface Interface {
      * distinguishes root-session starts from subsessions through it. */
     parentID?: string,
   ) => Effect.Effect<Resolved, Error>
+  /** The model used when nothing is selected: the configured default, or the first available text model. */
+  readonly fallback: () => Effect.Effect<Info | undefined>
+  /** An enabled image model by ref, or undefined when no image model has that ref. */
+  readonly resolveImage: (ref: Ref) => Effect.Effect<ImageModel | undefined, MediaError>
+  /** An enabled video model by ref, or undefined when no video model has that ref. */
+  readonly resolveVideo: (ref: Ref) => Effect.Effect<VideoModel | undefined, MediaError>
+  /** An enabled decision model by ref, or undefined when no decision model has that ref. */
+  readonly resolveDecision: (ref: Ref) => Effect.Effect<DecisionModel | undefined, MediaError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/ModelResolver") {}
@@ -248,7 +290,7 @@ export const withVariant = (
   model: Info,
   variantID: VariantID | undefined,
 ): Effect.Effect<Info, VariantUnavailableError> => {
-  const id = variantID === "default" ? undefined : variantID
+  const id = chosenVariant(model, variantID)
   const variant = model.variants?.find((item) => item.id === id)
   if (!variant && id !== undefined)
     return Effect.fail(
@@ -262,7 +304,11 @@ export const withVariant = (
     variant
       ? {
           ...model,
-          settings: Provider.mergeOverlay(model.settings, Provider.modelSettings(variant.settings)),
+          // Config accepts unknown variant keys, so drop `cache` here too; a variant can't change the prompt cache.
+          settings: Provider.mergeOverlay(
+            model.settings,
+            Provider.modelSettings(variant.settings && Struct.omit(variant.settings, ["cache"])),
+          ),
           headers: Provider.mergeHeaders(model.headers, variant.headers),
           body: Provider.mergeOverlay(model.body, variant.body),
         }
@@ -270,8 +316,22 @@ export const withVariant = (
   )
 }
 
+// The model's configured default effort (provider model config `defaultVariant`) applies when a
+// request names no variant or asks for the default, which is what clients send when the user picked
+// none; `lockVariant` applies it to every request. Without one, the default is the provider's own.
+// A configured variant the model does not offer is ignored rather than failing every request.
+const chosenVariant = (model: Info, requested: VariantID | undefined) => {
+  const configured =
+    model.defaultVariant !== undefined && model.variants?.some((item) => item.id === model.defaultVariant)
+      ? model.defaultVariant
+      : undefined
+  if (configured !== undefined && (model.lockVariant || requested === undefined || requested === "default"))
+    return configured
+  return requested === "default" ? undefined : requested
+}
+
 export interface Dependencies {
-  readonly loadPackage?: (specifier: string) => Effect.Effect<Provider.ProviderPackage, Provider.LoadError>
+  readonly loadPackage?: (specifier: string) => Effect.Effect<ProviderPackage.Definition, Provider.LoadError>
   readonly loadAISDK?: (model: RuntimeInfo) => Effect.Effect<LanguageModel, AISDK.InitError>
 }
 
@@ -308,26 +368,70 @@ const resolveCatalogModel = Effect.fn("ModelResolver.resolveCatalogModel")(funct
   credential?: Credential.Value,
   dependencies?: Dependencies,
 ) {
-  const resolved = prepareRuntimeModel(model)
-  const configuration = credential?.type === "key" ? credential.configuration : undefined
-  const configured = { ...resolved.settings, ...credential?.metadata, ...configuration }
-  if (Provider.isAISDK(resolved.package)) {
+  if (Provider.isAISDK(model.package)) {
+    const resolved = prepareRuntimeModel(model)
     const loadAISDK = dependencies?.loadAISDK
     if (!loadAISDK) return yield* unsupported(resolved)
     const settings = yield* prepareProviderSettings(
       resolved,
-      Provider.mergeOverlay(resolved.settings, {
-        ...nativeCredentialSettings(resolved, resolved.package ?? "", credential),
-        ...credential?.metadata,
-        ...configuration,
-      }) ?? {},
+      Provider.mergeOverlay(
+        resolved.settings,
+        nativeCredentialSettings(resolved, resolved.package ?? "", credential),
+      ) ?? {},
     )
     return yield* loadAISDK({ ...resolved, settings }).pipe(
       Effect.mapError((error) => initialization(resolved, "init", error.cause)),
     )
   }
+  const { resolved, configured, module, settings } = yield* loadCatalogPackage(model, credential, dependencies)
+  return yield* Effect.try({
+    try: () => {
+      const runtime = module.model(resolved.modelID ?? resolved.id, settings)
+      const timeouts = Provider.timeouts(configured)
+      return LanguageModel.update(runtime, {
+        provider: resolved.canonical ?? resolved.providerID,
+        capabilities: resolved.compatibility
+          ? capabilities(runtime.capabilities, resolved.compatibility)
+          : runtime.capabilities,
+        compatibility: resolved.compatibility
+          ? Object.assign({}, runtime.compatibility, Struct.omit(resolved.compatibility, CAPABILITY_KEYS))
+          : runtime.compatibility,
+        // Timeouts and body encoding are transport policy, so they land on the model's options instead of package settings.
+        options: {
+          ...runtime.options,
+          ...mergeTransport(runtime.options, {
+            timeout: { total: timeouts.timeout, headers: timeouts.headerTimeout, chunk: timeouts.chunkTimeout },
+            http: { encoding: Provider.encoding(configured), tls: Provider.tls(configured) },
+          }),
+        },
+      })
+    },
+    catch: (cause) => constructionError(resolved, cause),
+  })
+})
+
+// Config `compatibility` keys the AI package reads as model capabilities.
+const CAPABILITY_KEYS = ["supportsPromptCacheKey", "streamUsage", "supportsEffortUpdates"] as const
+
+const capabilities = (base: LanguageModel["capabilities"], compatibility: Compatibility) => ({
+  ...base,
+  ...("supportsPromptCacheKey" in compatibility ? { promptCacheKey: compatibility.supportsPromptCacheKey } : {}),
+  ...("streamUsage" in compatibility ? { streamUsage: compatibility.streamUsage } : {}),
+  ...("supportsEffortUpdates" in compatibility
+    ? { reasoning: { ...base?.reasoning, updates: compatibility.supportsEffortUpdates } }
+    : {}),
+})
+
+/** Settings and package loading shared by every model type: credentials, variables, canonical provider, overlays. */
+const loadCatalogPackage = Effect.fn("ModelResolver.loadCatalogPackage")(function* (
+  model: RuntimeInfo,
+  credential?: Credential.Value,
+  dependencies?: Dependencies,
+) {
+  const resolved = prepareRuntimeModel(model)
+  const configured = resolved.settings ?? {}
   const specifier = Provider.packageName(resolved.package)
-  if (!specifier) return yield* unsupported(resolved)
+  if (!specifier || Provider.isAISDK(specifier)) return yield* unsupported(resolved)
   const mapped = yield* prepareProviderSettings(resolved, Provider.nativeSettings(configured))
   const module = yield* (dependencies?.loadPackage ?? Provider.loadPackage)(specifier).pipe(
     Effect.mapError((error) => initialization(resolved, "load", error.cause)),
@@ -339,35 +443,61 @@ const resolveCatalogModel = Effect.fn("ModelResolver.resolveCatalogModel")(funct
     headers: resolved.headers,
     body: resolved.body,
   }
-  return yield* Effect.try({
-    try: () => {
-      const runtime = module.model(resolved.modelID ?? resolved.id, settings)
-      return LanguageModel.update(runtime, {
-        provider: resolved.canonical ?? resolved.providerID,
-        compatibility: resolved.compatibility
-          ? Object.assign({}, runtime.compatibility, resolved.compatibility)
-          : runtime.compatibility,
-        // Timeouts and body encoding are transport policy, so they land on the route's HTTP defaults instead of package settings.
-        defaults: {
-          ...runtime.defaults,
-          http: mergeHttpOptions(
-            runtime.defaults?.http,
-            new HttpOptions({ ...Provider.timeouts(configured), encoding: Provider.encoding(configured) }),
-          ),
-        },
-      })
-    },
-    catch: (cause) =>
-      cause instanceof ProviderConfigurationError
-        ? new ModelConfigurationError({
-            providerID: resolved.providerID,
-            modelID: resolved.id,
-            package: resolved.package ?? "unknown",
-            detail: cause.message,
-          })
-        : initialization(resolved, "construct", cause),
-  })
+  return { resolved, configured, module, settings }
 })
+
+/**
+ * Builds an image or decision model from its catalog package. The entrypoint (`providers/<P>/images`) exports the
+ * same `model(modelID, settings)` as chat; a package that returns another kind of model cannot serve this type.
+ */
+const fromCatalogMedia = Effect.fn("ModelResolver.fromCatalogMedia")(function* <Runtime>(
+  model: RuntimeInfo,
+  is: (value: unknown) => value is Runtime,
+  credential?: Credential.Value,
+  dependencies?: Dependencies,
+) {
+  const { resolved, configured, module, settings } = yield* loadCatalogPackage(model, credential, dependencies)
+  const timeouts = Provider.timeouts(configured)
+  const tls = Provider.tls(configured)
+  const runtime: unknown = yield* Effect.try({
+    try: () => module.model(resolved.modelID ?? resolved.id, settings),
+    catch: (cause) => constructionError(resolved, cause),
+  })
+  // Catalog and config compatibility tell a decision route how its host takes media, as chat does above.
+  const mediaInput = resolved.compatibility?.mediaInput
+  const adapted =
+    runtime instanceof DecisionModel && mediaInput !== undefined
+      ? new DecisionModel({
+          ...runtime,
+          compatibility: DecisionModelCompatibility.make({ ...runtime.compatibility, mediaInput }),
+        })
+      : runtime
+  if (!is(adapted)) return yield* unsupported(resolved)
+  if (!(adapted instanceof DecisionModel || adapted instanceof ImageModel || adapted instanceof VideoModel))
+    return adapted
+  // Media and decision models are plain classes with readonly fields, so copy onto the same prototype.
+  const copy: Runtime = Object.assign(Object.create(Object.getPrototypeOf(adapted)), adapted, {
+    transport: mergeTransport(adapted.transport, {
+      timeout: { total: timeouts.timeout, headers: timeouts.headerTimeout, chunk: timeouts.chunkTimeout },
+      http: { tls },
+    }),
+  })
+  return copy
+})
+
+const constructionError = (model: RuntimeInfo, cause: unknown) =>
+  cause instanceof ProviderConfigurationError
+    ? new ModelConfigurationError({
+        providerID: model.providerID,
+        modelID: model.id,
+        package: model.package ?? "unknown",
+        detail: cause.message,
+      })
+    : initialization(model, "construct", cause)
+
+const isImageModel = Schema.is(ImageModelSchema)
+const isDecisionModel = Schema.is(DecisionModelSchema)
+const isVideoModel = Schema.is(VideoModelSchema)
 
 function prepareRuntimeModel(model: RuntimeInfo) {
   if (model.settings?.apiKey !== "") return model
@@ -390,7 +520,7 @@ function prepareProviderSettings(
 ): Effect.Effect<Readonly<Record<string, unknown>>, UnresolvedProviderVariablesError> {
   const baseURL = settings.baseURL
   if (typeof baseURL !== "string") return Effect.succeed(settings)
-  return prepareProviderURL(model, baseURL).pipe(
+  return prepareProviderURL(model, baseURL, settings).pipe(
     Effect.map((prepared) => (prepared === baseURL ? settings : { ...settings, baseURL: prepared })),
   )
 }
@@ -398,11 +528,15 @@ function prepareProviderSettings(
 function prepareProviderURL(
   model: RuntimeInfo,
   baseURL: string,
+  settings: Readonly<Record<string, unknown>>,
 ): Effect.Effect<string, UnresolvedProviderVariablesError> {
   if (!baseURL.includes("${")) return Effect.succeed(baseURL)
+  // Catalog Bedrock URLs are model settings while `region` is a provider setting, so they only meet here.
   const prepared = baseURL.replace(
     /\$\{([^}]+)\}/g,
-    (placeholder, name: string) => ownValue(process.env, name) ?? placeholder,
+    (placeholder, name: string) =>
+      (name === "AWS_REGION" && typeof settings.region === "string" ? settings.region : ownValue(process.env, name)) ??
+      placeholder,
   )
   const failure = unresolvedProviderVariables(model, prepared)
   return failure ? Effect.fail(failure) : Effect.succeed(prepared)
@@ -422,7 +556,7 @@ const nativeCredentialSettings = (model: RuntimeInfo, specifier: string, credent
   if (!credential) return {}
   if (credential.type === "key") return { apiKey: credential.key }
   if (credential.type === "oauth") return tokenSettings(specifier, credential.access)
-  // The saved profile reaches the package through metadata; SigV4 keeps an ambient bearer token from taking over.
+  // The Bedrock plugin projects the saved profile into settings; SigV4 keeps an ambient bearer token from taking over.
   if (specifier.startsWith("@opencode/ai/providers/amazon-bedrock")) return { auth: "sigv4" }
   // The Azure plugin's request hooks replace this with an Entra ID token from the Azure CLI; it only gets the
   // request past the package's own credential check.
@@ -620,7 +754,11 @@ export const layer = Layer.effect(
     const config = yield* Effect.serviceOption(Config.Service)
     const global = yield* Effect.serviceOption(Global.Service)
     const dataDir = Option.match(global, { onNone: () => undefined, onSome: (g) => g.data })
-    const load = Effect.fn("ModelResolver.resolveModel")(function* (
+    const dependencies: Dependencies = {
+      loadPackage: (specifier) => Provider.loadPackage(specifier, npm),
+      loadAISDK: (model) => aisdk.model(model),
+    }
+    const prepare = Effect.fn("ModelResolver.prepare")(function* (
       selected: Info,
       variant?: VariantID,
       cacheFormat?: CacheFormat,
@@ -637,10 +775,15 @@ export const layer = Layer.effect(
         ...(cacheFormat === undefined ? {} : { compatibility: { ...selectedVariant.compatibility, cacheFormat } }),
         settings: Provider.mergeOverlay(provider?.settings, Provider.modelSettings(selectedVariant.settings)),
       }
-      const model = yield* fromCatalogModel(runtimeInfo, credential, {
-        loadPackage: (specifier) => Provider.loadPackage(specifier, npm),
-        loadAISDK: (model) => aisdk.model(model),
-      })
+      return { provider, connection, credential, runtimeInfo }
+    })
+    const load = Effect.fn("ModelResolver.resolveModel")(function* (
+      selected: Info,
+      variant?: VariantID,
+      cacheFormat?: CacheFormat,
+    ) {
+      const { provider, connection, credential, runtimeInfo } = yield* prepare(selected, variant, cacheFormat)
+      const model = yield* fromCatalogModel(runtimeInfo, credential, dependencies)
       const runtime =
         provider?.activation === "enabled" &&
         credential === undefined &&
@@ -660,7 +803,9 @@ export const layer = Layer.effect(
           cost: selected.cost,
           limit: selected.limit,
           compaction: runtimeInfo.settings?.compaction,
-          transport: provider?.settings?.transport,
+          cache: runtimeInfo.settings?.cache,
+          // The WebSocket transport can't present a client certificate, so `tls` keeps the model on HTTP.
+          transport: Provider.tls(provider?.settings ?? {}) ? "http" : provider?.settings?.transport,
           chunkTimeout: Provider.timeout(provider?.settings?.chunkTimeout),
           // Membership caps declared on the provider definition (#2253): a direct
           // resolution meters against the same shared account as a routed one.
@@ -690,14 +835,43 @@ export const layer = Layer.effect(
         servingCredentialID: connection?.type === "credential" ? connection.id : undefined,
       }
     })
+    const loadMedia = Effect.fnUntraced(function* <Runtime>(
+      ref: Ref,
+      type: Model.Type,
+      is: (value: unknown) => value is Runtime,
+    ) {
+      const info = (yield* models.available([type])).find(
+        (model) => model.providerID === ref.providerID && model.id === ref.id,
+      )
+      if (!info) return undefined
+      const { provider, credential, runtimeInfo } = yield* prepare(info, ref.variant)
+      // Same no-key rule as chat in `load`. A built image or decision model can't have its auth swapped like chat,
+      // so the package gets `apiKey: false` up front and builds the model without auth.
+      const keyless =
+        provider?.activation === "enabled" &&
+        credential === undefined &&
+        !hasConfiguredAuth(runtimeInfo) &&
+        usesAPIKeyAuth(runtimeInfo.package)
+      return yield* fromCatalogMedia(
+        keyless ? { ...runtimeInfo, settings: { ...runtimeInfo.settings, apiKey: false } } : runtimeInfo,
+        is,
+        credential,
+        dependencies,
+      )
+    })
+    const fallback = Effect.fn("ModelResolver.fallback")(function* () {
+      const model = yield* models.default()
+      if (model && hasPackage(model)) return model
+      return (yield* models.available()).find((model) => hasPackage(model) && Model.supportsText(model))
+    })
     // Cross-route cascade (#1014, PR2): when a route exhausts, the session re-enters
     // through a parent route that nests it instead of dying on the sub-route. Tried
-    // targets are tracked by provider/model ref across definitions — per-definition
-    // index sets cannot seed a parent's tried set — and visited routes keep the
-    // upward walk from re-entering a route the chain already exhausted. `chain`
-    // holds every route the cascade has stood on, nearest last, so a parent that
-    // itself exhausts continues to its own parents and then to the remaining
-    // parents of the routes below it, in proximity order.
+    // targets are tracked by provider/model/effort ref across definitions —
+    // per-definition index sets cannot seed a parent's tried set — and visited
+    // routes keep the upward walk from re-entering a route the chain already
+    // exhausted. `chain` holds every route the cascade has stood on, nearest
+    // last, so a parent that itself exhausts continues to its own parents and
+    // then to the remaining parents of the routes below it, in proximity order.
     interface CascadeState {
       readonly triedRefs: Set<string>
       readonly visitedRoutes: Set<string>
@@ -715,7 +889,42 @@ export const layer = Layer.effect(
        * resolution does. Undefined when no session claims the resolution. */
       readonly kind?: ModelRoute.SessionKind
     }
-    const cascadeRefKey = (target: ModelRoute.Target) => `${target.providerID}/${target.id}`
+    // The effort a target would serve a request for `requestedVariant` at: its
+    // own fixed variant, else the requested variant as the target's remap
+    // translates it, else the target's default. Undefined means the model's own
+    // default effort. Shared by the bench candidacy read in resolveRouteWithin
+    // and the tried key below, so both judge a leg by the same effort.
+    const cascadeServedVariant = (
+      definition: ModelRoute.Definition,
+      index: number,
+      requestedVariant: VariantID | undefined,
+    ): string | undefined => {
+      const target = definition.targets[index]
+      if (!target) return undefined
+      if (target.variant) return target.variant
+      const targetVariants = definition.targetVariants[index]
+      if (requestedVariant === undefined) return targetVariants?.default
+      const remapped = targetVariants?.map?.[requestedVariant]
+      if (remapped === false) return undefined
+      if (typeof remapped === "string") return remapped
+      return requestedVariant
+    }
+    // Within-call tried identity (#10367, design point 1): provider / model /
+    // effort, in the traffic-key shape model-route.ts uses for its per-effort
+    // traffic maps. A leg tried at one effort no longer skips the same model
+    // reached at another effort through another pool or fallback chain in the
+    // same call's walk; the same effort reached again still prunes. The
+    // cross-call bench keeps its coarser provider/model key — seeding its
+    // granularity by failure class is design point 2, a later slice.
+    const cascadeRefKey = (
+      definition: ModelRoute.Definition,
+      index: number,
+      requestedVariant: VariantID | undefined,
+    ): string => {
+      const target = definition.targets[index]
+      const effort = cascadeServedVariant(definition, index, requestedVariant)
+      return `${target.providerID}/${target.id}@${effort ?? "default"}`
+    }
     const resolveRouteWithin = (
       selected: Info,
       definition: ModelRoute.Definition,
@@ -733,24 +942,16 @@ export const layer = Layer.effect(
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         const now = Date.now()
-        // The effort a target would serve this request at: its own fixed variant,
-        // else the requested variant as the target's remap translates it, else the
-        // target's default. Bench reads are addressed at this leg (door × model ×
-        // effort): a sibling effort's traffic bench must neither hold this leg out
-        // nor be invisible to it. The pick below re-derives the same value with
-        // the catalog source in hand (a target that lacks the requested variant
-        // natively serves its default); the candidacy read here cannot consult
-        // the catalog, so it judges by the remap alone.
-        const servedVariantFor = (index: number): string | undefined => {
-          const target = definition.targets[index]
-          if (target.variant) return target.variant
-          const targetVariants = definition.targetVariants[index]
-          if (requestedVariant === undefined) return targetVariants?.default
-          const remapped = targetVariants?.map?.[requestedVariant]
-          if (remapped === false) return undefined
-          if (typeof remapped === "string") return remapped
-          return requestedVariant
-        }
+        // The effort a target would serve this request at (cascadeServedVariant,
+        // shared with the within-call tried key). Bench reads are addressed at
+        // this leg (door × model × effort): a sibling effort's traffic bench must
+        // neither hold this leg out nor be invisible to it. The pick below
+        // re-derives the same value with the catalog source in hand (a target
+        // that lacks the requested variant natively serves its default); the
+        // candidacy read here cannot consult the catalog, so it judges by the
+        // remap alone.
+        const servedVariantFor = (index: number): string | undefined =>
+          cascadeServedVariant(definition, index, requestedVariant)
         let lastError: Error | undefined
         // The active stored credential per target provider (#6): the ready filter gates on the
         // credential that would actually serve the target, not only on the target itself.
@@ -811,6 +1012,8 @@ export const layer = Layer.effect(
         }
         const makeResolved = (
           current: Resolved,
+          // The target `current` resolved, whose own first-output wait applies under nestedTimeout own.
+          targetIndex: number,
           origin: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,
           credentialFallback: (() => Effect.Effect<Resolved | undefined, Error>) | undefined,
           // The credential load() actually served this resolution with (#6), authoritative
@@ -861,7 +1064,7 @@ export const layer = Layer.effect(
               routeID: definition.id,
               target: current.ref,
               ...(definition.system ? { system: definition.system } : {}),
-              policy: definition.health,
+              policy: ModelRoute.targetPolicy(definition, targetIndex),
               // Two requests by default: a single transient failure on a steady target is retried before the
               // route moves on. Rate limits skip the retry (see the runner). Set 1 to fail over at once.
               attempts: definition.attempts ?? 2,
@@ -916,6 +1119,19 @@ export const layer = Layer.effect(
                           requestTokens,
                           branchState,
                         ),
+                  ),
+                  // Cross-route substitution (#12228): with the route and its
+                  // parents exhausted, an open door of the same class beats
+                  // re-seating a cooling door of this route in the last-resort
+                  // pass below — the same principle that seats a healthy
+                  // parent ahead of a cooling in-route target. For the walled
+                  // doors the policy names (quota, auth) the last-resort pass
+                  // cannot seat them anyway, so substitution is the only
+                  // productive step left before the structured ending.
+                  Effect.flatMap((next) =>
+                    next
+                      ? Effect.succeed(next)
+                      : cascadeToSubstitute(definition, requestedVariant, sessionID, requestTokens, branchState),
                   ),
                   // Last resort, last (#7073): when no ready candidate remains
                   // anywhere in the cascade — every untried target cooling or
@@ -1180,6 +1396,21 @@ export const layer = Layer.effect(
                   return earliest === undefined || instant < earliest ? instant : earliest
                 }, undefined)
               : undefined
+          // The session's pinned member (#2671) leads only while it is healthy: ready (not benched,
+          // held, avoided or over budget) and not quota-demoted. Anything less — including the
+          // last-resort pass, where nothing is ready — falls back to the pool's normal order.
+          const pinned = sessionID === undefined ? undefined : ModelRoute.pinnedLeaf(definition, sessionID)
+          const preferred =
+            pinned !== undefined &&
+            ready.includes(pinned) &&
+            !ModelRoute.demoted(
+              definition.targets[pinned],
+              now,
+              effectiveCredential(definition.targets[pinned], now)?.id,
+              locationDirectory,
+            )
+              ? pinned
+              : undefined
           const index = ModelRoute.nextTarget(
             definition,
             new Set(eligible),
@@ -1191,6 +1422,7 @@ export const layer = Layer.effect(
             Math.random,
             (index) => effectiveCredential(definition.targets[index], now)?.id,
             locationDirectory,
+            preferred,
           )
           if (index === undefined) break
           triedTargets.add(index)
@@ -1372,6 +1604,7 @@ export const layer = Layer.effect(
                     nextTried.add(retried.success.servingCredentialID)
                   return makeResolved(
                     retried.success.resolved,
+                    index,
                     undefined,
                     credentialFallback(retried.success.servingCredentialID, nextTried),
                     retried.success.servingCredentialID,
@@ -1400,6 +1633,7 @@ export const layer = Layer.effect(
               : undefined
           return makeResolved(
             current,
+            index,
             origin,
             credentialFallback(servingCredentialID),
             servingCredentialID,
@@ -1464,8 +1698,7 @@ export const layer = Layer.effect(
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
         for (const index of fromTried) {
-          const target = from.targets[index]
-          if (target) cascade.triedRefs.add(cascadeRefKey(target))
+          if (from.targets[index]) cascade.triedRefs.add(cascadeRefKey(from, index, requestedVariant))
         }
         if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
           cascade.chain.push({ definition: from, tried: fromTried })
@@ -1502,7 +1735,9 @@ export const layer = Layer.effect(
             if (cascade.visitedRoutes.has(String(parent.id))) continue
             cascade.visitedRoutes.add(String(parent.id))
             const seed = new Set(
-              parent.targets.flatMap((target, index) => (cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [])),
+              parent.targets.flatMap((target, index) =>
+                cascade.triedRefs.has(cascadeRefKey(parent, index, requestedVariant)) ? [index] : [],
+              ),
             )
             // A parent whose remaining targets all fail to load is exhausted,
             // not fatal: the cascade continues upward instead of dying on the
@@ -1525,6 +1760,116 @@ export const layer = Layer.effect(
             if (resolved) return resolved
             const above = yield* cascadeToParent(parent, seed, requestedVariant, sessionID, requestTokens, cascade)
             if (above) return above
+          }
+        }
+        return undefined
+      })
+
+    // Cross-route substitution (#12228, Drewry's 2026-11-22 policy): when a route
+    // and every parent that nests it are exhausted — the whole route is walled —
+    // the walk may enter another route, but only one of the same cost/capability
+    // class as the session's own route (config `class`). Substitution never crosses
+    // classes: a session never lands on a more expensive or differently-capable
+    // route by failing over, and ACP routes substitute only within ACP because
+    // they declare their own class. A route that declares no class substitutes
+    // nothing and is never substituted into, so undeclared routes keep exactly
+    // the pre-substitution behaviour. Candidates are ordered by measured record:
+    // each candidate's untried targets' answered/attempted counts over the
+    // retained outcome window (the in-process successor of the five-door
+    // measurement), Laplace-smoothed so an unmeasured route scores 1/2 — between
+    // a proven door and a failing one — with catalog order breaking ties, as in
+    // the parent cascade. The tried set carries over by ref, so a door already
+    // attempted in this walk is never re-dealt under the substitute. Entering a
+    // substitute is recorded as a decision on the route left behind — from, to
+    // and class — so a session's record shows the substitution; a silent swap
+    // would be a defect.
+    const cascadeToSubstitute = (
+      from: ModelRoute.Definition,
+      requestedVariant: VariantID | undefined,
+      sessionID: string | undefined,
+      requestTokens: number | undefined,
+      cascade: CascadeState,
+    ): Effect.Effect<Resolved | undefined, Error> =>
+      Effect.gen(function* () {
+        if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
+          cascade.chain.push({ definition: from, tried: new Set() })
+        // The class that governs is the session's own route's: the first route
+        // the walk stood on (the chain's head), not whichever route happens to
+        // be serving when the walk runs out — a parent of another class that
+        // nests the session's route must not widen where the session may land.
+        const anchor = cascade.chain[0]?.definition ?? from
+        const routeClass = ModelRoute.routeClass(anchor)
+        if (routeClass === undefined) return undefined
+        // Substitution discovery is execution, not picker discovery (#230), as
+        // in the parent cascade: candidates are the enabled route records.
+        const available = yield* models.all().pipe(
+          Effect.map((list) => list.filter((model) => model.enabled)),
+          Effect.catchCause(() => Effect.succeed([] as readonly Info[])),
+        )
+        const candidates = available
+          .flatMap((candidate, order) => {
+            if (candidate.providerID !== ModelRoute.PROVIDER_ID) return []
+            const substitute = ModelRoute.definition(candidate)
+            if (!substitute || cascade.visitedRoutes.has(String(substitute.id))) return []
+            if (ModelRoute.routeClass(substitute) !== routeClass) return []
+            // The selected route's variant gate applies to every route the
+            // cascade enters (#1014 Codex P2), substitutes included.
+            if (requestedVariant && !candidate.variants.some((item) => item.id === requestedVariant)) return []
+            const untried = substitute.targets.filter(
+              (target, index) => !cascade.triedRefs.has(cascadeRefKey(substitute, index, requestedVariant)),
+            )
+            if (untried.length === 0) return []
+            const record = untried.reduce(
+              (total, target) => {
+                const entry = ModelRoute.measured(target)
+                return { answered: total.answered + entry.answered, attempts: total.attempts + entry.attempts }
+              },
+              { answered: 0, attempts: 0 },
+            )
+            return [{ candidate, substitute, score: (record.answered + 1) / (record.attempts + 2), order }]
+          })
+          .sort((a, b) => b.score - a.score || a.order - b.order)
+        for (const { candidate, substitute } of candidates) {
+          if (cascade.visitedRoutes.has(String(substitute.id))) continue
+          cascade.visitedRoutes.add(String(substitute.id))
+          const seed = new Set(
+            substitute.targets.flatMap((target, index) =>
+              cascade.triedRefs.has(cascadeRefKey(substitute, index, requestedVariant)) ? [index] : [],
+            ),
+          )
+          // A substitute whose remaining targets all fail to load is
+          // exhausted, not fatal: the next candidate in measured order tries.
+          const resolved = yield* resolveRouteWithin(
+            candidate,
+            substitute,
+            requestedVariant,
+            seed,
+            false,
+            sessionID,
+            requestTokens,
+            cascade,
+          ).pipe(
+            Effect.catch((error) => {
+              cascade.loadErrors.push(error)
+              return Effect.succeed(undefined)
+            }),
+          )
+          if (resolved) {
+            ModelRouteLog.record({
+              kind: "decision",
+              row: {
+                time: Date.now(),
+                session_id: sessionID,
+                route_id: anchor.id,
+                selection: anchor.nodes[0]?.selection ?? "ordered",
+                variant: requestedVariant,
+                candidates: candidates.map((entry) => String(entry.substitute.id)),
+                chosen: String(substitute.id),
+                reason: "cross-route-substitution",
+                detail: { from: String(anchor.id), to: String(substitute.id), class: routeClass },
+              },
+            })
+            return resolved
           }
         }
         return undefined
@@ -1567,10 +1912,10 @@ export const layer = Layer.effect(
         const first = containing[0]
         if (!first) return loaded.resolved
         const { candidate, route, index } = first
-        const requestedVariant = variant === "default" ? undefined : variant
+        const requestedVariant = chosenVariant(selected, variant)
         const cascade: CascadeState = {
           kind: sessionID === undefined ? undefined : ModelRoute.sessionKind(parentID),
-          triedRefs: new Set([cascadeRefKey(route.targets[index])]),
+          triedRefs: new Set([cascadeRefKey(route, index, requestedVariant)]),
           visitedRoutes: new Set([String(route.id)]),
           chain: [],
           loadErrors: [],
@@ -1582,7 +1927,7 @@ export const layer = Layer.effect(
             routeID: route.id,
             target: loaded.resolved.ref,
             ...(route.system ? { system: route.system } : {}),
-            policy: route.health,
+            policy: ModelRoute.targetPolicy(route, index),
             attempts: route.attempts ?? 2,
             ...(route.hedgeAfterMs ? { hedgeAfterMs: route.hedgeAfterMs } : {}),
             autonomy: route.autonomy,
@@ -1614,6 +1959,14 @@ export const layer = Layer.effect(
                   next
                     ? Effect.succeed(next)
                     : cascadeToParent(route, branchTried, requestedVariant, sessionID, requestTokens, branchState),
+                ),
+                // Cross-route substitution (#12228), mirroring the routed
+                // fallback exactly: the containing route's class governs, as
+                // it governs the rest of this chain.
+                Effect.flatMap((next) =>
+                  next
+                    ? Effect.succeed(next)
+                    : cascadeToSubstitute(route, requestedVariant, sessionID, requestTokens, branchState),
                 ),
                 // Last resort, last (#2382): the routed fallback ends with
                 // this pass (#7073) but the direct attachment was left
@@ -1668,7 +2021,8 @@ export const layer = Layer.effect(
         return attachDirectRoute(selected, variant, sessionID, requestTokens, parentID)
       if (!definition || definition.targets.length === 0)
         return Effect.fail(new RouteUnavailableError({ routeID: selected.id, providerID: selected.providerID }))
-      const requestedVariant = variant === "default" ? undefined : variant
+      // A pool's own configured default or locked effort (providers.opencode-route.models.<id>) applies here.
+      const requestedVariant = chosenVariant(selected, variant)
       if (requestedVariant && !selected.variants.some((item) => item.id === requestedVariant))
         return Effect.fail(
           new VariantUnavailableError({
@@ -1739,74 +2093,88 @@ export const layer = Layer.effect(
                 id: ID.make(res.id),
                 ...(res.variant ? { variant: VariantID.make(res.variant) } : {}),
               })
-            } catch {}
+            } catch (error) {
+              if (error instanceof ModelAlias.AliasCycleError || error instanceof ModelAlias.AliasMaxDepthError)
+                return yield* new AliasResolutionError({
+                  providerID: target.providerID,
+                  modelID: target.id,
+                  detail: error.message,
+                })
+            }
           }
         }
-        const selected = target
-          ? yield* models.get(target.providerID, target.id)
-          : yield* models
-              .default()
-              .pipe(
-                Effect.flatMap((model) =>
-                  model && hasPackage(model)
-                    ? Effect.succeed(model)
-                    : Effect.map(models.available(), (models) =>
-                        models.find((model) => hasPackage(model) && Model.supportsText(model)),
-                      ),
-                ),
-              )
+        const selected = target ? yield* models.get(target.providerID, target.id) : yield* fallback()
         if (!selected) return undefined
         return yield* resolveSelected(selected, target?.variant, sessionID, requestTokens, parentID)
       }),
+      fallback,
       resolveModel: (selected, variant, sessionID, requestTokens, parentID) =>
         resolveSelected(selected, variant, sessionID, requestTokens, parentID),
+      resolveImage: Effect.fn("ModelResolver.resolveImage")(function* (ref) {
+        return yield* loadMedia(ref, "image", isImageModel)
+      }),
+      resolveVideo: Effect.fn("ModelResolver.resolveVideo")(function* (ref) {
+        return yield* loadMedia(ref, "video", isVideoModel)
+      }),
+      resolveDecision: Effect.fn("ModelResolver.resolveDecision")(function* (ref) {
+        return yield* loadMedia(ref, "decision", isDecisionModel)
+      }),
     })
   }),
 )
 
 function hasConfiguredAuth(model: RuntimeInfo) {
-  return [model.settings?.apiKey, model.settings?.authToken, model.settings?.accessToken].some(
-    (value) => typeof value === "string" && value !== "",
-  )
+  return [
+    model.settings?.apiKey,
+    model.settings?.gatewayApiKey,
+    model.settings?.authToken,
+    model.settings?.accessToken,
+  ].some((value) => typeof value === "string" && value !== "")
 }
+
+const API_KEY_AUTH_PACKAGES: ReadonlySet<string> = new Set([
+  "@ai-sdk/openai",
+  "@ai-sdk/anthropic",
+  "@ai-sdk/cerebras",
+  "@ai-sdk/deepinfra",
+  "@ai-sdk/openai-compatible",
+  "@ai-sdk/google",
+  "@ai-sdk/groq",
+  "@ai-sdk/mistral",
+  "@ai-sdk/togetherai",
+  "@ai-sdk/xai",
+  "@openrouter/ai-sdk-provider",
+  "@ai-sdk/azure",
+  "@opencode/ai/providers/openai",
+  "@opencode/ai/providers/anthropic",
+  "@opencode/ai/providers/anthropic-compatible",
+  "@opencode/ai/providers/baseten",
+  "@opencode/ai/providers/cerebras",
+  "@opencode/ai/providers/cloudflare-ai-gateway",
+  "@opencode/ai/providers/cloudflare-workers-ai",
+  "@opencode/ai/providers/deepinfra",
+  "@opencode/ai/providers/deepseek",
+  "@opencode/ai/providers/fireworks",
+  "@opencode/ai/providers/openai-compatible",
+  "@opencode/ai/providers/openai-compatible/decisions",
+  "@opencode/ai/providers/google",
+  "@opencode/ai/providers/google/interactions",
+  "@opencode/ai/providers/groq",
+  "@opencode/ai/providers/mistral",
+  "@opencode/ai/providers/togetherai",
+  "@opencode/ai/providers/vercel-ai-gateway",
+  "@opencode/ai/providers/xai",
+  "@opencode/ai/providers/openrouter",
+  "@opencode/ai/providers/azure",
+])
 
 function usesAPIKeyAuth(packageName: string | undefined) {
   const name = Provider.packageName(packageName)
+  if (name === undefined) return false
   return (
-    name === "@ai-sdk/openai" ||
-    name === "@ai-sdk/anthropic" ||
-    name === "@ai-sdk/cerebras" ||
-    name === "@ai-sdk/deepinfra" ||
-    name === "@ai-sdk/openai-compatible" ||
-    name === "@ai-sdk/google" ||
-    name === "@ai-sdk/groq" ||
-    name === "@ai-sdk/mistral" ||
-    name === "@ai-sdk/togetherai" ||
-    name === "@ai-sdk/xai" ||
-    name === "@openrouter/ai-sdk-provider" ||
-    name === "@ai-sdk/azure" ||
-    name === "@opencode/ai/providers/openai" ||
-    name?.startsWith("@opencode/ai/providers/openai/") === true ||
-    name === "@opencode/ai/providers/anthropic" ||
-    name === "@opencode/ai/providers/anthropic-compatible" ||
-    name === "@opencode/ai/providers/baseten" ||
-    name === "@opencode/ai/providers/cerebras" ||
-    name === "@opencode/ai/providers/cloudflare-ai-gateway" ||
-    name === "@opencode/ai/providers/cloudflare-workers-ai" ||
-    name === "@opencode/ai/providers/deepinfra" ||
-    name === "@opencode/ai/providers/deepseek" ||
-    name === "@opencode/ai/providers/fireworks" ||
-    name === "@opencode/ai/providers/openai-compatible" ||
-    name === "@opencode/ai/providers/google" ||
-    name === "@opencode/ai/providers/google/interactions" ||
-    name === "@opencode/ai/providers/groq" ||
-    name === "@opencode/ai/providers/mistral" ||
-    name === "@opencode/ai/providers/togetherai" ||
-    name === "@opencode/ai/providers/vercel-ai-gateway" ||
-    name === "@opencode/ai/providers/xai" ||
-    name === "@opencode/ai/providers/openrouter" ||
-    name === "@opencode/ai/providers/azure" ||
-    name?.startsWith("@opencode/ai/providers/azure/") === true
+    API_KEY_AUTH_PACKAGES.has(name) ||
+    name.startsWith("@opencode/ai/providers/openai/") ||
+    name.startsWith("@opencode/ai/providers/azure/")
   )
 }
 
