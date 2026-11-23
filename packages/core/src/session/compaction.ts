@@ -127,6 +127,8 @@ type Precomputed = {
 const NOTHING_TO_COMPACT: Failure = { error: { type: "compaction.unavailable", message: "Nothing to compact yet" } }
 /** After each "too long" rejection, the next attempt aims at this share of the first rejected request's size. */
 const SHRINK_STEPS = [0.85, 0.7, 0.5, 0.35]
+/** The failure a summary attempt ends in when its reply runs out of output room (raised in `stream`). */
+const OUTPUT_LIMIT_MESSAGE = "Compaction summary reached the output token limit"
 // The least of the window kept free for the last reply before compaction and for the summary itself.
 const RESERVE_MIN = 16_000
 /**
@@ -629,7 +631,10 @@ export const layer = Layer.effect(
      * rejection is about bytes, which inline media almost always accounts for, so one on the unchanged request resends
      * it as text, which carries no media, without counting; one on text counts as "too long". Other provider errors
      * resend the same request under the session's retry policy. A `Failure` from `send` is a reply that cannot be
-     * used, and is never retried.
+     * used, and is never retried — except a summary that ran out of output room beside a request whose size is
+     * what squeezed its output limit: that request can shrink, and each smaller one leaves the next attempt more
+     * output room, so it takes the same shrink steps, and the failure stands only when they run out, the request
+     * cannot shrink further, or an attempt already had the summary's full output limit.
      */
     const deliver = Effect.fnUntraced(function* (
       trigger: Trigger,
@@ -655,6 +660,7 @@ export const layer = Layer.effect(
       let rejected: number | undefined
       let asText = shrink.text ?? false
       let fit = shrink.fit
+      let outputLimit: Failure | undefined
 
       while (true) {
         const measured = rejections === 0 ? shrink.measured : undefined
@@ -674,6 +680,9 @@ export const layer = Layer.effect(
               ? flattenAndDropOldest(shrink.history, context, Number.POSITIVE_INFINITY)
               : shrink.history)
         if (!request) {
+          // A summary that ran out of output room keeps its own failure here: the request beside
+          // it could not shrink further, so no later attempt would have had more room either.
+          if (outputLimit) return yield* Effect.fail(outputLimit)
           return yield* Effect.fail<Failure>({
             error: {
               type: "compaction.failed",
@@ -687,7 +696,24 @@ export const layer = Layer.effect(
         const attempt = yield* Effect.result(send(request, size))
         if (Result.isSuccess(attempt)) return attempt.success
         const cause = attempt.failure
-        if (!(cause instanceof AIError)) return yield* Effect.fail(cause)
+        if (!(cause instanceof AIError)) {
+          if (cause.error.type !== "compaction.failed" || cause.error.message !== OUTPUT_LIMIT_MESSAGE)
+            return yield* Effect.fail(cause)
+          // The fitted output limit is the window minus the input (see `fitOutput`), so a smaller
+          // input only buys the summary more room when the two did not already fit together.
+          const maxTokens = prepared.request.maxTokens
+          const input = size ? total(size) : estimateRequest(request)
+          if (maxTokens === undefined || input + maxTokens <= context.model.limit.context)
+            return yield* Effect.fail(cause)
+          const step = SHRINK_STEPS[rejections]
+          if (step === undefined) return yield* Effect.fail(cause)
+          outputLimit = cause
+          rejected ??= input
+          target = Math.floor(rejected * step)
+          fit = target
+          rejections++
+          continue
+        }
         const error = toSessionError(cause)
         const tooLarge = cause.reason._tag === "InvalidRequest" && cause.reason.classification === "payload-too-large"
 
@@ -904,7 +930,7 @@ export const layer = Layer.effect(
               case "length":
                 return unusable({
                   type: "compaction.failed",
-                  message: "Compaction summary reached the output token limit",
+                  message: OUTPUT_LIMIT_MESSAGE,
                 })
               case "content-filter":
                 return unusable(contentFilterError("Compaction summary was blocked by the provider", event.reason))

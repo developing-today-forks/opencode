@@ -4741,6 +4741,62 @@ describe("SessionRunnerLLM", () => {
     expect(s.requests[1]?.maxTokens).toBe(16_000)
   })
 
+  scenario("retries the summary beside a smaller request when it runs out of output room", function* (s) {
+    // A short session (four exchanges) whose transcript still sits close enough to the window
+    // that the fitted output limit binds: the first summary attempt runs out of room, so the
+    // request shrinks and the retry, fitted against the smaller request, gets its room back.
+    for (const n of [1, 2, 3, 4]) {
+      yield* s.llm.push(TestLLM.text("Answer " + n + " " + "a".repeat(72_000), `text-room-answer-${n}`))
+      yield* s.runPrompt("Question " + n + " " + "q".repeat(100_000))
+    }
+    s.requests.length = 0
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "length" } },
+        LLMEvent.textDelta({ id: "truncated-summary", text: "## Objective\n- Truncated summary" }),
+      ),
+      TestLLM.text("## Objective\n- Recovered summary", "text-room-summary"),
+    )
+    const compact = yield* s.session.compact({ sessionID })
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(2)
+    expect(userTexts(s.requests[0]).at(-1)).toContain("## Objective")
+    // The retry went out beside a smaller request and so was fitted a larger output limit.
+    expect(JSON.stringify(s.requests[1].messages).length).toBeLessThan(JSON.stringify(s.requests[0].messages).length)
+    expect(s.requests[1]?.maxTokens).toBeGreaterThan(s.requests[0]?.maxTokens ?? 0)
+    expect((yield* s.messages).find((message) => message.id === compact.id)).toMatchObject({
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\n- Recovered summary",
+    })
+  })
+
+  scenario("fails with the output-limit error when no smaller request gives the summary room", function* (s) {
+    for (const n of [1, 2, 3, 4]) {
+      yield* s.llm.push(TestLLM.text("Answer " + n + " " + "a".repeat(72_000), `text-stalled-answer-${n}`))
+      yield* s.runPrompt("Question " + n + " " + "q".repeat(100_000))
+    }
+    s.requests.length = 0
+    yield* s.llm.always(
+      TestLLM.complete(
+        { reason: { normalized: "length" } },
+        LLMEvent.textDelta({ id: "always-truncated", text: "## Objective\n- Truncated summary" }),
+      ),
+    )
+    const compact = yield* s.session.compact({ sessionID })
+    yield* s.resume
+
+    // One shrink retry: beside the smaller request the fitted limit is the summary's full one
+    // again, so a second truncated reply is terminal and the original failure stands.
+    expect(s.requests).toHaveLength(2)
+    expect((yield* s.messages).find((message) => message.id === compact.id)).toMatchObject({
+      type: "compaction",
+      status: "failed",
+      error: { type: "compaction.failed", message: "Compaction summary reached the output token limit" },
+    })
+  })
+
   scenario("publishes the original overflow when recovery summarization fails", function* (s) {
     yield* setupOverflowRecovery(s)
     yield* s.llm.push(
