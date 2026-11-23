@@ -1,13 +1,14 @@
 import { describe, expect, setDefaultTimeout } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Cause, Context, Deferred, Effect, Exit, Fiber, Layer, Option, Schedule, Stream, Tracer } from "effect"
+import { Context, Deferred, Effect, Fiber, Layer, Option, Schedule, Stream, Tracer } from "effect"
 import { Bus } from "@opencode/core/bus"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
 import { Plugin } from "@opencode/core/plugin"
 import { AbsolutePath } from "@opencode/core/schema"
+import { SessionMessage } from "@opencode/schema/session-message"
 import { Session } from "@opencode/core/session"
 import { SessionEvent } from "@opencode/core/session/event"
 import { SessionExecution } from "@opencode/core/session/execution"
@@ -106,9 +107,7 @@ const launch = Effect.fn(function* (fixture: Effect.Success<typeof setup>, name:
     process.platform === "win32"
       ? `Write-Output '${name} started'; New-Item '${name}.started' -ItemType File | Out-Null; while (!(Test-Path '${name}.release') -and (Test-Path $PWD)) { Start-Sleep -Milliseconds 10 }; Write-Output '${name} finished'`
       : `printf '${name} started\\n'; touch ${name}.started; while [ ! -f ${name}.release ] && [ -d "$PWD" ]; do sleep 0.01; done; printf '${name} finished\\n'`
-  const caller = yield* fixture.session
-    .shell({ sessionID: fixture.created.id, command })
-    .pipe(Effect.scoped, Effect.forkScoped)
+  const item = yield* fixture.session.shell({ sessionID: fixture.created.id, command })
   yield* Effect.promise(() => Bun.file(path.join(fixture.tmp.path, `${name}.started`)).exists()).pipe(
     Effect.repeat({ until: (exists) => exists, schedule: Schedule.spaced("10 millis") }),
     Effect.timeout("5 seconds"),
@@ -120,8 +119,27 @@ const launch = Effect.fn(function* (fixture: Effect.Success<typeof setup>, name:
     Effect.map(Option.getOrThrow),
     Effect.timeout("5 seconds"),
   )
-  return { caller, shellID: event.data.shell.id, release }
+  return { item, shellID: event.data.shell.id, release }
 })
+
+// Admission returns before the shell runs; its completion is observed through the completion synthetic it admits.
+const completion = (fixture: Effect.Success<typeof setup>, shellID: string) =>
+  Effect.gen(function* () {
+    const inbox = yield* fixture.session.inbox(fixture.created.id)
+    return inbox.some((item) => item.type === "synthetic" && item.payload.metadata?.shellID === shellID)
+  }).pipe(
+    Effect.repeat({ until: (done) => done, schedule: Schedule.spaced("10 millis") }),
+    Effect.timeout("5 seconds"),
+  )
+
+const shellCompletion = (fixture: Effect.Success<typeof setup>) =>
+  Effect.gen(function* () {
+    const inbox = yield* fixture.session.inbox(fixture.created.id)
+    return inbox.some((item) => item.type === "synthetic" && item.payload.metadata?.source === "shell")
+  }).pipe(
+    Effect.repeat({ until: (done) => done, schedule: Schedule.spaced("10 millis") }),
+    Effect.timeout("5 seconds"),
+  )
 
 describe("Session.shell", () => {
   it.live("runs shells concurrently with an active model and waits for each shell's own completion", () =>
@@ -133,17 +151,23 @@ describe("Session.shell", () => {
       const second = yield* launch(fixture, "second")
 
       expect(yield* fixture.execution.active).toContain(fixture.created.id)
-      expect(first.caller.pollUnsafe()).toBeUndefined()
-      expect(second.caller.pollUnsafe()).toBeUndefined()
+      expect(first.item).toMatchObject({ type: "shell", payload: { command: expect.stringContaining("first") } })
+      expect(second.item).toMatchObject({ type: "shell", payload: { command: expect.stringContaining("second") } })
       expect(yield* fixture.session.messages({ sessionID: fixture.created.id, order: "asc" })).toMatchObject([
         { type: "shell", shellID: first.shellID, status: "running", metadata: { background: true } },
         { type: "shell", shellID: second.shellID, status: "running", metadata: { background: true } },
       ])
 
       yield* second.release
-      yield* Fiber.join(second.caller).pipe(Effect.timeout("5 seconds"))
-      expect(first.caller.pollUnsafe()).toBeUndefined()
+      yield* completion(fixture, second.shellID)
+      expect(yield* fixture.session.messages({ sessionID: fixture.created.id, order: "asc" })).toMatchObject([
+        { type: "shell", shellID: first.shellID, status: "running" },
+        { type: "shell", shellID: second.shellID, status: "exited" },
+      ])
+      // The first shell's admission row is still in the inbox while it runs; the second's completion
+      // synthetic has landed behind it.
       expect(yield* fixture.session.inbox(fixture.created.id)).toMatchObject([
+        { type: "shell", id: first.item.id },
         {
           type: "synthetic",
           payload: {
@@ -153,7 +177,7 @@ describe("Session.shell", () => {
         },
       ])
       yield* first.release
-      yield* Fiber.join(first.caller).pipe(Effect.timeout("5 seconds"))
+      yield* completion(fixture, first.shellID)
       expect(
         (yield* fixture.session.inbox(fixture.created.id))
           .filter((item) => item.type === "synthetic")
@@ -190,7 +214,7 @@ describe("Session.shell", () => {
       })
       expect((yield* fixture.session.get(fixture.created.id)).location).toEqual(destination)
       yield* command.release
-      yield* Fiber.join(command.caller).pipe(Effect.timeout("5 seconds"))
+      yield* completion(fixture, command.shellID)
       yield* bus.publish(Done, {})
 
       const events = yield* Effect.forEach(readers, (reader) => Fiber.join(reader).pipe(Effect.timeout("5 seconds")))
@@ -221,12 +245,14 @@ describe("Session.shell", () => {
       const prompt = yield* fixture.session.prompt({ sessionID: fixture.created.id, text: "Continue while this runs" })
       yield* Deferred.await(fixture.control.started).pipe(Effect.timeout("5 seconds"))
       expect(fixture.control.wakes).toEqual([fixture.created.id])
-      expect(command.caller.pollUnsafe()).toBeUndefined()
+      expect(yield* fixture.session.messages({ sessionID: fixture.created.id })).toMatchObject([
+        { type: "shell", shellID: command.shellID, status: "running" },
+      ])
       yield* Deferred.succeed(fixture.control.release, undefined)
       yield* fixture.execution.awaitIdle(fixture.created.id)
 
       yield* command.release
-      yield* Fiber.join(command.caller).pipe(Effect.timeout("5 seconds"))
+      yield* completion(fixture, command.shellID)
       expect(fixture.control.wakes).toEqual([fixture.created.id])
       expect(yield* fixture.execution.active).toEqual(new Set())
       expect(yield* fixture.session.inbox(fixture.created.id)).toMatchObject([
@@ -245,15 +271,20 @@ describe("Session.shell", () => {
             ? `Write-Output 'user output'; [Console]::Error.WriteLine('user error'); exit ${exit}`
             : `printf 'user output\\n'; printf 'user error\\n' >&2; exit ${exit}`
         yield* fixture.session.shell({ sessionID: fixture.created.id, command })
+        yield* shellCompletion(fixture)
 
         const events = yield* log(fixture.session, fixture.created.id).pipe(Stream.runCollect)
         expect(events.map((event) => event.type)).toEqual([
           "session.created",
+          "session.inbox.enqueued",
           "session.shell.started",
           "session.shell.ended",
           "session.inbox.enqueued",
+          "session.inbox.delivered",
         ])
-        expect(events[1]).toMatchObject({ data: { shell: { metadata: { background: true } } } })
+        expect(events.find((event) => event.type === "session.shell.started")).toMatchObject({
+          data: { shell: { metadata: { background: true } } },
+        })
         const messages = yield* fixture.session.messages({ sessionID: fixture.created.id })
         expect(messages).toHaveLength(1)
         expect(messages[0]).toMatchObject({
@@ -317,7 +348,7 @@ describe("Session.shell", () => {
         yield* outcome.status === "killed"
           ? fixture.shell.remove(command.shellID)
           : fixture.shell.timeout(command.shellID, 1)
-        yield* Fiber.join(command.caller).pipe(Effect.timeout("5 seconds"))
+        yield* completion(fixture, command.shellID)
         expect(yield* fixture.session.messages({ sessionID: fixture.created.id })).toMatchObject([
           {
             type: "shell",
@@ -353,6 +384,7 @@ describe("Session.shell", () => {
       const command = `exit 3 # ${"x".repeat(190)}😀${"x".repeat(100)}`
       const truncated = `exit 3 # ${"x".repeat(190)}\uFFFD…`
       yield* fixture.session.shell({ sessionID: fixture.created.id, command }).pipe(Effect.withTracer(tracer))
+      yield* shellCompletion(fixture)
 
       const create = spans.find((span) => span.name === "Shell.create")
       const result = spans.find((span) => span.name === "Shell.result")
@@ -376,43 +408,46 @@ describe("Session.shell", () => {
     }),
   )
 
-  it.live("admits a spawn failure without waking the model before failing the caller", () =>
+  it.live("admits a shell whose start failure arrives as an error synthetic without waking the model", () =>
     Effect.gen(function* () {
       const fixture = yield* setup
       // Keep the Location initialized, but invalidate the real child's working directory.
       yield* Effect.promise(() => fs.rm(fixture.tmp.path, { recursive: true, force: true }))
       const command = "echo should-not-start"
-      const exit = yield* fixture.session.shell({ sessionID: fixture.created.id, command }).pipe(Effect.exit)
+      const item = yield* fixture.session.shell({ sessionID: fixture.created.id, command })
+      expect(item).toMatchObject({ type: "shell", payload: { command } })
 
-      expect(Exit.isFailure(exit)).toBe(true)
+      // The admission already returned; the failed start surfaces as an error synthetic and no shell message.
+      yield* Effect.gen(function* () {
+        const inbox = yield* fixture.session.inbox(fixture.created.id)
+        return inbox.some((entry) => entry.type === "synthetic" && entry.payload.metadata?.state === "error")
+      }).pipe(
+        Effect.repeat({ until: (done) => done, schedule: Schedule.spaced("10 millis") }),
+        Effect.timeout("5 seconds"),
+      )
       expect(yield* fixture.session.messages({ sessionID: fixture.created.id })).toEqual([])
       const inbox = yield* fixture.session.inbox(fixture.created.id)
       expect(inbox).toHaveLength(1)
       expect(inbox[0]).toMatchObject({
         type: "synthetic",
-        payload: { text: expect.stringContaining(command), metadata: { source: "shell", state: "error" } },
+        payload: { text: expect.stringContaining("failed to start"), metadata: { source: "shell", state: "error" } },
       })
       expect(fixture.control.wakes).toEqual([])
     }),
   )
 
-  it.live("keeps the shell and completion alive when the waiting caller is interrupted", () =>
+  it.live("returns on admission while the shell runs and records its completion with no waiter", () =>
     Effect.gen(function* () {
       const fixture = yield* setup
       const command = yield* launch(fixture, "detached")
 
-      yield* Fiber.interrupt(command.caller).pipe(Effect.timeout("5 seconds"))
-      const exit = yield* Fiber.await(command.caller)
-      expect(Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)).toBe(true)
+      // Admission already returned and the shell is still running: its admission row is still in the
+      // inbox (it is consumed when the operation settles) and nothing has completed yet.
       expect(yield* fixture.shell.get(command.shellID)).toMatchObject({ status: "running" })
-      expect(yield* fixture.session.inbox(fixture.created.id)).toEqual([])
+      expect(yield* fixture.session.inbox(fixture.created.id)).toMatchObject([{ type: "shell", id: command.item.id }])
 
       yield* command.release
-      yield* log(fixture.session, fixture.created.id, true).pipe(
-        Stream.filter((event) => event.type === "session.inbox.enqueued"),
-        Stream.runHead,
-        Effect.timeout("5 seconds"),
-      )
+      yield* completion(fixture, command.shellID)
       expect(yield* fixture.session.messages({ sessionID: fixture.created.id })).toMatchObject([
         {
           type: "shell",
@@ -432,6 +467,135 @@ describe("Session.shell", () => {
         },
       ])
       expect(fixture.control.wakes).toEqual([])
+    }),
+  )
+})
+
+const setupWithCommand = Effect.gen(function* () {
+  const tmp = yield* tmpdirScoped()
+  yield* Effect.promise(() =>
+    Bun.write(
+      path.join(tmp.path, ".opencode/plugins/commands.ts"),
+      [
+        `import { writeFile } from "node:fs/promises"`,
+        `export default {`,
+        `  id: "test-commands",`,
+        `  async setup(ctx) {`,
+        `    await ctx.command.transform((editor) =>`,
+        `      editor.add({`,
+        `        name: "marker",`,
+        `        description: "Writes the invocation text to a marker file",`,
+        `        execute: async (invocation) => {`,
+        `          await writeFile(${JSON.stringify(path.join(tmp.path, "command-ran.txt"))}, invocation.prompt.text)`,
+        `        },`,
+        `      }),`,
+        `    )`,
+        `  },`,
+        `}`,
+        ``,
+      ].join("\n"),
+    ),
+  )
+  const session = yield* Session.Service
+  const created = yield* session.create({ location: Location.Ref.make({ directory: AbsolutePath.make(tmp.path) }) })
+  const locations = yield* LocationServiceMap.Service
+  yield* Plugin.awaitActivation.pipe(Effect.provide(locations.get(created.location)))
+  return { tmp, session, created }
+})
+
+describe("Session shell/command admission", () => {
+  it.live("runs a shell admitted twice under one ID only once", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const id = SessionMessage.ID.create()
+      const command =
+        process.platform === "win32"
+          ? `Write-Output 'twice started'; New-Item 'twice.started' -ItemType File | Out-Null; while (!(Test-Path 'twice.release') -and (Test-Path $PWD)) { Start-Sleep -Milliseconds 10 }; Write-Output 'twice finished'`
+          : `printf 'twice started\\n'; touch twice.started; while [ ! -f twice.release ] && [ -d "$PWD" ]; do sleep 0.01; done; printf 'twice finished\\n'`
+      const first = yield* fixture.session.shell({ sessionID: fixture.created.id, id, command })
+      const second = yield* fixture.session.shell({ sessionID: fixture.created.id, id, command })
+      expect(second).toEqual(first)
+
+      yield* Effect.promise(() => Bun.file(path.join(fixture.tmp.path, "twice.started")).exists()).pipe(
+        Effect.repeat({ until: (exists) => exists, schedule: Schedule.spaced("10 millis") }),
+        Effect.timeout("5 seconds"),
+      )
+      yield* Effect.promise(() => Bun.write(path.join(fixture.tmp.path, "twice.release"), ""))
+      yield* shellCompletion(fixture)
+
+      const messages = yield* fixture.session.messages({ sessionID: fixture.created.id })
+      expect(messages.filter((message) => message.type === "shell")).toHaveLength(1)
+      const inbox = yield* fixture.session.inbox(fixture.created.id)
+      expect(inbox.filter((item) => item.type === "synthetic")).toHaveLength(1)
+      expect(fixture.control.wakes).toEqual([])
+    }),
+  )
+
+  it.live("answers a second shell admission under one ID with the first admission, as prompts do", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const id = SessionMessage.ID.create()
+      const first = yield* fixture.session.shell({ sessionID: fixture.created.id, id, command: "printf 'one\\n'" })
+      // First admission wins for a matching session and type: the retry is answered with the admitted
+      // item, its different command is not admitted, and nothing runs twice.
+      const second = yield* fixture.session.shell({ sessionID: fixture.created.id, id, command: "printf 'two\\n'" })
+      expect(second).toEqual(first)
+      yield* shellCompletion(fixture)
+      const messages = yield* fixture.session.messages({ sessionID: fixture.created.id })
+      expect(messages.filter((message) => message.type === "shell")).toHaveLength(1)
+      expect(messages[0]).toMatchObject({ type: "shell", command: "printf 'one\\n'" })
+    }),
+  )
+
+  it.live("rejects a shell admission under an ID a prompt already holds", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const id = SessionMessage.ID.create()
+      yield* fixture.session.prompt({ sessionID: fixture.created.id, id, text: "A prompt holds this ID" })
+      const error = yield* fixture.session
+        .shell({ sessionID: fixture.created.id, id, command: "printf 'two\\n'" })
+        .pipe(Effect.flip)
+      expect(error._tag).toBe("Session.ShellConflictError")
+    }),
+  )
+
+  it.live("fails an unknown command at admission and admits nothing", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const error = yield* fixture.session
+        .command({ sessionID: fixture.created.id, command: "no-such-command", text: "" })
+        .pipe(Effect.flip)
+      expect(error._tag).toBe("Command.NotFoundError")
+      expect(yield* fixture.session.inbox(fixture.created.id)).toEqual([])
+    }),
+  )
+
+  it.live("admits a known command and executes it after admission", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setupWithCommand
+      const item = yield* fixture.session.command({
+        sessionID: fixture.created.id,
+        command: "marker",
+        text: "hello command",
+      })
+      expect(item).toMatchObject({ type: "command", payload: { command: "marker", text: "hello command" } })
+
+      const marker = path.join(fixture.tmp.path, "command-ran.txt")
+      yield* Effect.promise(() => Bun.file(marker).exists()).pipe(
+        Effect.repeat({ until: (exists) => exists, schedule: Schedule.spaced("10 millis") }),
+        Effect.timeout("5 seconds"),
+      )
+      expect(yield* Effect.promise(() => Bun.file(marker).text())).toBe("hello command")
+
+      // The admission row is consumed once the command has executed.
+      yield* Effect.gen(function* () {
+        const inbox = yield* fixture.session.inbox(fixture.created.id)
+        return inbox.every((entry) => entry.type !== "command")
+      }).pipe(
+        Effect.repeat({ until: (done) => done, schedule: Schedule.spaced("10 millis") }),
+        Effect.timeout("5 seconds"),
+      )
+      expect(yield* fixture.session.inbox(fixture.created.id)).toEqual([])
     }),
   )
 })

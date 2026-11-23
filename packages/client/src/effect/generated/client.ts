@@ -658,6 +658,7 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
     raw["session.command"]({
       params: { sessionID: input["sessionID"] },
       payload: {
+        id: input["id"],
         name: input["name"],
         text: input["text"],
         files: input["files"],
@@ -665,7 +666,10 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
         skills: input["skills"],
         delivery: input["delivery"],
       },
-    }).pipe(Effect.mapError(mapClientError)),
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
   )
 
 const EndpointSessionSynthetic = (raw: RawClient["server.session"]) => (input: SessionSyntheticInput) =>
@@ -690,8 +694,11 @@ const EndpointSessionShell = (raw: RawClient["server.session"]) => (input: Sessi
   preserveEffect<SessionShellOutput>()(
     raw["session.shell"]({
       params: { sessionID: input["sessionID"] },
-      payload: { id: input["id"], command: input["command"] },
-    }).pipe(Effect.mapError(mapClientError)),
+      payload: { id: input["id"], command: input["command"], delivery: input["delivery"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
   )
 
 const EndpointSessionCompact = (raw: RawClient["server.session"]) => (input: SessionCompactInput) =>

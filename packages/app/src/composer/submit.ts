@@ -838,9 +838,12 @@ function sendShell(session: ComposerSession, value: ComposerSubmission) {
   return inTurn(session.id, async (turn) => {
     if (turn.before) await turn.before
 
-    const sending = session.data.session.sequence(session.id, () =>
-      session.api.shell({ sessionID: session.id, id: value.id, command: value.text }),
-    )
+    const sending = session.data.session.shell({
+      sessionID: session.id,
+      id: value.id,
+      command: value.text,
+      delivery: value.delivery,
+    })
 
     turn.joined()
     await sending
@@ -859,32 +862,29 @@ function sendCommand(
 
     if (turn.before) await turn.before
 
-    const sending = session.data.session.sequence(
-      session.id,
-      () =>
-        session.api.command({
-          sessionID: session.id,
-          name: command.command,
-          text: command.arguments,
-          files: request.files.map((file) => ({
-            uri: file.uri,
-            name: file.name,
-            description: file.description,
-            mention: file.mention,
-          })),
-          agents: request.agents,
-          skills: request.skills,
-          delivery: value.delivery,
-        }),
+    const sending = session.data.session.command({
+      sessionID: session.id,
+      id: value.id,
+      name: command.command,
+      text: command.arguments,
+      files: request.files.map((file) => ({
+        uri: file.uri,
+        name: file.name,
+        description: file.description,
+        mention: file.mention,
+      })),
+      agents: request.agents,
+      skills: request.skills,
+      delivery: value.delivery,
       // What the request waits for is not part of its place in the chain's order. A send cancelled while it waits on
       // the gate stops there, before the composer's selection is committed: nothing of it reaches the server.
-      async () => {
+      prepare: async () => {
         await gate?.open
 
         // Like queued prompts, queued commands must not apply the composer's selection to active work.
         if (value.delivery === "steer") await applySelection(session, value.selection, track)
       },
-    )
+    })
 
     turn.joined()
     await sending

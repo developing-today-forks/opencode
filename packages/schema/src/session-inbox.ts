@@ -4,6 +4,7 @@ import { Schema } from "effect"
 import { Location } from "./location.js"
 import { Project } from "./project.js"
 import { Attachment, Prompt } from "./prompt.js"
+import { PromptInput } from "./prompt-input.js"
 import { DateTimeUtcFromMillis, optional, RelativePath } from "./schema.js"
 import { SessionID } from "./session-id.js"
 import { SessionMessage } from "./session-message.js"
@@ -41,6 +42,19 @@ export const MovePayload = Schema.Struct({
   subpath: RelativePath.pipe(optional),
 }).annotate({ identifier: "Session.Inbox.MovePayload" })
 
+export interface ShellPayload extends Schema.Schema.Type<typeof ShellPayload> {}
+export const ShellPayload = Schema.Struct({
+  command: Schema.String,
+}).annotate({ identifier: "Session.Inbox.ShellPayload" })
+
+export interface CommandPayload extends Schema.Schema.Type<typeof CommandPayload> {}
+export const CommandPayload = Schema.Struct({
+  command: Schema.String,
+  // The prompt input as submitted, not the projected message payload: command
+  // execution consumes the input form (URI file attachments) when it runs.
+  ...PromptInput.Prompt.fields,
+}).annotate({ identifier: "Session.Inbox.CommandPayload" })
+
 const UserItem = Schema.Struct({ type: Schema.tag("user"), payload: UserPayload, delivery: Delivery })
 const SyntheticItem = Schema.Struct({ type: Schema.tag("synthetic"), payload: SyntheticPayload, delivery: Delivery })
 const CompactionItem = Schema.Struct({
@@ -49,8 +63,10 @@ const CompactionItem = Schema.Struct({
   delivery: Delivery,
 })
 const MoveItem = Schema.Struct({ type: Schema.tag("move"), payload: MovePayload, delivery: Delivery })
+const ShellItem = Schema.Struct({ type: Schema.tag("shell"), payload: ShellPayload, delivery: Delivery })
+const CommandItem = Schema.Struct({ type: Schema.tag("command"), payload: CommandPayload, delivery: Delivery })
 
-export const Item = Schema.Union([UserItem, SyntheticItem, CompactionItem, MoveItem]).pipe(
+export const Item = Schema.Union([UserItem, SyntheticItem, CompactionItem, MoveItem, ShellItem, CommandItem]).pipe(
   Schema.toTaggedUnion("type"),
   Schema.annotate({ identifier: "Session.Inbox.Item" }),
 )
@@ -84,14 +100,24 @@ export const Compaction = Schema.Struct({ ...Enqueued, ...CompactionItem.fields 
 export interface Move extends Schema.Schema.Type<typeof Move> {}
 export const Move = Schema.Struct({ ...Enqueued, ...MoveItem.fields }).annotate({ identifier: "Session.Inbox.Move" })
 
-export const Info = Schema.Union([User, Synthetic, Compaction, Move]).pipe(
+export interface Shell extends Schema.Schema.Type<typeof Shell> {}
+export const Shell = Schema.Struct({ ...Enqueued, ...ShellItem.fields }).annotate({
+  identifier: "Session.Inbox.Shell",
+})
+
+export interface Command extends Schema.Schema.Type<typeof Command> {}
+export const Command = Schema.Struct({ ...Enqueued, ...CommandItem.fields }).annotate({
+  identifier: "Session.Inbox.Command",
+})
+
+export const Info = Schema.Union([User, Synthetic, Compaction, Move, Shell, Command]).pipe(
   Schema.toTaggedUnion("type"),
   Schema.annotate({ identifier: "Session.Inbox.Info" }),
 )
 export type Info = typeof Info.Type
 
 /** {@link Info} with {@link MediaUser} for clients that opt into `experimental-media-uri`. */
-export const MediaInfo = Schema.Union([MediaUser, Synthetic, Compaction, Move]).pipe(
+export const MediaInfo = Schema.Union([MediaUser, Synthetic, Compaction, Move, Shell, Command]).pipe(
   Schema.toTaggedUnion("type"),
   Schema.annotate({ identifier: "Session.Inbox.MediaInfo" }),
 )

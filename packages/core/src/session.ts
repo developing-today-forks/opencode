@@ -10,7 +10,6 @@ import { Model } from "@opencode/schema/model"
 import { Location } from "./location.js"
 import type { FileSystem } from "./filesystem.js"
 import { SessionMessage } from "./session/message.js"
-import { PromptInput } from "@opencode/schema/prompt-input"
 import { Bus } from "./bus.js"
 import { Instance } from "./instance/service.js"
 import { Plugin } from "./plugin/service.js"
@@ -32,6 +31,7 @@ import { SessionExecution } from "./session/execution.js"
 import {
   AttachmentError,
   BusyError,
+  CommandConflictError,
   CompactionConflictError,
   ForkEmptyError,
   InboxConflictError,
@@ -41,6 +41,7 @@ import {
   NotFoundError,
   PromptConflictError,
   RouteTargetError,
+  ShellConflictError,
   SkillNotFoundError,
   SyntheticConflictError,
 } from "./session/error.js"
@@ -50,7 +51,6 @@ import { SessionEvent } from "./session/event.js"
 import { SessionInbox } from "./session/inbox.js"
 import { InstructionState } from "./session/instruction-state.js"
 import { SessionGenerate } from "./session/generate.js"
-import { SessionCommand } from "./session/command.js"
 import {
   SessionMove,
   DestinationNotFoundError,
@@ -69,7 +69,6 @@ import { FSUtil } from "@opencode/util/fs-util"
 import type { EventLog } from "@opencode/schema/event-log"
 import type { FileDiff } from "@opencode/schema/file-diff"
 import { Job } from "./job.js"
-import type { Command } from "./command.js"
 import { SessionEnvironment } from "./session/environment.js"
 import { SessionRouteTarget } from "./session/route-target.js"
 import { ModelRoute } from "./model-route.js"
@@ -119,6 +118,7 @@ type ForkInput = {
 export {
   AttachmentError,
   BusyError,
+  CommandConflictError,
   CompactionConflictError,
   ForkEmptyError,
   InboxConflictError,
@@ -128,6 +128,7 @@ export {
   NotFoundError,
   PromptConflictError,
   RouteTargetError,
+  ShellConflictError,
   SkillNotFoundError,
   SyntheticConflictError,
 }
@@ -260,18 +261,9 @@ export interface Interface {
     sessionID: SessionSchema.ID
     prompt: string
   }) => Effect.Effect<SessionGenerate.Result, NotFoundError | SessionGenerate.Error>
-  readonly command: (input: {
-    sessionID: SessionSchema.ID
-    command: string
-    text: string
-    files?: PromptInput.Prompt["files"]
-    agents?: PromptInput.Prompt["agents"]
-    skills?: PromptInput.Prompt["skills"]
-    delivery?: SessionInbox.Delivery
-  }) => Effect.Effect<
-    void,
-    NotFoundError | Command.NotFoundError | Command.ExecutionError | FileSystem.DirectoryNotFoundError
-  >
+  readonly command: (
+    input: Parameters<Session.Handle["command"]>[0] & { sessionID: SessionSchema.ID },
+  ) => ReturnType<Session.Handle["command"]>
   readonly shell: (
     input: Parameters<Session.Handle["shell"]>[0] & { sessionID: SessionSchema.ID },
   ) => ReturnType<Session.Handle["shell"]>
@@ -694,12 +686,7 @@ const layer = Layer.effect(
           Effect.provideService(Bus.Service, bus),
         )
       }),
-      command: Effect.fn("Session.command")(function* (input) {
-        const session = yield* result.get(input.sessionID)
-        return yield* SessionCommand.execute({ ...input, session }).pipe(
-          Effect.provideService(Instance.Service, instances),
-        )
-      }),
+      command: (input) => sessions.forSession(input.sessionID).command(input),
       shell: (input) => sessions.forSession(input.sessionID).shell(input),
       skill: (input) => sessions.forSession(input.sessionID).skill(input),
       switchAgent: (input) => sessions.forSession(input.sessionID).switchAgent(input),
