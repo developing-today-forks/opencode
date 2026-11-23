@@ -850,12 +850,45 @@ describe("Form ask bounds (#1883)", () => {
       yield* TestClock.adjust("2 minutes")
       // Oracle: the shared form state the form endpoints serve. A joiner timeout
       // must not settle it: the form stays pending and joinable, and a later reply
-      // still answers both asks.
+      // still answers the owner.
       expect(yield* service.list({ sessionID: askInput.sessionID })).toHaveLength(1)
+      expect(yield* service.state(pending[0]!.id)).toEqual({ status: "pending" })
+      // The joiner itself resolved at its own deadline with its timeout outcome
+      // (#2619), without settling the shared form.
+      expect(yield* Fiber.join(joiner)).toEqual({ status: "cancelled", message: "joiner timed out" })
+      yield* service.reply({ id: pending[0]!.id, answer: { name: "Ava" } })
+      expect(yield* Fiber.join(owner)).toEqual({ status: "answered", answer: { name: "Ava" } })
+    }),
+  )
+
+  it.effect("a joined ask resolves at its own timeout when the owner set none (#2619)", () =>
+    Effect.gen(function* () {
+      const service = yield* Form.Service
+      const askInput = {
+        sessionID: SessionSchema.ID.make("ses_test"),
+        title: "Test form",
+        fields: [{ key: "name", type: "string", required: true }],
+      } satisfies Form.CreateInput
+      // The owner set no timeout: without a bound of its own, a joined ask would
+      // pend on the shared deferred indefinitely.
+      const owner = yield* service.ask(askInput, { dedupePending: true }).pipe(Effect.forkScoped)
+      // Let the owner create the form the joiner dedupes onto.
+      let pending = yield* service.list({ sessionID: askInput.sessionID })
+      for (let i = 0; i < 50 && pending.length === 0; i++) {
+        yield* TestClock.adjust("10 millis")
+        pending = yield* service.list({ sessionID: askInput.sessionID })
+      }
+      expect(pending).toHaveLength(1)
+      const joiner = yield* service
+        .ask(askInput, { dedupePending: true, timeout: "1 minute", timeoutMessage: "joiner timed out" })
+        .pipe(Effect.forkScoped)
+      yield* TestClock.adjust("2 minutes")
+      // Oracle: the joiner resolved at its own deadline with its timeout outcome,
+      // while the shared form stays pending and a later reply still answers the owner.
+      expect(yield* Fiber.join(joiner)).toEqual({ status: "cancelled", message: "joiner timed out" })
       expect(yield* service.state(pending[0]!.id)).toEqual({ status: "pending" })
       yield* service.reply({ id: pending[0]!.id, answer: { name: "Ava" } })
       expect(yield* Fiber.join(owner)).toEqual({ status: "answered", answer: { name: "Ava" } })
-      expect(yield* Fiber.join(joiner)).toEqual({ status: "answered", answer: { name: "Ava" } })
     }),
   )
 
