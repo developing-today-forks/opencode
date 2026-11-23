@@ -49,4 +49,26 @@ describe("Shell cleanup", () => {
       }),
     ),
   )
+
+  it.live("keeps a running spawned command's capture past retention until it ends", () =>
+    withStore((fs, root) =>
+      Effect.gen(function* () {
+        const project = path.join(root, Shell.DIRECTORY, "project")
+        const live = path.join(project, "sh_0123456789abLIVEWRITER000.out")
+        yield* fs.ensureDir(project)
+        yield* fs.writeFileString(live, "live")
+        const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1_000)
+        yield* fs.utimes(live, new Date(), expired)
+
+        Shell.registerLiveCapture(live)
+        yield* Shell.cleanup()
+        expect(yield* fs.exists(live)).toBe(true)
+        expect(yield* fs.readFileString(live)).toBe("live")
+
+        Shell.unregisterLiveCapture(live)
+        yield* Shell.cleanup()
+        expect(yield* fs.exists(live)).toBe(false)
+      }),
+    ),
+  )
 })

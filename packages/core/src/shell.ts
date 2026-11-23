@@ -48,6 +48,22 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Shell.No
 const EXITED_LIMIT = 25
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = "shell"
+
+/**
+ * Capture files of spawned commands that are still running, by absolute path. Spawned commands live in
+ * one Location's service while the retention sweep below is global, so the spawn path registers its
+ * capture on creation and unregisters it at a terminal state, and the sweep spares registered paths.
+ * Daemon commands need no entry: the sweep already spares the ones `listPipes` reports as running.
+ */
+const liveCaptures = new Set<string>()
+
+export const registerLiveCapture = (file: string) => {
+  liveCaptures.add(file)
+}
+
+export const unregisterLiveCapture = (file: string) => {
+  liveCaptures.delete(file)
+}
 export const DEFAULT_OUTPUT_LIMIT = 65536
 
 /**
@@ -275,13 +291,14 @@ export const cleanup = Effect.fn("Shell.cleanup")(function* () {
     { concurrency: 8 },
   )
   // Never starts the daemon. A command it still runs keeps its file; a finished one whose file expired is forgotten
-  // below.
+  // below. Spawned commands live in a Location, not the daemon: the ones still running keep theirs via
+  // `liveCaptures` (see registerLiveCapture).
   const processes = new Map(
     (yield* pty.listPipes().pipe(Effect.orElseSucceed(() => []))).map((process) => [process.outputPath, process]),
   )
   yield* FileRetention.cleanup(
     fs,
-    files.flat().filter((file) => processes.get(file)?.lifecycle.status !== "running"),
+    files.flat().filter((file) => processes.get(file)?.lifecycle.status !== "running" && !liveCaptures.has(file)),
     RETENTION,
   )
   // Finished processes whose file is gone, or that ended long ago, are of no use to any Location: forget them.
@@ -791,6 +808,7 @@ const layer = () =>
       yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
           for (const command of commands.values()) {
+            unregisterLiveCapture(command.info.file)
             if (command.timeoutFiber) yield* Fiber.interrupt(command.timeoutFiber)
             // Teardown interrupts pending commands; it is not a terminal command failure. Daemon commands are left
             // to the server.
@@ -813,6 +831,7 @@ const layer = () =>
         if (index !== -1) exitOrder.splice(index, 1)
         if (!command) return
         commands.delete(id)
+        unregisterLiveCapture(command.info.file)
         if (command.timeoutFiber) yield* Fiber.interrupt(command.timeoutFiber)
         // Unblock any wait still pending when the command is removed before it terminated.
         yield* Deferred.fail(command.done, new NotFoundError({ id }))
@@ -1201,6 +1220,7 @@ const layer = () =>
                 done: Deferred.makeUnsafe<Info, NotFoundError>(),
               }
               commands.set(id, command)
+              registerLiveCapture(file)
 
               const stream = createWriteStream(file)
               const outputDone = Latch.makeUnsafe()
@@ -1304,6 +1324,7 @@ const layer = () =>
                     if (outcome.signal !== undefined) draft.signal = outcome.signal
                     draft.time.completed = outcome.completed
                   })
+                  unregisterLiveCapture(file)
                   // Resolve waiters before retention eviction, so an evicted command still reports its
                   // terminal Info rather than the removal NotFoundError.
                   yield* Deferred.succeed(command.done, command.info)
