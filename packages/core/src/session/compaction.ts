@@ -125,6 +125,10 @@ type Precomputed = {
 }
 
 const NOTHING_TO_COMPACT: Failure = { error: { type: "compaction.unavailable", message: "Nothing to compact yet" } }
+/** The failure a summary generation that ran out of output room produces; `deliver` retries it smaller. */
+const OUTPUT_LIMIT_MESSAGE = "Compaction summary reached the output token limit"
+const isOutputLimit = (failure: Failure) =>
+  failure.error.type === "compaction.failed" && failure.error.message === OUTPUT_LIMIT_MESSAGE
 /** After each "too long" rejection, the next attempt aims at this share of the first rejected request's size. */
 const SHRINK_STEPS = [0.85, 0.7, 0.5, 0.35]
 // The least of the window kept free for the last reply before compaction and for the summary itself.
@@ -687,7 +691,21 @@ export const layer = Layer.effect(
         const attempt = yield* Effect.result(send(request, size))
         if (Result.isSuccess(attempt)) return attempt.success
         const cause = attempt.failure
-        if (!(cause instanceof AIError)) return yield* Effect.fail(cause)
+        if (!(cause instanceof AIError)) {
+          // A summary that hit the output limit was not rejected, but the same shrink recovers
+          // it: the text form drops the tool definitions and shortens the oldest exchanges,
+          // leaving more of the window for the reply and less history for it to cover. The
+          // steps are shared with the rejection path, so a run of both still ends.
+          if (!isOutputLimit(cause)) return yield* Effect.fail(cause)
+          const step = SHRINK_STEPS[rejections]
+          if (step === undefined) return yield* Effect.fail(cause)
+          rejected ??= size ? total(size) : estimateRequest(request)
+          asText = true
+          target = Math.floor(rejected * step)
+          fit = target
+          rejections++
+          continue
+        }
         const error = toSessionError(cause)
         const tooLarge = cause.reason._tag === "InvalidRequest" && cause.reason.classification === "payload-too-large"
 
@@ -904,7 +922,7 @@ export const layer = Layer.effect(
               case "length":
                 return unusable({
                   type: "compaction.failed",
-                  message: "Compaction summary reached the output token limit",
+                  message: OUTPUT_LIMIT_MESSAGE,
                 })
               case "content-filter":
                 return unusable(contentFilterError("Compaction summary was blocked by the provider", event.reason))
