@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { ConfigProvider, Effect } from "effect"
 import { HttpClientRequest } from "effect/http"
-import { ai, LanguageModel, LLMEvent, Media, Message, SystemPart, ToolDefinition } from "../../src/effect.js"
+import { ai, LanguageModel, LLMEvent, Media, Message, SystemPart, ToolCallPart, ToolDefinition } from "../../src/effect.js"
 import { Mistral } from "../../src/providers/index.js"
 import { MistralChat } from "../../src/protocols/index.js"
 import { LLMClient } from "../../src/route.js"
@@ -154,6 +154,50 @@ describe("Mistral Chat", () => {
         { tool_calls: [{ id: "Ab12Cd34E" }] },
         { tool_call_id: "Ab12Cd34E" },
       ])
+    }),
+  )
+
+  it.effect("keeps long tool-call ID projections stable across sequential requests (#2228)", () =>
+    Effect.gen(function* () {
+      const project = (ids: ReadonlyArray<string>) =>
+        Effect.gen(function* () {
+          const prepared = yield* compileRequest(
+            ai.request({
+              model,
+              messages: [
+                Message.user("Read every label"),
+                Message.assistant(
+                  ids.map((id, index) => ToolCallPart.make({ id, name: "lookup", input: { label: index } })),
+                ),
+                ...ids.map((id, index) => Message.tool({ id, name: "lookup", result: `value-${index}` })),
+              ],
+            }),
+          )
+          const assistant = prepared.body.messages.find((message) => message.role === "assistant")
+          if (assistant?.role !== "assistant") throw new Error("Expected an assistant message")
+          return assistant.tool_calls?.map((tool) => tool.id) ?? []
+        })
+      // Two long IDs sharing a long common prefix: a projection that only
+      // looked at a prefix would map them to the same ID. The full-ID hash
+      // keeps them distinct, and each keeps its projection as the history
+      // grows from one request to the next.
+      const longA = "chatcmpl-tool-8cc4d8f9f07b298a"
+      const longB = "chatcmpl-tool-8cc4d8f9f07b9999"
+      const first = yield* project([longA])
+      const projected = first[0]
+      if (!projected) throw new Error("Expected a projected tool call")
+      const second = yield* project([longA, longB])
+      expect(second[0]).toBe(projected)
+      expect(second[1]).toMatch(/^[A-Za-z0-9]{9}$/)
+      expect(second[1]).not.toBe(projected)
+      // The first ID's own projection joins the history as a separate
+      // literal ID (the shape of a provider-issued ID). The long ID's
+      // projection must not move: the pre-#2228 per-request normalizer
+      // salted it to a different value in exactly this case, so one tool
+      // call carried different IDs in different requests of one session.
+      const third = yield* project([longA, longB, projected])
+      expect(third[0]).toBe(projected)
+      expect(third[1]).toBe(second[1])
     }),
   )
 

@@ -356,7 +356,7 @@ const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest, breakpoi
   const messages: BedrockMessage[] = []
   const documentNames = new Set<string>()
   // Mistral can reject replay IDs even when they satisfy Converse's broader ID syntax.
-  const normalizeID = request.model.id.includes("mistral.") ? MistralToolID.normalizer(request) : (id: string) => id
+  const normalizeID = request.model.id.includes("mistral.") ? MistralToolID.normalize : (id: string) => id
   const providerMetadataKey = request.model.route.providerMetadataKey ?? request.model.provider
   const hoistImages = !keepToolImagesInline(request.model.id)
   // Bedrock expects parallel tool results before any images hoisted beside them.

@@ -28,6 +28,12 @@ for (const model of [
         message.content.flatMap((part) => ("toolUse" in part ? [part.toolUse.toolUseId] : [])),
       )[0]
       if (!reserved) throw new Error("Expected projected tool call")
+      // A valid ID distinct from the projection of "a": since #2228 the
+      // projection is a pure function of the original ID, so "a" projects to
+      // `reserved` in every request (asserted below) — a history containing
+      // both as separate calls is the collision case the deterministic
+      // derivation accepts, covered by the stability test instead.
+      const other = (reserved.startsWith("A") ? "B" : "A") + reserved.slice(1)
       const ids = [
         "a",
         "b",
@@ -36,7 +42,7 @@ for (const model of [
         "tooluse_abcdefghi222222222",
         "call_other-provider-id",
         "Ab12Cd34E",
-        reserved,
+        other,
       ]
       const messages = history(ids)
       const before = structuredClone(messages)
@@ -53,7 +59,7 @@ for (const model of [
       expect(new Set(calls).size).toBe(ids.length)
       calls.forEach((id) => expect(id).toMatch(/^[A-Za-z0-9]{9}$/))
       expect(results).toEqual(calls.toReversed())
-      expect(calls[0]).not.toBe(reserved)
+      expect(calls[0]).toBe(reserved)
       expect(calls.slice(-2)).toEqual(ids.slice(-2))
       expect((yield* compileRequest(input)).body).toEqual(prepared.body)
       expect(structuredClone(messages)).toEqual(before)
@@ -82,5 +88,40 @@ it.effect("leaves non-Mistral Bedrock IDs unchanged", () =>
         message.content.flatMap((part) => ("toolResult" in part ? [part.toolResult.toolUseId] : [])),
       ),
     ).toEqual(ids.toReversed())
+  }),
+)
+
+it.effect("keeps long-ID projections stable and distinct across sequential requests (#2228)", () =>
+  Effect.gen(function* () {
+    const model = bedrock.model("mistral.mistral-large-2407-v1:0")
+    const project = (ids: string[]) =>
+      Effect.gen(function* () {
+        const prepared = yield* compileRequest(ai.request({ model, messages: history(ids), cache: "none" }))
+        const body = Schema.decodeUnknownSync(BedrockConverse.protocol.body.schema)(prepared.body)
+        return body.messages.flatMap((message) =>
+          message.content.flatMap((part) => ("toolUse" in part ? [part.toolUse.toolUseId] : [])),
+        )
+      })
+    // Two long IDs sharing a long common prefix: a projection that only
+    // looked at a prefix would map them to the same ID. The full-ID hash
+    // keeps them distinct, and each keeps its projection as the history
+    // grows from one request to the next.
+    const longA = "tooluse_abcdefghi111111111"
+    const longB = "tooluse_abcdefghi222222222"
+    const first = yield* project([longA])
+    const projected = first[0]
+    if (!projected) throw new Error("Expected projected tool call")
+    const second = yield* project([longA, longB])
+    expect(second[0]).toBe(projected)
+    expect(second[1]).toMatch(/^[A-Za-z0-9]{9}$/)
+    expect(second[1]).not.toBe(projected)
+    // The first ID's own projection joins the history as a separate literal
+    // ID (the shape of a provider-issued ID). The long ID's projection must
+    // not move: the pre-#2228 per-request normalizer salted it to a
+    // different value in exactly this case, so one tool call carried
+    // different IDs in different requests of the same session.
+    const third = yield* project([longA, longB, projected])
+    expect(third[0]).toBe(projected)
+    expect(third[1]).toBe(second[1])
   }),
 )
