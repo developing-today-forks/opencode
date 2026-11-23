@@ -130,6 +130,33 @@ describe("answer application with a fake render tool", () => {
     })
   })
 
+  test("quota fallback answer without complete context parses to none, never a switch", () => {
+    // Oracle: #2621 — the wait/switch kind is computed by comparing the
+    // answer against the current provider/tier, so a call without
+    // complete context cannot classify a fallback answer. Defaulting to
+    // "switch" would switch the session to the exhausted provider/tier
+    // the answer names as a wait, so every incomplete-context call is
+    // `none` and applyQuotaFallback is never reached with a switch.
+    const result = JSON.stringify({
+      ok: true,
+      action: "render.page",
+      data: { answer: { action: "fallback", provider: "anthropic", tier: "standard" } },
+    })
+    expect(RenderCard.parseRenderAnswer(result).type).toBe("none")
+    expect(RenderCard.parseRenderAnswer(result, {}).type).toBe("none")
+    expect(RenderCard.parseRenderAnswer(result, { currentProvider: "anthropic" }).type).toBe("none")
+    expect(RenderCard.parseRenderAnswer(result, { currentTier: "standard" }).type).toBe("none")
+    // With complete context the same answer keeps its wait meaning.
+    const answer = RenderCard.parseRenderAnswer(result, { currentProvider: "anthropic", currentTier: "standard" })
+    expect(answer.type).toBe("quota-fallback")
+    if (answer.type !== "quota-fallback") throw new Error("unreachable")
+    expect(answer.choice.kind).toBe("wait")
+    expect(RenderCard.applyQuotaFallback(answer.choice, wall).instruction).toEqual({
+      kind: "wait",
+      until: wall.resetAt,
+    })
+  })
+
   test("typing in chat aborts the wait and surfaces the protocol note", () => {
     const tool = fakeRenderTool({ answered: false, reason: "chat" })
     const result = tool.call(RenderCard.renderCall({ title: "t", html: RenderCard.tierChooserCard({ tiers }) }))
