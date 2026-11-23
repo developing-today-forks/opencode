@@ -228,7 +228,7 @@ export function normalize(input: unknown): Result {
   normalizeFormatter(input, encoded, diagnostics)
   normalizeLsp(input, encoded, diagnostics)
 
-  const rawModel = resolveModelString(input.model, aliases)
+  const rawModel = resolveModelString(input.model, aliases, diagnostics, ["model"])
   const model = own(input, "model")
     ? decodeValue(ConfigModel.Selection, rawModel, ["model"], diagnostics)
     : undefined
@@ -571,7 +571,7 @@ function normalizeExperimental(
       const models = routeSources("model_routes", "models", (value, path) => {
         if (value === undefined) return undefined
         const decoded = decodeMap(
-          resolveRouteTargets(value, aliases),
+          resolveRouteTargets(value, aliases, diagnostics, path),
           ConfigModelRoutes.Route,
           path,
           diagnostics,
@@ -646,11 +646,25 @@ function normalizeAliases(
   return undefined
 }
 
-function resolveModelString(model: unknown, aliases?: ModelAlias.Aliases): unknown {
+// Alias cycles and depth overruns are configuration errors the user can fix, so they are
+// named in a diagnostic instead of silently keeping the unresolved reference (#2567).
+// Other resolution errors (malformed references) keep the historical silent fallthrough.
+function aliasErrorDiagnostic(error: unknown, path: readonly string[], diagnostics: Diagnostic[]) {
+  if (error instanceof ModelAlias.AliasCycleError || error instanceof ModelAlias.AliasMaxDepthError)
+    diagnostics.push({ kind: "invalid", path, message: error.message })
+}
+
+function resolveModelString(
+  model: unknown,
+  aliases?: ModelAlias.Aliases,
+  diagnostics?: Diagnostic[],
+  path?: readonly string[],
+): unknown {
   if (typeof model === "string" && aliases) {
     try {
       return ModelAlias.resolve(aliases, model)
-    } catch {
+    } catch (error) {
+      if (diagnostics && path) aliasErrorDiagnostic(error, path, diagnostics)
       return model
     }
   }
@@ -669,7 +683,12 @@ function resolveEntryModels(map: unknown, aliases?: ModelAlias.Aliases): unknown
   )
 }
 
-function resolveRouteTargets(routes: unknown, aliases?: ModelAlias.Aliases): unknown {
+function resolveRouteTargets(
+  routes: unknown,
+  aliases?: ModelAlias.Aliases,
+  diagnostics?: Diagnostic[],
+  path: readonly string[] = [],
+): unknown {
   if (!isRecord(routes) || !aliases) return routes
   // Object.fromEntries, as in resolveEntryModels: a route named "__proto__"
   // must stay an entry, not become the result's prototype.
@@ -678,10 +697,10 @@ function resolveRouteTargets(routes: unknown, aliases?: ModelAlias.Aliases): unk
       if (isRecord(route) && Array.isArray(route.targets)) {
         const targets = route.targets.map((target) => {
           if (typeof target === "string") {
-            return resolveModelString(target, aliases)
+            return resolveModelString(target, aliases, diagnostics, [...path, k, "targets"])
           }
           if (isRecord(target) && typeof target.model === "string") {
-            return { ...target, model: resolveModelString(target.model, aliases) }
+            return { ...target, model: resolveModelString(target.model, aliases, diagnostics, [...path, k, "targets"]) }
           }
           return target
         })
@@ -872,7 +891,9 @@ function diagnoseSelection(
   if (modelStr && aliases) {
     try {
       modelStr = ModelAlias.resolve(aliases, modelStr)
-    } catch {}
+    } catch (error) {
+      aliasErrorDiagnostic(error, [...path, "model"], diagnostics)
+    }
   }
   const modelValid = typeof modelStr === "string" && ConfigMigrateV1.modelSelection(modelStr) !== undefined
   if (own(value, "model") && typeof value.model === "string" && !modelValid)

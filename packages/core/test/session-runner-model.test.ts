@@ -279,3 +279,61 @@ describe("SessionRunnerModel requestTokens threading (#891)", () => {
     }),
   )
 })
+
+const cyclicInfo = Schema.decodeUnknownSync(ConfigInfo, { errors: "all", onExcessProperty: "ignore" })({
+  aliases: { models: { "a/x": "a/y", "a/y": "a/x" } },
+})
+const cyclicConfig = Layer.mock(Config.Service)({
+  entries: () => Effect.succeed([{ type: "document", info: cyclicInfo }]),
+})
+const cyclicResolver = ModelResolver.layer.pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(Provider.Service, { get: () => Effect.undefined }),
+      Layer.mock(Model.Service, {
+        get: () => Effect.succeed(catalog),
+        all: () => Effect.succeed([catalog]),
+        available: () => Effect.succeed([catalog]),
+      }),
+      Layer.mock(Integration.Service, {
+        revision: () => 0,
+        connection: { active: () => Effect.undefined },
+      } as never),
+      Layer.mock(Npm.Service, {}),
+      Layer.mock(AISDK.Service, { model: () => Effect.succeed(runtime) } as never),
+      cyclicConfig,
+    ),
+  ),
+)
+const itCyclic = testEffect(
+  SessionRunnerModel.layer.pipe(Layer.provide(Layer.mergeAll(cyclicResolver, cyclicConfig, agents, hooks))),
+)
+const itCyclicResolver = testEffect(cyclicResolver)
+
+describe("alias cycles (#2567)", () => {
+  itCyclic.effect("names the cycle in the unavailable-model error for a cycled session model", () =>
+    Effect.gen(function* () {
+      const models = yield* SessionRunnerModel.Service
+      const error = yield* models
+        .resolve(session(Ref.make({ providerID: Provider.ID.make("a"), id: ID.make("x") })), () =>
+          Effect.succeed([catalog]), request,
+        )
+        .pipe(Effect.flip)
+      expect(error).toBeInstanceOf(SessionRunnerModel.ModelUnavailableError)
+      expect(error.message).toBe("Model unavailable: a/x. Cycle detected in alias resolution: a/x -> a/y -> a/x")
+    }),
+  )
+
+  itCyclicResolver.effect("fails resolver resolution with an error naming the cycle", () =>
+    Effect.gen(function* () {
+      const resolverService = yield* ModelResolver.Service
+      const error = yield* resolverService
+        .resolve(Ref.make({ providerID: Provider.ID.make("a"), id: ID.make("x") }))
+        .pipe(Effect.flip)
+      expect(error).toBeInstanceOf(ModelResolver.AliasResolutionError)
+      expect(error.message).toBe(
+        "Model alias resolution failed for a/x: Cycle detected in alias resolution: a/x -> a/y -> a/x",
+      )
+    }),
+  )
+})

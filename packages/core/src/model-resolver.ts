@@ -131,7 +131,20 @@ export class RouteUnavailableError extends Schema.TaggedError<RouteUnavailableEr
   }
 }
 
+/** The requested ref names a model alias that cannot be resolved (a cycle or a depth
+ * overrun); the alias configuration is at fault, so the failure names it instead of
+ * silently falling back to the unresolved ref (#2567). */
+export class AliasResolutionError extends Schema.TaggedError<AliasResolutionError>()(
+  "SessionRunnerModel.AliasResolutionError",
+  { providerID: Provider.ID, modelID: ID, detail: Schema.String },
+) {
+  override get message() {
+    return `Model alias resolution failed for ${this.providerID}/${this.modelID}: ${this.detail}`
+  }
+}
+
 export type Error =
+  | AliasResolutionError
   | VariantUnavailableError
   | UnsupportedPackageError
   | ModelConfigurationError
@@ -2080,7 +2093,14 @@ export const layer = Layer.effect(
                 id: ID.make(res.id),
                 ...(res.variant ? { variant: VariantID.make(res.variant) } : {}),
               })
-            } catch {}
+            } catch (error) {
+              if (error instanceof ModelAlias.AliasCycleError || error instanceof ModelAlias.AliasMaxDepthError)
+                return yield* new AliasResolutionError({
+                  providerID: target.providerID,
+                  modelID: target.id,
+                  detail: error.message,
+                })
+            }
           }
         }
         const selected = target ? yield* models.get(target.providerID, target.id) : yield* fallback()
