@@ -64,6 +64,40 @@ it.effect("Cohere lowers native history, thinking, tools, and sampling", () =>
   }),
 )
 
+it.effect("Cohere marks failed tool results with the wire error prefix", () =>
+  Effect.gen(function* () {
+    const prepared = yield* compileRequest(
+      ai.request({
+        model: cohere.model("command-a-03-2025"),
+        messages: [
+          Message.user("Lookup Paris and Lyon"),
+          Message.assistant([
+            { type: "tool-call", id: "lookup-1", name: "lookup", input: { city: "Paris" } },
+            { type: "tool-call", id: "lookup-2", name: "lookup", input: { city: "Lyon" } },
+          ]),
+          Message.tool({ id: "lookup-1", name: "lookup", resultType: "error", result: "timed out" }),
+          Message.tool({ id: "lookup-2", name: "lookup", resultType: "text", result: "timed out" }),
+        ],
+      }),
+    )
+    // Wire oracle (#2663, following #2226): Cohere tool messages have no error
+    // field, so failures are distinguishable only by the stable [tool_error]
+    // prefix; a successful result with identical text stays unmarked.
+    expect(prepared.body.messages).toMatchObject([
+      { role: "user", content: [{ type: "text", text: "Lookup Paris and Lyon" }] },
+      {
+        role: "assistant",
+        tool_calls: [
+          { id: "lookup-1", function: { name: "lookup", arguments: '{"city":"Paris"}' } },
+          { id: "lookup-2", function: { name: "lookup", arguments: '{"city":"Lyon"}' } },
+        ],
+      },
+      { role: "tool", tool_call_id: "lookup-1", content: "[tool_error] timed out" },
+      { role: "tool", tool_call_id: "lookup-2", content: "timed out" },
+    ])
+  }),
+)
+
 it.effect("Cohere compatibility omits unsupported OpenAI fields", () =>
   Effect.gen(function* () {
     const prepared = yield* compileRequest(
