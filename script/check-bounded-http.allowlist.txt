@@ -113,7 +113,6 @@ packages/util/src/retry.test.ts :: fetch(`http://127.0.0.1:${server.port}/api/pr
 packages/util/src/retry.test.ts :: fetch(`http://127.0.0.1:${port}/api/project`).catch((cause) => { :: test file: call/read against a local test server, stub, or locally constructed data — not a production outbound call
 services/files/src/index.ts :: async fetch(request, env, ctx) { :: fetch handler definition (worker/service entry point), not an outbound call
 services/update/src/index.ts :: async fetch(request: Request, env: Env, ctx: Pick<ExecutionContext, "waitUntil">): Promise<Response> { :: fetch handler definition (worker/service entry point), not an outbound call
-services/update/src/index.ts :: const input: unknown = await request.json().catch(() => undefined) :: inbound request body read (authenticated publish handler), not an outbound response body
 
 
 # Script-tree extension (#1394): dispositions for the 24 script roots added to
