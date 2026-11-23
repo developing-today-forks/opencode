@@ -215,6 +215,42 @@ export function viewLineCommentEditor(state: LineCommentEditorState, config: Lin
   } as const
 }
 
+export interface LineCommentMentionListbox {
+  /** Whether the mention list is on screen; the textarea's aria-expanded mirrors it. */
+  open: boolean
+  /** Id of the listbox element; the textarea's aria-controls names it while the list is open. */
+  listboxId: string
+  /** Id of the option rendered at `index`. */
+  optionId: (index: number) => string
+  /** Id of the active option, or undefined while no option is active; the textarea's aria-activedescendant names it. */
+  activeOptionId: string | undefined
+  /** Whether `path` is the active option, for the option's aria-selected. */
+  selected: (path: string) => boolean
+}
+
+/**
+ * The mention popup's listbox semantics, derived in one place so both line-comment
+ * editors announce the same thing: the popup is a listbox of options, the option the
+ * machine's navigation last landed on is the selected one, and the textarea — which
+ * keeps focus throughout — points at the listbox and the active option while it is open.
+ */
+export function mentionListbox(
+  view: { mentionItems: readonly string[]; activeMentionPath: string | null },
+  id: string,
+): LineCommentMentionListbox {
+  const listboxId = `${id}-mention-listbox`
+  const optionId = (index: number) => `${listboxId}-option-${index}`
+  const activeIndex = view.activeMentionPath === null ? -1 : view.mentionItems.indexOf(view.activeMentionPath)
+
+  return {
+    open: view.mentionItems.length > 0,
+    listboxId,
+    optionId,
+    activeOptionId: activeIndex === -1 ? undefined : optionId(activeIndex),
+    selected: (path) => view.activeMentionPath === path,
+  }
+}
+
 function textareaKey(state: Live, key: LineCommentEditorKey, config: LineCommentEditorConfig) {
   // The list is on screen: a fresh result, or the previous one while a refined query loads.
   const listed = state.status !== "editing" && state.items.length > 0

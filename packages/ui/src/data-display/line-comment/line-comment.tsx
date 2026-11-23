@@ -5,6 +5,7 @@ import {
   createEffect,
   createMemo,
   createSignal,
+  createUniqueId,
   on,
   onCleanup,
   onMount,
@@ -25,6 +26,7 @@ import { makeEventListener } from "@solid-primitives/event-listener"
 import {
   createLineCommentEditorState,
   MENTION_TIMEOUT_MS,
+  mentionListbox,
   parseMentionToken,
   transitionLineCommentEditor,
   viewLineCommentEditor,
@@ -173,6 +175,9 @@ export function LineCommentEditor(props: LineCommentEditorProps) {
   })
 
   const view = createMemo(() => viewLineCommentEditor(editorState(), readConfig()))
+
+  const mentionId = createUniqueId()
+  const listbox = createMemo(() => mentionListbox(view(), mentionId))
 
   const compactLabel = () =>
     view().alternateActive
@@ -356,6 +361,9 @@ export function LineCommentEditor(props: LineCommentEditorProps) {
               data-owns-escape
               data-scrollable
               aria-label={local.label ?? i18n.t("ui.lineComment.submit")}
+              aria-expanded={listbox().open}
+              aria-controls={listbox().open ? listbox().listboxId : undefined}
+              aria-activedescendant={listbox().activeOptionId}
               dir="auto"
               rows={local.rows ?? (local.variant === "compact" ? 1 : 4)}
               placeholder={local.placeholder ?? i18n.t("ui.lineComment.contextPlaceholder")}
@@ -377,7 +385,7 @@ export function LineCommentEditor(props: LineCommentEditorProps) {
               }}
             />
             <Show when={view().mentionItems.length > 0}>
-              <div data-slot="line-comment-v2-mention-list">
+              <div id={listbox().listboxId} role="listbox" data-slot="line-comment-v2-mention-list">
                 <For each={view().mentionItems}>
                   {(path, index) => {
                     const directory = path.endsWith("/") ? path : pathDirectory(path)
@@ -386,6 +394,9 @@ export function LineCommentEditor(props: LineCommentEditorProps) {
                     return (
                       <button
                         type="button"
+                        id={listbox().optionId(index())}
+                        role="option"
+                        aria-selected={listbox().selected(path)}
                         data-slot="line-comment-v2-mention-item"
                         data-active={view().activeMentionPath === path ? "" : undefined}
                         onMouseDown={(event) => event.preventDefault()}
