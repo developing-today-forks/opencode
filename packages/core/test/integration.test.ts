@@ -379,14 +379,79 @@ describe("Integration", () => {
         yield* integrations.oauth.complete({ integrationID, attemptID: attempt.attemptID }).pipe(Effect.flip),
       ).toBeInstanceOf(Integration.CodeRequiredError)
       expect(closed).toBe(false)
-      yield* integrations.oauth.cancel({
-        integrationID: Integration.ID.make("other"),
-        attemptID: attempt.attemptID,
-      })
+      expect(
+        yield* integrations.oauth
+          .cancel({
+            integrationID: Integration.ID.make("other"),
+            attemptID: attempt.attemptID,
+          })
+          .pipe(Effect.flip),
+      ).toBeInstanceOf(Integration.AttemptNotFoundError)
       expect(closed).toBe(false)
       yield* integrations.oauth.cancel({ integrationID, attemptID: attempt.attemptID })
       expect(closed).toBe(true)
       expect(yield* credentials.list(integrationID)).toEqual([])
+    }),
+  )
+
+  it.effect("cancel reports unknown attempts and stays idempotent for settled attempts", () =>
+    Effect.gen(function* () {
+      const integrations = yield* Integration.Service
+      const integrationID = Integration.ID.make("openai")
+      const methodID = Integration.MethodID.make("chatgpt")
+      yield* integrations.transform((editor) =>
+        editor.method.update({
+          integrationID,
+          method: { id: methodID, type: "oauth", label: "ChatGPT" },
+          authorize: () =>
+            Effect.succeed({
+              mode: "code" as const,
+              url: "https://example.com/authorize",
+              instructions: "Paste the code",
+              callback: (code: string) =>
+                Effect.succeed(
+                  Credential.OAuth.make({
+                    type: "oauth",
+                    methodID,
+                    access: "access",
+                    refresh: "refresh",
+                    expires: 1,
+                    metadata: { code },
+                  }),
+                ),
+            }),
+        }),
+      )
+
+      // Unknown attempt IDs report AttemptNotFoundError on both transports,
+      // matching status/complete instead of a false success.
+      const unknown = Integration.AttemptID.make("unknown-attempt")
+      expect(yield* integrations.oauth.cancel({ integrationID, attemptID: unknown }).pipe(Effect.flip)).toBeInstanceOf(
+        Integration.AttemptNotFoundError,
+      )
+      expect(
+        yield* integrations.command.cancel({ integrationID, attemptID: unknown }).pipe(Effect.flip),
+      ).toBeInstanceOf(Integration.AttemptNotFoundError)
+
+      // A settled attempt is still matched: cancel stays a no-op success and
+      // the terminal record remains readable through status.
+      const attempt = yield* integrations.oauth.connect({ integrationID, methodID })
+      yield* integrations.oauth.complete({ integrationID, attemptID: attempt.attemptID, code: "1234" })
+      expect((yield* integrations.oauth.status({ integrationID, attemptID: attempt.attemptID })).status).toBe(
+        "complete",
+      )
+      yield* integrations.oauth.cancel({ integrationID, attemptID: attempt.attemptID })
+      expect((yield* integrations.oauth.status({ integrationID, attemptID: attempt.attemptID })).status).toBe(
+        "complete",
+      )
+
+      // A cancelled pending attempt is gone: a second cancel reports not
+      // found, exactly like status does for the same ID.
+      const pending = yield* integrations.oauth.connect({ integrationID, methodID })
+      yield* integrations.oauth.cancel({ integrationID, attemptID: pending.attemptID })
+      expect(
+        yield* integrations.oauth.cancel({ integrationID, attemptID: pending.attemptID }).pipe(Effect.flip),
+      ).toBeInstanceOf(Integration.AttemptNotFoundError)
     }),
   )
 

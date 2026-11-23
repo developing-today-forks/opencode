@@ -232,10 +232,26 @@ export const IntegrationHandler = HttpApiBuilder.group(Api, "server.integration"
         "integration.oauth.cancel",
         Effect.fn(function* (ctx) {
           const service = yield* Integration.Service
-          yield* service.oauth.cancel({
-            integrationID: ctx.params.integrationID,
-            attemptID: ctx.params.attemptID,
-          })
+          if (!(yield* service.get(ctx.params.integrationID)))
+            return yield* new IntegrationNotFoundError({
+              integrationID: ctx.params.integrationID,
+              message: `Integration not found: ${ctx.params.integrationID}`,
+            })
+          yield* service.oauth
+            .cancel({
+              integrationID: ctx.params.integrationID,
+              attemptID: ctx.params.attemptID,
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new IntegrationAttemptNotFoundError({
+                    integrationID: error.integrationID,
+                    attemptID: error.attemptID,
+                    message: `OAuth attempt not found: ${error.attemptID}`,
+                  }),
+              ),
+            )
           return HttpApiSchema.NoContent.make()
         }),
       )
@@ -299,10 +315,26 @@ export const IntegrationHandler = HttpApiBuilder.group(Api, "server.integration"
         "integration.command.cancel",
         Effect.fn(function* (ctx) {
           const service = yield* Integration.Service
-          yield* service.command.cancel({
-            integrationID: ctx.params.integrationID,
-            attemptID: ctx.params.attemptID,
-          })
+          if (!(yield* service.get(ctx.params.integrationID)))
+            return yield* new IntegrationNotFoundError({
+              integrationID: ctx.params.integrationID,
+              message: `Integration not found: ${ctx.params.integrationID}`,
+            })
+          yield* service.command
+            .cancel({
+              integrationID: ctx.params.integrationID,
+              attemptID: ctx.params.attemptID,
+            })
+            .pipe(
+              Effect.mapError(
+                (error) =>
+                  new IntegrationAttemptNotFoundError({
+                    integrationID: error.integrationID,
+                    attemptID: error.attemptID,
+                    message: `Command attempt not found: ${error.attemptID}`,
+                  }),
+              ),
+            )
           return HttpApiSchema.NoContent.make()
         }),
       )

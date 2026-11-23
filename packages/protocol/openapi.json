@@ -7885,11 +7885,21 @@
             }
           },
           "404": {
-            "description": "LocationNotFoundError",
+            "description": "IntegrationNotFoundError | IntegrationAttemptNotFoundError | LocationNotFoundError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/IntegrationNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationAttemptNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
                 }
               }
             }
@@ -8329,11 +8339,21 @@
             }
           },
           "404": {
-            "description": "LocationNotFoundError",
+            "description": "IntegrationNotFoundError | IntegrationAttemptNotFoundError | LocationNotFoundError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/IntegrationNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/IntegrationAttemptNotFoundErrorEncoded"
+                    },
+                    {
+                      "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
+                    }
+                  ]
                 }
               }
             }
