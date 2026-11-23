@@ -1,4 +1,5 @@
 import { Hono } from "hono"
+import { readBoundedJson } from "./body"
 
 const page = `<!doctype html>
 <html lang="en">
@@ -160,9 +161,14 @@ const page = `<!doctype html>
 
 // opncd.ai is the retired session-sharing host. V1 clients still create, sync, and remove shares on this host, and the V1 GitHub Action fails its run when share
 // creation fails. Accept those requests without storing anything so existing clients keep working.
+
+// Share creation payloads are a single short session id, so the JSON body is
+// capped at 16 KiB under the shared bounded-body policy in src/body.ts.
+const shareBodyLimit = 16 * 1024
+
 export default new Hono()
   .post("/api/share", async (c) => {
-    const body = await c.req.json<{ sessionID: string }>()
+    const body = await readBoundedJson<{ sessionID: string }>(c.req, shareBodyLimit)
     const id = body.sessionID.slice(-8)
     return c.json({ id, secret: "discontinued", url: new URL(`/share/${id}`, c.req.url).toString() })
   })
