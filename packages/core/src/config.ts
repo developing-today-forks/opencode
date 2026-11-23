@@ -562,13 +562,21 @@ export const layer = (options?: Options) =>
       const writePatch = Effect.fnUntraced(function* (filepath: string, patch: Patch) {
         const text = (yield* fs.readFileStringSafe(filepath)) ?? "{}\n"
         const updated = yield* Effect.try({
-          try: () =>
-            applyEdits(
-              text,
-              modify(text, ["shell"], patch.shell ?? undefined, {
-                formattingOptions: { tabSize: 2, insertSpaces: true },
-              }),
-            ),
+          try: () => {
+            const formattingOptions = { tabSize: 2, insertSpaces: true }
+            let result = text
+            if (patch.shell !== undefined)
+              result = applyEdits(result, modify(result, ["shell"], patch.shell ?? undefined, { formattingOptions }))
+            // Provider definitions persist as plain config data. API keys are
+            // never part of a patch: they live in the credential store under
+            // the provider's own integration ID.
+            for (const [providerID, provider] of Object.entries(patch.providers ?? {}))
+              result = applyEdits(
+                result,
+                modify(result, ["providers", providerID], provider ?? undefined, { formattingOptions }),
+              )
+            return result
+          },
           catch: (cause) => new FSUtil.FileSystemError({ method: "config.update", cause }),
         })
         // Atomic replace via the shared #1345 contract: a crash mid-write never
