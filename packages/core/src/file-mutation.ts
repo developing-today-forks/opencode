@@ -200,10 +200,17 @@ export const node = makeLocationNode({ service: Service, layer, deps: [FileAcces
 // TODO: Notify LSP and collect diagnostics after LSP runtime exists.
 // TODO: Design multi-file transactions / rollback if patch needs atomic edits.
 // Until then, edits are sequential and report partial application.
-// Crash recovery between Tool.Called and durable settlement is defined: a
-// mutating call left unsettled by a dead process is reconciled on resume with
-// a `tool.interrupted` outcome and never re-executed automatically
-// (SessionRunner.settleStaleToolCalls in session/runner/llm.ts). Still open:
-// the mutation result is not recorded durably before settlement, so
-// reconciliation cannot prove whether a given change landed, only warn that
-// it may have.
+// Crash recovery between Tool.Called and durable settlement is defined, and
+// recovery never re-executes a call. The restart sweep
+// (SessionRestart.resumeSuspendedSessions in session/execution/restart.ts)
+// settles interrupted mutation calls from the durable history: a `write`
+// call's recorded input fully determines its post-state, so the sweep
+// verifies it against the filesystem — an exact match settles as success, a
+// missing target settles as failed (verified not applied), and any other
+// content settles as failed unconfirmed. `edit`/`patch` post-states cannot
+// be derived from their recorded inputs, so they settle as failed
+// unconfirmed. A session drained without the sweep keeps the runner's
+// warn-only `tool.interrupted` settlement (SessionRunner.settleStaleToolCalls
+// in session/runner/llm.ts). This layer stays crash-agnostic on purpose: a
+// settlement decision needs the session history, which only the sweep and
+// the runner own.

@@ -5,16 +5,22 @@ import { isReadonlyArrayNonEmpty } from "effect/Array"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { ID } from "@opencode/schema/shell"
 import { FSUtil } from "@opencode/util/fs-util"
+import { Bom } from "@opencode/util/bom"
 import { BlobStore } from "../../blob-store.js"
 import { Bus } from "../../bus.js"
 import { Database } from "../../database/database.js"
 import { Environment } from "../../environment/index.js"
+import { FileAccess } from "../../file-access.js"
+import { FileMutation } from "../../file-mutation.js"
 import { Instance } from "../../instance/service.js"
 import { Job } from "../../job.js"
 import { CodeModeJob } from "../../codemode/job.js"
 import { Session } from "../../session.js"
 import { Shell } from "../../shell.js"
 import { ShellTool } from "../../tool/plugin/shell.js"
+import { EditTool } from "../../tool/plugin/edit.js"
+import { PatchTool } from "../../tool/plugin/patch.js"
+import { WriteTool } from "../../tool/plugin/write.js"
 import { VideoGenerateTool } from "../../tool/plugin/video-generate.js"
 import { VideoGeneration } from "../../video-generation.js"
 import { SessionEvent } from "../event.js"
@@ -343,6 +349,144 @@ export const layer = (options?: Options) =>
         )
       })
 
+      // A server that died after a file mutation landed but before the tool result was recorded leaves the
+      // call running in an incomplete message: the filesystem and the session history silently disagree, and
+      // a blind retry could repeat a non-idempotent mutation. Recovery never re-executes a call; it settles
+      // each interrupted mutation call from durable facts alone. A `write` call's recorded input fully
+      // determines its post-state, so it is verified against the file: an exact match settles as success (the
+      // mutation took effect and must not be repeated), a missing target settles as failed (verified not
+      // applied), and any other content settles as failed unconfirmed — a formatter's output or a later edit
+      // is indistinguishable from a write that never landed. `edit` and `patch` post-states cannot be derived
+      // from their recorded inputs, so they settle as failed unconfirmed. Settlement publishes only the
+      // terminal tool event; it writes no files, so session revert state is untouched, and a later sweep
+      // finds no running parts left to settle.
+      const mutationTools: ReadonlySet<string> = new Set([WriteTool.name, EditTool.name, PatchTool.name])
+
+      const interruptedFailure = (message: string) => ({ type: "tool.interrupted", message })
+
+      // The session Location's file access and environment, booted to verify an interrupted write against
+      // the disk it targeted. Absent when the session or its directory is gone: writes then settle
+      // unconfirmed rather than blocking the sweep.
+      const fileServicesOf = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+        const session = yield* store.get(sessionID)
+        if (!session) return Option.none()
+        return yield* Effect.all([
+          Effect.serviceOption(FileAccess.Service),
+          Effect.serviceOption(Environment.Service),
+        ]).pipe(
+          Effect.map((found) => Option.all(found)),
+          instances.provide(session),
+          Effect.catchTag("FileSystem.DirectoryNotFoundError", () => Effect.succeed(Option.none())),
+        )
+      })
+
+      type WriteVerdict =
+        | { readonly kind: "applied" }
+        | { readonly kind: "not-applied" }
+        | { readonly kind: "unverified"; readonly reason: string }
+
+      const verifyWrite = Effect.fnUntraced(function* (
+        services: Option.Option<readonly [FileAccess.Interface, Environment.Interface]>,
+        input: Record<string, unknown>,
+      ): Effect.fn.Return<WriteVerdict> {
+        // Durable histories recorded before the write schema settled on `path` name the target `filePath`.
+        const path = typeof input.path === "string" ? input.path : input.filePath
+        const content = input.content
+        if (typeof path !== "string" || typeof content !== "string")
+          return { kind: "unverified", reason: "its recorded input does not name a path and content" }
+        if (Option.isNone(services))
+          return { kind: "unverified", reason: "its target could not be read during recovery" }
+        const [access, environment] = services.value
+        const place = yield* access.locate(path).pipe(Effect.option)
+        if (Option.isNone(place))
+          return { kind: "unverified", reason: "its target could not be located during recovery" }
+        if (place.value.environment.id !== environment.id)
+          return {
+            kind: "unverified",
+            reason: "its target lives in another environment and could not be read during recovery",
+          }
+        const current = yield* FileMutation.readOptionalText(environment.files, place.value.absolute).pipe(
+          Effect.catchTag("Environment.WrongKind", () => Effect.succeed("not-applied" as const)),
+          Effect.catchTag("Environment.Failed", () => Effect.succeed("unverified" as const)),
+        )
+        if (current === "not-applied") return { kind: "not-applied" }
+        if (current === "unverified")
+          return { kind: "unverified", reason: "its target could not be read during recovery" }
+        if (current === undefined) return { kind: "not-applied" }
+        return current.text === Bom.split(content).text
+          ? { kind: "applied" }
+          : {
+              kind: "unverified",
+              reason:
+                "the file exists but its contents do not match the recorded write (it may have been reformatted or changed since)",
+            }
+      })
+
+      const settleInterruptedCalls = Effect.fnUntraced(function* (sessionID: SessionSchema.ID) {
+        const calls = (yield* SessionHistory.incompleteAssistants(db, sessionID)).flatMap((message) =>
+          message.type === "assistant"
+            ? message.content.flatMap((part) =>
+                part.type === "tool" && part.state.status === "running" && mutationTools.has(part.name)
+                  ? [{ assistantMessageID: message.id, part }]
+                  : [],
+              )
+            : [],
+        )
+        if (calls.length === 0) return
+        const services = yield* fileServicesOf(sessionID)
+        yield* Effect.forEach(
+          calls,
+          Effect.fnUntraced(function* (call) {
+            const state = call.part.state
+            if (state.status !== "running") return
+            const executed = call.part.executed === true
+            if (call.part.name === WriteTool.name) {
+              const verdict = yield* verifyWrite(services, state.input)
+              if (verdict.kind === "applied") {
+                yield* bus.publish(SessionEvent.Tool.Success, {
+                  sessionID,
+                  assistantMessageID: call.assistantMessageID,
+                  id: call.part.id,
+                  content: [
+                    {
+                      type: "text",
+                      text: `Recovered after the server stopped: ${String(state.input.path ?? state.input.filePath)} already contains exactly the content this write recorded, so the write took effect and was not repeated.`,
+                    },
+                  ],
+                  metadata: { recovery: "interrupted", verified: "applied" },
+                  executed,
+                })
+                return
+              }
+              yield* bus.publish(SessionEvent.Tool.Failed, {
+                sessionID,
+                assistantMessageID: call.assistantMessageID,
+                id: call.part.id,
+                error: interruptedFailure(
+                  verdict.kind === "not-applied"
+                    ? "This write was interrupted before its result was recorded, and recovery verified its target file does not exist, so the write did not take effect. It was settled as failed without being re-executed; reissue it if it is still needed."
+                    : `This write was interrupted before its result was recorded, and recovery could not confirm it took effect: ${verdict.reason}. It was settled as failed without being re-executed; inspect the file before retrying.`,
+                ),
+                metadata: { recovery: "interrupted", verified: verdict.kind },
+                executed,
+              })
+              return
+            }
+            yield* bus.publish(SessionEvent.Tool.Failed, {
+              sessionID,
+              assistantMessageID: call.assistantMessageID,
+              id: call.part.id,
+              error: interruptedFailure(
+                `This ${call.part.name} call was interrupted before its result was recorded. Its file effect cannot be verified from the recorded input, so it was settled as failed without being re-executed; inspect the affected files before retrying.`,
+              ),
+              metadata: { recovery: "interrupted", verified: "unverified" },
+              executed,
+            })
+          }),
+          { discard: true },
+        )
+      })
+
       const deliverSubagentSafe = Effect.fnUntraced(function* (
         notices: Notices,
         notificationID: Job.Background["notificationID"],
@@ -495,6 +639,16 @@ export const layer = (options?: Options) =>
               settleBackgroundedCalls(sessionID, notices, reattached).pipe(
                 Effect.catch((error) =>
                   Effect.logWarning("failed to settle backgrounded shell calls", { sessionID, error }),
+                ),
+              ),
+            { discard: true },
+          )
+          yield* Effect.forEach(
+            suspended,
+            (sessionID) =>
+              settleInterruptedCalls(sessionID).pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning("failed to settle interrupted file mutation calls", { sessionID, error }),
                 ),
               ),
             { discard: true },
