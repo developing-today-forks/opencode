@@ -63,8 +63,10 @@ export interface Interface {
   /** Selects the Session, agent, instructions, and tools used by subsequent work. */
   readonly select: (sessionID: SessionSchema.ID) => Effect.Effect<Selection, AgentNotFoundError>
   /** Resolves the model and active history for that selection. `chosen` is a route member a
-   * turn already continues on (the next member after a failure with output): it is used as
-   * is, since resolving again could choose a different member or claim a probe. */
+   * turn already continues on (the next member after a failure with output): resolving again
+   * could choose a different member, so it is kept — unless the active history has outgrown
+   * its per-target context ceiling, in which case its own fallback chain is walked to the
+   * first later member that fits (#2680). */
   readonly load: (
     selection: Selection,
     chosen?: SessionRunnerModel.Resolved,
@@ -122,6 +124,70 @@ const layer = Layer.effect(
       request: { readonly kind: SessionRequestKind; readonly agent: Agent.ID },
       requestTokens?: number,
     ) => models.resolve(session, model.catalog, request, requestTokens)
+
+    // A routed resolution spends a bench probe claim at pick time (#1478); a member load
+    // resolves but never attempts must hand its claim back, the same release title
+    // generation performs for its unused resolutions.
+    const releaseProbeClaim = (resolved: SessionRunnerModel.Resolved) => {
+      const claim = resolved.routing?.probeClaim
+      if (!claim || !resolved.routing) return
+      ModelRoute.releaseBenchProbe(resolved.routing.target, undefined, claim.claimedAt, claim.token)
+      if (claim.credentialID)
+        ModelRoute.releaseBenchProbe(resolved.routing.target, claim.credentialID, claim.claimedAt, claim.token)
+    }
+
+    /** The member a continuation should actually run on, when the chosen one no longer
+     * fits (#2680). The member a turn continues on was picked by the failed step's
+     * fallback, which judged per-target context ceilings with the request size captured
+     * when the failed member was resolved — before that step's output entered the
+     * history. Re-judged here, where the active history is read: when the member no
+     * longer fits, its own fallback chain (which skips every member already served) is
+     * walked to the first member that fits the active size. Any doubt — no routing, an
+     * unknown size, a route definition that no longer names the member, a fallback that
+     * fails — returns undefined and keeps the chosen member, so automatic compaction
+     * still gets its chance, the same degrade the sized initial resolution makes. */
+    const fitContinuation = Effect.fn("SessionContext.fitContinuation")(function* (
+      selection: Selection,
+      chosen: SessionRunnerModel.Resolved,
+      initial: Loaded["initial"],
+      messages: ReadonlyArray<SessionMessage.Info>,
+    ) {
+      const routing = chosen.routing
+      if (!routing) return undefined
+      const requestTokens = SessionCompaction.estimateHistoryRequest({
+        agent: selection.agent,
+        model: { ref: chosen.ref, capabilities: chosen.capabilities },
+        tools: selection.tools,
+        initial,
+        messages,
+      })
+      if (requestTokens === undefined) return undefined
+      const selected = yield* models
+        .select(selection.session, model.catalog)
+        .pipe(Effect.orElseSucceed(() => undefined))
+      const definition = selected && ModelRoute.definition(selected.info)
+      if (!definition || definition.id !== routing.routeID) return undefined
+      const fits = (member: SessionRunnerModel.Resolved) => {
+        const target = member.routing?.target
+        const index = target && ModelRoute.memberIndex(definition, target)
+        return index === undefined || !ModelRoute.overLimit(definition, index, requestTokens)
+      }
+      if (fits(chosen)) return undefined
+      yield* Effect.logInfo("continuation member is over its context ceiling for the active history", {
+        routeID: routing.routeID,
+        from: `${routing.target.providerID}/${routing.target.id}`,
+        requestTokens,
+      })
+      releaseProbeClaim(chosen)
+      let candidate = yield* routing.fallback().pipe(Effect.orElseSucceed(() => undefined))
+      while (candidate) {
+        if (fits(candidate)) return candidate
+        releaseProbeClaim(candidate)
+        const next = candidate.routing?.fallback()
+        candidate = next ? yield* next.pipe(Effect.orElseSucceed(() => undefined)) : undefined
+      }
+      return undefined
+    })
 
     const selectTitle = Effect.fn("SessionContext.selectTitle")(function* (session: SessionSchema.Info) {
       const agent = yield* agents.get(Agent.ID.make("title"))
@@ -247,15 +313,42 @@ const layer = Layer.effect(
       selection: Selection,
       chosen?: SessionRunnerModel.Resolved,
     ) {
-      // A route member a turn already continues on is used as is: resolving again could choose another member.
+      // A route member a turn already continues on is kept: resolving again could choose
+      // another member. The one exception is a member the grown history no longer fits
+      // (#2680): fitContinuation walks its fallback chain to a later member that fits.
       if (chosen) {
-        const history = yield* SessionHistory.entriesForRunner(db, selection.session.id, selection.instructions, chosen.ref)
+        const history = yield* SessionHistory.entriesForRunner(
+          db,
+          selection.session.id,
+          selection.instructions,
+          chosen.ref,
+        )
+        const messages = history.entries.map((entry) => entry.message)
+        const fitted = yield* fitContinuation(selection, chosen, history.initial, messages)
+        if (!fitted) {
+          return {
+            session: selection.session,
+            agent: selection.agent,
+            model: chosen,
+            initial: history.initial,
+            messages,
+            tools: selection.tools,
+          }
+        }
+        // The substitute replays a different native-compaction boundary — a window only
+        // replays on the model that made it — so the history is re-read on its ref.
+        const refit = yield* SessionHistory.entriesForRunner(
+          db,
+          selection.session.id,
+          selection.instructions,
+          fitted.ref,
+        )
         return {
           session: selection.session,
           agent: selection.agent,
-          model: chosen,
-          initial: history.initial,
-          messages: history.entries.map((entry) => entry.message),
+          model: fitted,
+          initial: refit.initial,
+          messages: refit.entries.map((entry) => entry.message),
           tools: selection.tools,
         }
       }
