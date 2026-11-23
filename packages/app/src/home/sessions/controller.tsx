@@ -37,7 +37,7 @@ import {
 import { usePlatform } from "@/runtime/platform/platform"
 import { sessionLabel, sessionTitle } from "@/session/title"
 import { showToast } from "@/shell/notifications/toast"
-import { archiveHomeSession } from "./archive"
+import { archiveHomeSession, sessionArchiver } from "./archive"
 import { homeSessionsQuery, lookupHomeSession, projectSessionDirectories, projectSessionsQuery } from "./queries"
 import {
   HOME_SESSIONS_STALE_MS,
@@ -555,8 +555,7 @@ export function createHomeSessionsController(home: HomeController) {
         await archiveHomeSession({
           server: ServerConnection.key(conn),
           session,
-          // TODO: Restore archiving when the V2 client exposes a session archive API.
-          archive: async (_sessionID) => Promise.reject(new Error("Session archiving is unavailable")),
+          archive: sessionArchiver(ctx.sdk.api),
           remove() {},
           onError: (cause) =>
             showToast({

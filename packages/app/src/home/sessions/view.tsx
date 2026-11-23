@@ -53,8 +53,6 @@ import {
   type HomeSessionRowState,
 } from "./row-machine"
 
-const SHOW_HOME_SESSION_ARCHIVE = false
-
 const HOME_SECTION_LABEL = "text-v2-text-text-muted [font-weight:440]"
 
 const HOME_SESSION_SEARCH_RESULTS_ID = "home-session-search-results"
@@ -742,7 +740,7 @@ function HomeSessionRow(
           <div
             data-slot="home-session-editor"
             class="flex h-10 min-w-0 w-full flex-1 items-center py-3 ps-1.5 pe-3 md:ps-3"
-            classList={{ "gap-1.5": props.desktop, "gap-2": !props.desktop, "md:pe-10": SHOW_HOME_SESSION_ARCHIVE }}
+            classList={{ "gap-1.5": props.desktop, "gap-2": !props.desktop, "md:pe-10": true }}
           >
             <HomeSessionIndicators server={props.server} isOpenTab={props.isOpenTab} record={props.record} />
             <div data-slot="home-session-labels" class="contents">
@@ -809,7 +807,7 @@ function HomeSessionRow(
             transition-[background-color,color,box-shadow] duration-[120ms] ease-in-out
             hover:bg-v2-overlay-simple-overlay-hover
           `}
-          classList={{ "gap-1.5": props.desktop, "gap-2": !props.desktop, "md:pe-10": SHOW_HOME_SESSION_ARCHIVE }}
+          classList={{ "gap-1.5": props.desktop, "gap-2": !props.desktop, "md:pe-10": true }}
           onMouseDown={(event) => {
             if (event.button === 1) event.preventDefault()
           }}
@@ -937,29 +935,27 @@ function HomeSessionRow(
           </Menu.Content>
         </Menu.Portal>
       </Menu>
-      <Show when={SHOW_HOME_SESSION_ARCHIVE}>
-        <div
-          class={`
+      <div
+        class={`
             hover-reveal absolute right-1.5 top-1/2 flex -translate-y-1/2 items-center gap-1
             group-hover/session:opacity-100 focus-within:opacity-100
           `}
-        >
-          <Tooltip class="flex shrink-0 items-center" placement="bottom" value={props.language.t("common.archive")}>
-            <IconButton
-              data-action="home-session-archive"
-              variant="ghost-muted"
-              size="large"
-              icon={<Icon name="archive" />}
-              aria-label={props.language.t("common.archive")}
-              onClick={(event) => {
-                event.preventDefault()
-                event.stopPropagation()
-                void props.onArchiveSession(props.record.session)
-              }}
-            />
-          </Tooltip>
-        </div>
-      </Show>
+      >
+        <Tooltip class="flex shrink-0 items-center" placement="bottom" value={props.language.t("common.archive")}>
+          <IconButton
+            data-action="home-session-archive"
+            variant="ghost-muted"
+            size="large"
+            icon={<Icon name="archive" />}
+            aria-label={props.language.t("common.archive")}
+            onClick={(event) => {
+              event.preventDefault()
+              event.stopPropagation()
+              void props.onArchiveSession(props.record.session)
+            }}
+          />
+        </Tooltip>
+      </div>
     </div>
   )
 }
