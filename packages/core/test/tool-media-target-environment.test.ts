@@ -128,7 +128,7 @@ const setup = () =>
     return { run, notice, notices, session }
   })
 
-describe("experimental_image_generate", () => {
+describe("generate_image", () => {
   it.live("reads its input and saves its output in the resolved target's environment, not the session's", () =>
     withTempDir((tmp) => {
       const other = elsewhere(tmp.path)
@@ -188,7 +188,7 @@ describe("experimental_image_generate", () => {
   )
 })
 
-describe("experimental_video_generate", () => {
+describe("generate_video", () => {
   it.effect("reads its input and saves its output in the resolved target's environment, not the session's", () =>
     withTempDir((tmp) => {
       const other = elsewhere(tmp.path)

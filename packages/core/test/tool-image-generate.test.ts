@@ -171,7 +171,7 @@ const text = (result: { readonly content?: ReadonlyArray<Tool.Content> }) =>
   result.content?.[0]?.type === "text" ? result.content[0].text : undefined
 const failure = (result: { readonly error?: { readonly message: string } }) => result.error?.message
 
-describe("experimental_image_generate", () => {
+describe("generate_image", () => {
   it.live("is registered only while an image model is available", () =>
     Effect.gen(function* () {
       yield* setup()
@@ -270,7 +270,7 @@ describe("experimental_image_generate", () => {
         },
       ])
       expect(fixture.assertions.map((item) => [item.action, item.resources])).toEqual([
-        ["experimental_image_generate", ["test/painter"]],
+        ["generate_image", ["test/painter"]],
         ["edit", ["out.png"]],
         ["read", ["in.png"]],
       ])
@@ -364,7 +364,7 @@ describe("experimental_image_generate", () => {
       fixture.deny = "edit"
       const result = yield* run({ prompt: "x", path: "out.png" })
       expect(result.status).toBe("error")
-      expect(fixture.assertions.map((item) => item.action)).toEqual(["experimental_image_generate", "edit"])
+      expect(fixture.assertions.map((item) => item.action)).toEqual(["generate_image", "edit"])
       expect(fixture.requests).toEqual([])
     }),
   )
@@ -458,7 +458,7 @@ describe("experimental_image_generate", () => {
       const result = yield* run({ prompt: "x", images: ["https://example.invalid/cat.png"] })
       expect(result.status).toBe("error")
       expect(fixture.assertions.map((item) => [item.action, item.resources])).toEqual([
-        ["experimental_image_generate", ["test/painter"]],
+        ["generate_image", ["test/painter"]],
         ["webfetch", ["https://example.invalid/cat.png"]],
       ])
       expect(fixture.requests).toEqual([])

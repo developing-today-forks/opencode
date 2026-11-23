@@ -2579,6 +2579,7 @@ export type ConfigModelRoutes = {
   [x: string]: {
     name?: string
     system?: string
+    class?: string
     targets?: Array<ConfigModelRouteTarget>
     include?: Array<string>
     exclude?: Array<string>
