@@ -88,11 +88,14 @@ describe("learned bench granularity (code#10367 points 3-4)", () => {
     for (let window = 3; window < 5; window++)
       rows.push(...modelWindow("reset-door", "luna", ["high", "medium"], T0 + window * GAP))
     rows.push(row("reset-door", "luna", "high", "failure", T0 + 5 * GAP))
+    ModelRouteGranularity.observeAttemptRows(rows)
     expect(ModelRouteGranularity.modelLevel("reset-door", "luna")).toBe("effort")
     expect(state("reset-door/luna", "model")?.concordantWindows).toBe(2)
     // The third fresh window earns it.
-    rows.push(...modelWindow("reset-door", "luna", ["high", "medium"], T0 + 6 * GAP))
-    rows.push(row("reset-door", "luna", "high", "failure", T0 + 7 * GAP))
+    ModelRouteGranularity.observeAttemptRows([
+      ...modelWindow("reset-door", "luna", ["high", "medium"], T0 + 6 * GAP),
+      row("reset-door", "luna", "high", "failure", T0 + 7 * GAP),
+    ])
     expect(ModelRouteGranularity.modelLevel("reset-door", "luna")).toBe("model")
   })
 
