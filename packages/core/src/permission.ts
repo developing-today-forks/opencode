@@ -1,8 +1,9 @@
 export * as Permission from "./permission.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
-import { Context, Deferred, Effect, Layer, Schema, Scope } from "effect"
+import { Context, Deferred, Duration, Effect, Layer, Schema, Scope, Stream } from "effect"
 import { Permission } from "@opencode/schema/permission"
+import { SessionEvent } from "@opencode/schema/session-event"
 import type { Tool } from "@opencode/schema/tool"
 import { Bus } from "./bus.js"
 import { Location } from "./location.js"
@@ -62,6 +63,16 @@ export { Event } from "@opencode/schema/permission"
  */
 export const Unattended = Context.Reference<Permission.Ruleset | undefined>("@opencode/Permission/Unattended", {
   defaultValue: () => undefined,
+})
+
+/**
+ * How long a request created by `ask` may stay pending unanswered before it is rejected and dropped. An `ask`
+ * entry has no awaiter to clean up after it (unlike `assert`, whose entry is deleted when the awaiting fiber
+ * settles), so without a bound, repeated unanswered creates — the `session.permission.create` API path — would
+ * grow the pending map until the location closes.
+ */
+export const AskTimeout = Context.Reference<Duration.Duration>("@opencode/Permission/AskTimeout", {
+  defaultValue: () => Duration.minutes(10),
 })
 
 export class DeclinedError extends Schema.TaggedError<DeclinedError>()("Permission.DeclinedError", {}) {}
@@ -173,24 +184,43 @@ const layer = Layer.effect(
     const sessions = yield* SessionStore.Service
     const saved = yield* PermissionSaved.Service
     const hooks = yield* PluginHooks.Service
+    const lifetime = yield* Scope.Scope
     const pending = new Map<ID, Pending>()
     const parents = new Map<string, Tool.CallID>()
     let closed = false
 
+    // The one settlement for a request nobody answered: announce the rejection, then fail its waiter.
+    const reject = (item: Pending) =>
+      bus
+        .publish(Permission.Event.Replied, {
+          sessionID: item.request.sessionID,
+          requestID: item.request.id,
+          reply: "reject",
+        })
+        .pipe(Effect.ensuring(Deferred.fail(item.deferred, new DeclinedError())))
+
     const close = Effect.gen(function* () {
       closed = true
-      yield* Effect.forEach(Array.from(pending.values()), (item) =>
-        bus
-          .publish(Permission.Event.Replied, {
-            sessionID: item.request.sessionID,
-            requestID: item.request.id,
-            reply: "reject",
-          })
-          .pipe(Effect.ensuring(Deferred.fail(item.deferred, new DeclinedError()))),
-      )
+      yield* Effect.forEach(Array.from(pending.values()), reject)
       pending.clear()
     }).pipe(Effect.uninterruptible)
     yield* Effect.addFinalizer(() => close)
+
+    // A removed session's pending requests are settled the way `close` settles every request, so an
+    // unanswered ask never outlives the session that owns it. Removal also recurses into children, and
+    // each child publishes its own Deleted, so every session's entries are purged by its own event.
+    const forgetSession = (sessionID: SessionSchema.ID) =>
+      Effect.uninterruptible(
+        Effect.forEach(
+          Array.from(pending.values()).filter((item) => item.request.sessionID === sessionID),
+          (item) => Effect.sync(() => pending.delete(item.request.id)).pipe(Effect.andThen(reject(item))),
+          { discard: true },
+        ),
+      )
+    yield* bus.subscribe(SessionEvent.Deleted).pipe(
+      Stream.runForEach((event) => forgetSession(event.data.sessionID)),
+      Effect.forkScoped({ startImmediately: true }),
+    )
 
     const savedRules = Effect.fnUntraced(function* () {
       return (yield* saved.list({ projectID: location.project.id })).map(
@@ -300,11 +330,30 @@ const layer = Layer.effect(
         }),
       )
 
+    // Bounds the lifetime of an `ask`-created entry: once the timeout passes, a still-pending entry is
+    // dropped and settled as rejected. The check and delete run uninterruptibly with no yield between
+    // them, so a racing `reply` either settled the entry first (the identity check then no-ops) or finds
+    // it gone. The fiber lives in the layer's scope, so location shutdown interrupts the wait.
+    const expire = (item: Pending, timeout: Duration.Duration) =>
+      Effect.sleep(timeout).pipe(
+        Effect.andThen(
+          Effect.uninterruptible(
+            Effect.gen(function* () {
+              if (pending.get(item.request.id) !== item) return
+              pending.delete(item.request.id)
+              yield* reject(item)
+            }),
+          ),
+        ),
+        Effect.forkIn(lifetime),
+        Effect.asVoid,
+      )
+
     const ask = Effect.fn("Permission.ask")(function* (input: AssertInput) {
       if (closed) return { id: input.id ?? ID.create(), effect: "deny" as const }
       const result = yield* evaluateInput(input)
       const value = request(input, result.message)
-      if (result.effect === "ask") yield* create(value, input.agent)
+      if (result.effect === "ask") yield* expire(yield* create(value, input.agent), yield* AskTimeout)
       return { id: value.id, effect: result.effect }
     })
 

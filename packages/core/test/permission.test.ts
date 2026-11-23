@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { Cause, Deferred, Exit, Effect, Fiber, Layer, Schema } from "effect"
+import { Cause, Deferred, Duration, Exit, Effect, Fiber, Layer, Schema } from "effect"
+import { TestClock } from "effect/testing"
+import { SessionEvent } from "@opencode/schema/session-event"
 import { Agent } from "@opencode/core/agent"
 import { Database } from "@opencode/core/database/database"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
@@ -79,6 +81,19 @@ function assertion(input: Partial<Permission.AssertInput> = {}) {
     resources: ["src/index.ts"],
     ...input,
   } satisfies Permission.AssertInput
+}
+
+// Bus-driven cleanup (expiry, the session-deletion purge) settles asynchronously; poll a read
+// until it shows the settled state instead of assuming one yield is enough.
+function eventually<A>(read: Effect.Effect<A>, predicate: (value: A) => boolean) {
+  return Effect.gen(function* () {
+    let value = yield* read
+    for (let attempt = 0; attempt < 200 && !predicate(value); attempt++) {
+      yield* Effect.yieldNow
+      value = yield* read
+    }
+    return value
+  })
 }
 
 function waitForRequest(input: Partial<Permission.AssertInput> = {}) {
@@ -1057,6 +1072,71 @@ describe("PermissionSaved.remove", () => {
       if (Exit.isFailure(exit)) {
         expect(Cause.squash(exit.cause)).toBeInstanceOf(PermissionSaved.NotFoundError)
       }
+    }),
+  )
+
+  it.effect("expires an unanswered ask once its timeout passes", () =>
+    Effect.gen(function* () {
+      yield* setup([])
+      const service = yield* Permission.Service
+      const id = Permission.ID.create("per_test")
+      const result = yield* service
+        .ask(assertion())
+        .pipe(Effect.provideService(Permission.AskTimeout, Duration.millis(50)))
+      expect(result).toEqual({ id, effect: "ask" })
+      expect(yield* service.get(id)).toBeDefined()
+
+      yield* TestClock.adjust(Duration.millis(50))
+
+      expect(yield* eventually(service.get(id), (value) => value === undefined)).toBeUndefined()
+      expect(yield* service.list()).toEqual([])
+      // The expired entry settled as rejected, so a late reply finds nothing to answer.
+      expect(yield* Effect.result(service.reply({ requestID: id, reply: "once" }))).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "Permission.NotFoundError", requestID: id },
+      })
+    }),
+  )
+
+  it.effect("does not expire a request a tool call is awaiting", () =>
+    Effect.gen(function* () {
+      yield* setup([])
+      const { service, fiber, request } = yield* waitForRequest()
+      // Well past the default ask timeout: the assert path owns its entry and is
+      // cleaned up by the awaiting fiber, never by the ask lifetime.
+      yield* TestClock.adjust(Duration.minutes(30))
+      expect(yield* service.get(request.id)).toBeDefined()
+      yield* service.reply({ requestID: request.id, reply: "once" })
+      yield* Fiber.join(fiber)
+      expect(yield* service.get(request.id)).toBeUndefined()
+    }),
+  )
+
+  it.effect("purges a session's pending requests when the session is deleted", () =>
+    Effect.gen(function* () {
+      yield* setup([])
+      yield* setup([], Session.ID.make("ses_other"))
+      const service = yield* Permission.Service
+      const bus = yield* Bus.Service
+      const mine = yield* service.ask(assertion({ id: Permission.ID.create("per_mine") }))
+      const other = yield* service.ask(
+        assertion({ id: Permission.ID.create("per_other"), sessionID: Session.ID.make("ses_other") }),
+      )
+      expect(mine.effect).toBe("ask")
+      expect(other.effect).toBe("ask")
+      expect(yield* service.list()).toHaveLength(2)
+
+      yield* bus.publish(SessionEvent.Deleted, { sessionID: Session.ID.make("ses_test") })
+
+      expect(yield* eventually(service.list(), (rows) => rows.length === 1)).toHaveLength(1)
+      expect(yield* service.forSession(Session.ID.make("ses_test"))).toEqual([])
+      expect(yield* service.get(Permission.ID.create("per_other"))).toBeDefined()
+      expect(
+        yield* Effect.result(service.reply({ requestID: Permission.ID.create("per_mine"), reply: "once" })),
+      ).toMatchObject({
+        _tag: "Failure",
+        failure: { _tag: "Permission.NotFoundError", requestID: Permission.ID.create("per_mine") },
+      })
     }),
   )
 })
