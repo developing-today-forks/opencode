@@ -36,7 +36,7 @@ interface ModelOptions {
 
 function model(packageName: string | undefined, options: ModelOptions = {}) {
   const info: Model.MutableInfo = {
-    id: ID.make("test-model"),
+    id: ID.make(options.modelID ?? "api-test-model"),
     modelID: ID.make(options.modelID ?? "api-test-model"),
     providerID: options.providerID ?? Provider.ID.make("test-provider"),
     name: "Test model",
@@ -69,7 +69,7 @@ const leaf = (providerID: string) =>
 
 /** A single-door route model carrying a definition, as config expansion builds it. */
 const route = (id: string, target: Info, routeClass?: string) => {
-  const target = ModelRoute.ref({ providerID: target.providerID, model: target.id })
+  const targetRef = ModelRoute.ref({ providerID: target.providerID, model: target.id })
   return Info.make({
     ...model(undefined),
     providerID: ModelRoute.PROVIDER_ID,
@@ -77,7 +77,7 @@ const route = (id: string, target: Info, routeClass?: string) => {
     settings: {
       [ModelRoute.SETTING]: {
         id,
-        targets: [target],
+        targets: [targetRef],
         targetVariants: [{}],
         health: ModelRoute.policy(),
         attempts: 1,
@@ -87,6 +87,30 @@ const route = (id: string, target: Info, routeClass?: string) => {
     },
   })
 }
+
+/** A route over several doors with an explicit node tree, as config expansion builds it. */
+const routeTree = (
+  id: string,
+  targets: ReadonlyArray<Info>,
+  nodes: ReadonlyArray<Record<string, unknown>>,
+  routeClass?: string,
+) =>
+  Info.make({
+    ...model(undefined),
+    providerID: ModelRoute.PROVIDER_ID,
+    id: ID.make(id),
+    settings: {
+      [ModelRoute.SETTING]: {
+        id,
+        targets: targets.map((item) => ModelRoute.ref({ providerID: item.providerID, model: item.id })),
+        targetVariants: targets.map(() => ({})),
+        health: ModelRoute.policy(),
+        attempts: 1,
+        ...(routeClass ? { class: routeClass } : {}),
+        nodes,
+      },
+    },
+  })
 
 const withResolver = <A, E>(
   models: ReadonlyArray<Info>,
@@ -276,6 +300,46 @@ describe("ModelResolver cross-route substitution (#12228)", () => {
         expect(substitutions()).toHaveLength(1)
         expect(substitutions()[0].candidates).toEqual(["route-b", "route-d"])
         expect(substitutions()[0].chosen).toBe("route-d")
+      }),
+    )
+  })
+
+  it.effect("the session's own route's class governs when a parent of another class nests it", () => {
+    ModelRoute.resetHealth()
+    ModelRoute.resetSelection()
+    captureDecisions()
+    const a = leaf("pa")
+    const c = leaf("pc")
+    const d = leaf("pd")
+    const e = leaf("pe")
+    const sub = route("sub", a, "frontier")
+    const parent = routeTree(
+      "parent",
+      [a, c],
+      [
+        { selection: "ordered", weights: [1, 1], children: [{ node: 1 }, { leaf: 1 }] },
+        { routeID: "sub", selection: "ordered", weights: [1], children: [{ leaf: 0 }] },
+      ],
+      "bulk",
+    )
+    const sibling = route("sibling", d, "frontier")
+    const bulk = route("bulk-route", e, "bulk")
+    return withResolver([a, c, d, e, sub, parent, sibling, bulk], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub, undefined, "s-anchor")
+        expect(String(first.routing?.target.providerID)).toBe("pa")
+        wall("pa")
+        wall("pc")
+        const next = yield* first.routing!.fallback()
+        // The parent (bulk) could not serve either — its own door is walled —
+        // and substitution is judged by the session's own route (frontier):
+        // the frontier sibling is entered, never the bulk route the serving
+        // parent's class would have named.
+        expect(next?.routing?.routeID).toBe(ID.make("sibling"))
+        expect(String(next?.routing?.target.providerID)).toBe("pd")
+        expect(substitutions()).toHaveLength(1)
+        expect(substitutions()[0].route_id).toBe("sub")
+        expect(substitutions()[0].detail).toEqual({ from: "sub", to: "sibling", class: "frontier" })
       }),
     )
   })

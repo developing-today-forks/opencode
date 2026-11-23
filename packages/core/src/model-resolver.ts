@@ -1580,7 +1580,7 @@ export const layer = Layer.effect(
     // Cross-route substitution (#12228, Drewry's 2026-11-22 policy): when a route
     // and every parent that nests it are exhausted — the whole route is walled —
     // the walk may enter another route, but only one of the same cost/capability
-    // class (config `class` on the route being left). Substitution never crosses
+    // class as the session's own route (config `class`). Substitution never crosses
     // classes: a session never lands on a more expensive or differently-capable
     // route by failing over, and ACP routes substitute only within ACP because
     // they declare their own class. A route that declares no class substitutes
@@ -1603,10 +1603,15 @@ export const layer = Layer.effect(
       cascade: CascadeState,
     ): Effect.Effect<Resolved | undefined, Error> =>
       Effect.gen(function* () {
-        const routeClass = ModelRoute.routeClass(from)
-        if (routeClass === undefined) return undefined
         if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
           cascade.chain.push({ definition: from, tried: new Set() })
+        // The class that governs is the session's own route's: the first route
+        // the walk stood on (the chain's head), not whichever route happens to
+        // be serving when the walk runs out — a parent of another class that
+        // nests the session's route must not widen where the session may land.
+        const anchor = cascade.chain[0]?.definition ?? from
+        const routeClass = ModelRoute.routeClass(anchor)
+        if (routeClass === undefined) return undefined
         // Substitution discovery is execution, not picker discovery (#230), as
         // in the parent cascade: candidates are the enabled route records.
         const available = yield* models.all().pipe(
@@ -1665,13 +1670,13 @@ export const layer = Layer.effect(
               row: {
                 time: Date.now(),
                 session_id: sessionID,
-                route_id: from.id,
-                selection: from.nodes[0]?.selection ?? "ordered",
+                route_id: anchor.id,
+                selection: anchor.nodes[0]?.selection ?? "ordered",
                 variant: requestedVariant,
-                candidates: candidates.map(({ substitute: entry }) => String(entry.id)),
+                candidates: candidates.map((entry) => String(entry.substitute.id)),
                 chosen: String(substitute.id),
                 reason: "cross-route-substitution",
-                detail: { from: String(from.id), to: String(substitute.id), class: routeClass },
+                detail: { from: String(anchor.id), to: String(substitute.id), class: routeClass },
               },
             })
             return resolved
