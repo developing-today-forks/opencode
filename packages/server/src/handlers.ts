@@ -1,6 +1,7 @@
 import { Layer } from "effect"
 import { GenerateHandler } from "./handlers/generate"
 import { CompletionsHandler } from "./handlers/completions"
+import { VoiceHandler } from "./handlers/voice"
 import { MessageHandler } from "./handlers/message"
 import { ModelHandler } from "./handlers/model"
 import { ProviderHandler } from "./handlers/provider"
@@ -23,6 +24,7 @@ import { ReferenceHandler } from "./handlers/reference"
 import { LocationHandler } from "./handlers/location"
 import { IntegrationHandler } from "./handlers/integration"
 import { WebSearchHandler } from "./handlers/websearch"
+import { UsageHandler } from "./handlers/usage"
 import { McpHandler } from "./handlers/mcp"
 import { CredentialHandler } from "./handlers/credential"
 import { RouteHandler } from "./handlers/route"
@@ -46,9 +48,11 @@ export const handlers = Layer.mergeAll(
   ModelHandler,
   GenerateHandler,
   CompletionsHandler,
+  VoiceHandler,
   ProviderHandler,
   IntegrationHandler,
   WebSearchHandler,
+  UsageHandler,
   McpHandler,
   CredentialHandler,
   RouteHandler,

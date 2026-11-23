@@ -1,14 +1,14 @@
 import fs from "node:fs/promises"
 import path from "node:path"
 import { expect } from "bun:test"
-import { LLMEvent, LLMResponse } from "@opencode/ai"
+import { LLMEvent, LLMResponse } from "@opencode/ai/effect"
 import { Generate, type CompletionInput } from "@opencode/core/generate"
 import { Embeddings, type EmbedInput } from "@opencode/core/embeddings"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { Effect, Layer, Stream } from "effect"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
-import { ServerFetch } from "../src/fetch"
+import { serveRoutes } from "./fixture/routes"
 import { MAX_JSON_BODY_BYTES, readBoundedJsonBody } from "../src/handlers/completions"
 import { Headers, HttpServerRequest } from "effect/http"
 
@@ -28,6 +28,14 @@ const fake = makeLocationNode({
   layer: Layer.succeed(
     Generate.Service,
     Generate.Service.of({
+      image: () => Effect.die("unused"),
+      decisions: () => Effect.die("unused"),
+      video: {
+        start: () => Effect.die("unused"),
+        status: () => Effect.die("unused"),
+        result: () => Effect.die("unused"),
+        cancel: () => Effect.die("unused"),
+      },
       text: () => Effect.die("unused"),
       complete: (input) => {
         captured.push(input)
@@ -87,15 +95,19 @@ const setup = Effect.gen(function* () {
       }),
     ),
   )
-  return yield* ServerFetch.make(
+  const server = yield* serveRoutes(
     {
       database: { path: ":memory:" },
       config: { directory: global },
       fs: { filewatcher: false },
       models: { fetch: false },
     },
-    { overrides: [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings)] },
+    [Generate.node.replace(fake), Embeddings.node.replace(fakeEmbeddings)],
   )
+  // The route models come from the config plugin, which loads after the server answers; /v1/models lists only
+  // what has loaded, so the test waits for it as a client would.
+  yield* server.pluginsLoaded(global)
+  return server.handler
 })
 
 const post = (handler: (request: Request) => Promise<Response>, body: unknown) =>

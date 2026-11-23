@@ -146,7 +146,7 @@ describe("std.bind", () => {
       runtime.execute(`const bound = std.bind(tools.host.echo, { aws_profile: "dev" }); return await bound({ text: "hi" })`),
     )
     expect(result).toMatchObject({ ok: true, value: "dev:hi", toolCalls: [{ name: "host.echo" }] })
-    expect(seen).toEqual([{ name: "host.echo", input: { text: "hi", aws_profile: "dev" } }])
+    expect(seen).toEqual([{ name: "host.echo", input: { text: "hi", aws_profile: "dev" }, key: expect.any(String) }])
   })
 })
 

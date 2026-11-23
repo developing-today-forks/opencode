@@ -12,6 +12,7 @@ import {
   type TreeSitterClient,
   type CliRenderer,
   type ScrollbackSurface,
+  type SyntaxStyle,
 } from "@opentui/core"
 import { entryBody, entryCanStream, entryDone, entryFlags } from "./entry.body"
 import { monoMarkdownRenderable, monoMarkdownTableOptions } from "./mono"
@@ -19,7 +20,7 @@ import { entryColor, entryLook, entrySyntax } from "./scrollback.shared"
 import { turnSummaryCommit } from "./turn-summary"
 import { entryWriter, sameEntryGroup, separatorRows, spacerWriter, turnSummaryWriter } from "./scrollback.writer"
 import { type RunTheme } from "./theme"
-import type { RunEntryBody, StreamCommit } from "./types"
+import type { RunEntryBody, ScrollbackOptions, StreamCommit } from "./types"
 
 type ActiveBody = Exclude<RunEntryBody, { type: "none" | "structured" }>
 
@@ -28,6 +29,7 @@ type ActiveEntry = {
   commit: StreamCommit
   surface: ScrollbackSurface
   renderable: TextRenderable | CodeRenderable | MarkdownRenderable
+  syntax?: SyntaxStyle
   content: string
   committedRows: number
   committedBlocks: number
@@ -47,15 +49,18 @@ function commitMarkdownBlocks(input: {
     return false
   }
 
-  const first = input.renderable._blockStates[input.startBlock]
-  const last = input.renderable._blockStates[input.endBlockExclusive - 1]
+  // One child per top-level block, in order.
+  const blocks = input.renderable.getChildren()
+  const first = blocks[input.startBlock]
+  const last = blocks[input.endBlockExclusive - 1]
   if (!first || !last) {
     return false
   }
 
-  const next = input.renderable._blockStates[input.endBlockExclusive]
-  const start = first.renderable.y
-  const end = next ? next.renderable.y : last.renderable.y + last.renderable.height
+  // A block goes out with the gap above it; the gap below waits for the next block, which may never show one.
+  const previous = blocks[input.startBlock - 1]
+  const start = previous ? previous.y + previous.height : first.y
+  const end = last.y + last.height
 
   input.beforeCommit?.()
   input.surface.commitRows(start, end, {
@@ -93,8 +98,10 @@ export class RunScrollbackStream {
   private shellOutput: () => boolean
   private mono: boolean
   private imagePreview: boolean
+  private markdown: ScrollbackOptions["markdown"]
   private destroyed = false
   private pendingThemes: RunTheme[] = []
+  private pendingStyles: SyntaxStyle[] = []
 
   constructor(
     private renderer: CliRenderer,
@@ -106,8 +113,10 @@ export class RunScrollbackStream {
       shellOutput?: () => boolean
       mono?: boolean
       imagePreview?: boolean
+      markdown?: ScrollbackOptions["markdown"]
     } = {},
   ) {
+    this.markdown = options.markdown
     this.treeSitterClient = options.treeSitterClient
     this.wrote = options.wrote ?? false
     this.shellOutput = options.shellOutput ?? (() => true)
@@ -128,12 +137,14 @@ export class RunScrollbackStream {
     // Rebuild the Markdown tree, keeping its source and printed block boundary.
     // Mono hooks are one-way, and ending the entry would lose open fence/list context.
     const next = this.createEntry(active.commit, active.body)
-    this.active = { ...active, surface: next.surface, renderable: next.renderable }
+    this.active = { ...active, surface: next.surface, renderable: next.renderable, syntax: next.syntax }
     active.surface.destroy()
+    active.syntax?.destroy()
     this.releasePendingThemes()
   }
 
   private releasePendingThemes(): void {
+    for (const style of this.pendingStyles.splice(0)) style.destroy()
     if (this.pendingThemes.length === 0) {
       return
     }
@@ -164,7 +175,10 @@ export class RunScrollbackStream {
     }
 
     active.renderable.fg = entryColor(active.commit, theme)
-    active.renderable.syntaxStyle = entrySyntax(theme)
+    const syntax = entrySyntax(theme, active.surface.renderContext.nativeScene)
+    if (active.syntax) this.pendingStyles.push(active.syntax)
+    active.syntax = syntax
+    active.renderable.syntaxStyle = syntax
   }
 
   private createEntry(commit: StreamCommit, body: ActiveBody): ActiveEntry {
@@ -172,6 +186,7 @@ export class RunScrollbackStream {
       startOnNewLine: entryFlags(commit).startOnNewLine,
     })
     const style = entryLook(commit, this.theme.entry)
+    const syntax = body.type === "text" ? undefined : entrySyntax(this.theme, surface.renderContext.nativeScene)
     const treeSitterClient = body.type === "text" ? undefined : (this.treeSitterClient ??= getTreeSitterClient())
     const renderable =
       body.type === "text"
@@ -186,7 +201,7 @@ export class RunScrollbackStream {
           ? new CodeRenderable(surface.renderContext, {
               content: "",
               filetype: body.filetype,
-              syntaxStyle: entrySyntax(this.theme),
+              syntaxStyle: syntax!,
               width: "100%",
               wrapMode: "word",
               drawUnstyledText: false,
@@ -196,11 +211,10 @@ export class RunScrollbackStream {
             })
           : new MarkdownRenderable(surface.renderContext, {
               content: "",
-              syntaxStyle: entrySyntax(this.theme),
+              syntaxStyle: syntax!,
               width: "100%",
               streaming: true,
-              internalBlockMode: "top-level",
-              tableOptions: this.mono ? monoMarkdownTableOptions : { widthMode: "content" },
+              tableOptions: this.mono ? monoMarkdownTableOptions : { style: "columns", widthMode: "content" },
               fg: entryColor(commit, this.theme),
               treeSitterClient,
             })
@@ -215,6 +229,7 @@ export class RunScrollbackStream {
       commit,
       surface,
       renderable,
+      syntax,
       content: "",
       committedRows: 0,
       committedBlocks: 0,
@@ -307,7 +322,10 @@ export class RunScrollbackStream {
     renderable.streaming = !done
     await active.surface.settle()
     this.releasePendingThemes()
-    const targetBlockCount = done ? renderable._blockStates.length : renderable._stableBlockCount
+    const blockCount = renderable.getChildren().length
+    // A committed block goes out once a block follows it, so its line ending is known; the last one waits for the
+    // caller's line ending at completion.
+    const targetBlockCount = done ? blockCount : Math.min(renderable.committedBlockCount, blockCount - 1)
     if (targetBlockCount <= active.committedBlocks) {
       return false
     }
@@ -318,7 +336,8 @@ export class RunScrollbackStream {
         renderable,
         startBlock: active.committedBlocks,
         endBlockExclusive: targetBlockCount,
-        trailingNewline: done && targetBlockCount === renderable._blockStates.length ? trailingNewline : false,
+        // Blocks followed by another end their rows; the gap above the next block goes out with that block.
+        trailingNewline: done ? trailingNewline : true,
         beforeCommit: () => this.flushPendingSpacer(active),
       })
     ) {
@@ -347,6 +366,7 @@ export class RunScrollbackStream {
       if (!active.surface.isDestroyed) {
         active.surface.destroy()
       }
+      active.syntax?.destroy()
       this.releasePendingThemes()
     }
 
@@ -454,7 +474,7 @@ export class RunScrollbackStream {
       return
     }
 
-    const body = entryBody(commit, { shellOutput: this.shellOutput(), mono: this.mono })
+    const body = entryBody(commit, { shellOutput: this.shellOutput(), mono: this.mono, markdown: this.markdown })
     if (body.type === "none") {
       if (entryDone(commit)) {
         this.markRendered(await this.finishActive(false))
@@ -504,6 +524,7 @@ export class RunScrollbackStream {
     if (!this.active.surface.isDestroyed) {
       this.active.surface.destroy()
     }
+    this.active.syntax?.destroy()
 
     this.active = undefined
     this.releasePendingThemes()

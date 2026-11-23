@@ -55,7 +55,7 @@ describe("config auto-apply", () => {
           return yield* Effect.gen(function* () {
             const plugins = yield* Plugin.Service
             const models = yield* Model.Service
-            const host = yield* PluginHost.make(plugins)
+            const host = yield* PluginHost.make(plugins, "test")
             yield* ConfigProviderPlugin.Plugin.effect(host)
             yield* waitUntil(
               models
@@ -94,7 +94,7 @@ describe("config auto-apply", () => {
           return yield* Effect.gen(function* () {
             const plugins = yield* Plugin.Service
             const agents = yield* Agent.Service
-            const host = yield* PluginHost.make(plugins)
+            const host = yield* PluginHost.make(plugins, "test")
             yield* ConfigAgentPlugin.Plugin.effect(host)
             yield* waitUntil(agents.select().pipe(Effect.map((selection) => selection.id === "one")))
             yield* Effect.promise(() => write("two"))
@@ -122,7 +122,7 @@ describe("config auto-apply", () => {
           return yield* Effect.gen(function* () {
             const plugins = yield* Plugin.Service
             const providers = yield* Provider.Service
-            const host = yield* PluginHost.make(plugins)
+            const host = yield* PluginHost.make(plugins, "test")
             yield* ConfigProviderPlugin.Plugin.effect(host)
             yield* ConfigPolicyPlugin.Plugin.effect(host)
             yield* waitUntil(

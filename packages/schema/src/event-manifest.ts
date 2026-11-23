@@ -2,6 +2,7 @@ export * as EventManifest from "./event-manifest.js"
 
 import { Schema } from "effect"
 import { Agent } from "./agent.js"
+import { Artifact } from "./artifact.js"
 import { Command } from "./command.js"
 import { Config } from "./config.js"
 import { Credential } from "./credential.js"
@@ -11,6 +12,7 @@ import { FileSystem } from "./filesystem.js"
 import { FileSystemV1 } from "./filesystem-v1.js"
 import { Form } from "./form.js"
 import { InstallationEvent } from "./installation-event.js"
+import { Job } from "./job.js"
 import { Integration } from "./integration.js"
 import { LegacyEventV1 } from "./legacy-event.js"
 import { LspEvent } from "./lsp-event.js"
@@ -30,7 +32,6 @@ import { Reference } from "./reference.js"
 import { ServerEvent } from "./server-event.js"
 import { Shell } from "./shell.js"
 import { Skill } from "./skill.js"
-import { SessionCompactionEvent } from "./session-compaction-event.js"
 import { SessionEvent } from "./session-event.js"
 import { SessionStatusEvent } from "./session-status-event.js"
 import { TuiEvent } from "./tui-event.js"
@@ -65,9 +66,11 @@ const featureDefinitions = Event.inventory(
   ...Pty.Event.Definitions,
   ...PersistentPty.Event.Definitions,
   ...Shell.Event.Definitions,
+  ...Job.Event.Definitions,
   ...Form.Event.Definitions,
   ...WebSearch.Event.Definitions,
   ...Messaging.Event.Definitions,
+  ...Artifact.Event.Definitions,
 )
 
 export const ServerDefinitions = Event.inventory(
@@ -80,6 +83,7 @@ export const ServerDefinitions = Event.inventory(
   ...VcsEvent.Definitions,
   McpEvent.StatusChanged,
   McpEvent.ResourcesChanged,
+  McpEvent.ExperimentalEvent,
 )
 export const Server = Event.latest(ServerDefinitions)
 export type ServerEvent = Schema.Schema.Type<(typeof ServerDefinitions)[number]>
@@ -95,7 +99,6 @@ export const Definitions = Event.inventory(
   ...LegacyEventV1.Definitions,
   ...FileSystemV1.Event.Definitions,
   ...SessionStatusEvent.Definitions,
-  ...SessionCompactionEvent.Definitions,
   ...VcsEvent.Definitions,
   ...WorkspaceEvent.Definitions,
   ...WorktreeEvent.Definitions,

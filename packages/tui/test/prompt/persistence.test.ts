@@ -39,7 +39,7 @@ test("writeJsonAtomic replaces through a symlink and preserves the target mode",
     expect(fs.lstatSync(link).isSymbolicLink()).toBe(true)
     expect(await readJson<{ value: number }>(target)).toEqual({ value: 1 })
     if (process.platform !== "win32") expect(fs.statSync(target).mode & 0o777).toBe(0o640)
-    expect(await readdir(root)).toEqual(["state.json", "target.json"])
+    expect((await readdir(root)).toSorted()).toEqual(["state.json", "target.json"])
   } finally {
     await rm(root, { recursive: true, force: true })
   }

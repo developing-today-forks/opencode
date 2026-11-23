@@ -1,7 +1,9 @@
 export * as ConfigExperimental from "./experimental.js"
 
-import { Schema } from "effect"
+import { Record, Schema } from "effect"
 import { NonNegativeInt, PositiveInt, optional } from "../schema.js"
+import { ConfigFlag } from "./flag.js"
+import { ConfigModel } from "./model.js"
 import { ConfigPolicy } from "./policy.js"
 import { ConfigModelRoutes } from "./model-routes.js"
 import { ConfigAlias } from "./aliases.js"
@@ -73,8 +75,60 @@ export class Info extends Schema.Class<Info>("ConfigExperimental.Info")({
     description: "Configured aliases for providers, models, and effort levels/variants",
   }).pipe(optional),
   portable_shell_scanner: Schema.Boolean.annotate({
-    description: "Enable the experimental portable shell permission scanner. Defaults to false.",
+    description: "Deprecated: the built-in shell permission scanner is now always enabled.",
   }).pipe(optional),
+  codemode_vm: Schema.Boolean.pipe(optional).annotate({
+    description: "Deprecated: ignored because Code Mode always runs on the VM.",
+  }),
+  all_flags: Schema.Boolean.pipe(optional).annotate({
+    description:
+      "Enable all flags except opt-in-only flags on any build channel, like OPENCODE_FLAGS=all. Per-flag config settings take precedence over all_flags; false leaves the build defaults in effect.",
+  }),
+  ...Record.map(ConfigFlag.registry, (description, key) =>
+    Schema.Boolean.pipe(optional).annotate({
+      description: ConfigFlag.optInOnly.has(key)
+        ? description
+        : `${description} Defaults to on in local and dev builds and off in releases.`,
+    }),
+  ),
+  video_generate: Schema.Union([
+    Schema.Boolean,
+    Schema.Struct({
+      model: ConfigModel.Selection.pipe(optional).annotate({
+        description:
+          "Default model for the experimental_video_generate tool when the agent doesn't choose one, as providerID/modelID. Falls back to automatic selection when it isn't available.",
+      }),
+    }),
+  ])
+    .pipe(optional)
+    .annotate({
+      description:
+        "Settings for the experimental_video_generate tool, which is offered while a connected provider has a video model.",
+    }),
+  part_rows: Schema.Boolean.pipe(optional).annotate({
+    description:
+      "Write each assistant part as its own session_part row instead of rewriting the whole message on every event. Defaults to true; set false to fall back to whole-message writes.",
+  }),
+  image_generate: Schema.Union([
+    Schema.Boolean,
+    Schema.Struct({
+      model: ConfigModel.Selection.pipe(optional).annotate({
+        description:
+          "Default model for the experimental_image_generate tool when the agent doesn't choose one, as providerID/modelID. Falls back to automatic selection when it isn't available.",
+      }),
+    }),
+  ])
+    .pipe(optional)
+    .annotate({
+      description:
+        "Settings for the experimental_image_generate tool, which is offered while a connected provider has an image model.",
+    }),
+  location_idle_timeout: Schema.Union([Schema.DurationFromString, Schema.Literal(false)])
+    .pipe(optional)
+    .annotate({
+      description:
+        'How long a location can go without session activity before its services are unloaded. Running sessions and background jobs keep a location loaded. Set to false to never unload (default: "60 minutes")',
+    }),
   subagent_depth: NonNegativeInt.annotate({
     description:
       "Maximum subagent nesting depth below a top-level session. 0 disables subagents and 1 stops subagents from launching their own. Defaults to 5.",

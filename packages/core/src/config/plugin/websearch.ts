@@ -9,7 +9,7 @@ export const Plugin = define({
   id: "opencode.config.websearch",
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["websearch"], ctx.websearch.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ctx.websearch.reload(), ["websearch"])
     yield* ctx.websearch.transform((websearch) => {
       const selection = Config.latest(loaded.entries, "websearch")
       if (selection === false) websearch.default.set(false)

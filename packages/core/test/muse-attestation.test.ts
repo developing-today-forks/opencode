@@ -16,9 +16,9 @@
  * RE-RUN (laptop): cd packages/core && bun run test test/muse-attestation.test.ts
  */
 import { describe, expect, test } from "bun:test"
-import { AIError, LLMEvent, LLMResponse, Message, ToolCallPart, ToolResultPart } from "@opencode/ai"
+import { AIError, LLMEvent, LLMResponse, Message, ToolCallPart, ToolResultPart } from "@opencode/ai/effect"
 import { RequestExecutor } from "@opencode/ai/route"
-import { LLMClient } from "@opencode/ai"
+import { LLMClient } from "@opencode/ai/effect"
 import { Meta } from "@opencode/ai/providers/meta"
 import { AISDK } from "@opencode/core/aisdk"
 import { Generate } from "@opencode/core/generate"
@@ -272,7 +272,7 @@ const setup = (providerID: string, modelID: string, runtime: typeof metaModel, r
   })
   const models = Layer.mock(Model.Service, { get: () => Effect.succeed(selected) })
   const resolver = ModelResolver.layer.pipe(Layer.provide(Layer.mergeAll(providers, models, integrations, npm, aisdk)))
-  const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.merge(resolver, native))))
+  const it = testEffect(Generate.layer.pipe(Layer.provide(Layer.mergeAll(resolver, native, Layer.mock(Model.Service, {}), RequestExecutor.fetchLayer))))
   return { it, bodies, ref }
 }
 

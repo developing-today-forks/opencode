@@ -1,6 +1,36 @@
+/* `width` and `height` props arrive as variables, so classes and other CSS still size the spinner over them, as they
+   did over an SVG's attributes. */
+[data-slot="spinner-dots"] {
+  position: relative;
+  display: block;
+  width: var(--spinner-width, 18px);
+  height: var(--spinner-height, auto);
+  aspect-ratio: 1;
+  overflow: clip;
+}
+
 [data-component="spinner"] {
   color: inherit;
   flex-shrink: 0;
-  width: 18px;
-  aspect-ratio: 1;
+}
+
+[data-slot="spinner-dots"] > [data-slot="spinner-strip"] {
+  display: block;
+  width: 100%;
+  background: currentColor;
+  mask-repeat: no-repeat;
+  mask-size: 100% 100%;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  forced-color-adjust: none;
+}
+
+/* syncSpinPhase marks spinners out of view so they pause cleanly without inline animation overrides. */
+[data-slot="spinner-dots"][data-offscreen] > [data-slot="spinner-strip"] {
+  animation-play-state: paused;
+}
+
+:root[data-motion="reduce"] [data-slot="spinner-dots"] > [data-slot="spinner-strip"] {
+  animation: none;
+  transform: var(--spinner-still);
 }

@@ -17,7 +17,6 @@ import { Integration } from "@opencode/core/integration"
 import { KV } from "@opencode/core/kv"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-service-map"
-import { ManagedPolicy } from "@opencode/core/managed-policy"
 import { Mcp } from "@opencode/core/mcp/index"
 import { Messaging } from "@opencode/core/messaging"
 import { MessagingEmbedding } from "@opencode/core/messaging/embedding"
@@ -49,6 +48,19 @@ import { ConfigMessaging } from "@opencode/schema/config/messaging"
 import { AppProcess } from "@opencode/util/process"
 import { tempLocationLayer } from "./fixture/location"
 import { emptyMcpLayer } from "./fixture/mcp"
+import { App } from "@opencode/core/app"
+import { Artifact } from "@opencode/core/artifact"
+import { BlobStore } from "@opencode/core/blob-store"
+import { Environment } from "@opencode/core/environment/index"
+import { FSUtil } from "@opencode/util/fs-util"
+import { Flag } from "@opencode/core/flag"
+import { Global } from "@opencode/util/global"
+import { InstructionDiscovery } from "@opencode/core/instruction-discovery"
+import { InstructionEntry } from "@opencode/core/session/instruction-entry"
+import { Job } from "@opencode/core/job"
+import { SessionStore } from "@opencode/core/session/store"
+import { SharedCache } from "@opencode/core/shared-cache"
+import { VideoGeneration } from "@opencode/core/video-generation"
 import { testEffect } from "./lib/effect"
 import { codeModeListings, executeTool, toolIdentity } from "./lib/tool"
 
@@ -58,6 +70,19 @@ const it = testEffect(
   AppNodeBuilder.build(
     LayerNode.group([
       AppProcess.node,
+      App.node,
+      Artifact.node,
+      BlobStore.node,
+      Environment.node,
+      FSUtil.node,
+      Flag.node,
+      Global.node,
+      InstructionDiscovery.node,
+      InstructionEntry.node,
+      Job.node,
+      SessionStore.node,
+      SharedCache.node,
+      VideoGeneration.node,
       FileSystem.node,
       FileAccess.node,
       Location.node,
@@ -77,7 +102,6 @@ const it = testEffect(
       Command.node,
       Integration.node,
       KV.node,
-      ManagedPolicy.node,
       Mcp.node,
       Session.node,
       PersistentPty.node,
@@ -109,6 +133,8 @@ const it = testEffect(
             check: () => Effect.succeed(false),
             update: (name) => Effect.succeed({ directory: "", name }),
             which: () => Effect.undefined,
+            follows: () => Effect.succeed(false),
+            reject: () => Effect.succeed(false),
           }),
         ),
       ),
@@ -119,6 +145,14 @@ const it = testEffect(
             text: () => Effect.succeed('["2", "1"]'),
             complete: () => Effect.die("unused"),
             stream: () => Stream.die("unused"),
+            image: () => Effect.die("unused"),
+            decisions: () => Effect.die("unused"),
+            video: {
+              start: () => Effect.die("unused"),
+              status: () => Effect.die("unused"),
+              result: () => Effect.die("unused"),
+              cancel: () => Effect.die("unused"),
+            },
           })),
       ),
     ],
@@ -129,7 +163,7 @@ const setup = Effect.gen(function* () {
   const plugins = yield* Plugin.Service
   const sessions = yield* Session.Service
   const location = yield* Location.Service
-  const pluginHost = yield* PluginHost.make(plugins)
+  const pluginHost = yield* PluginHost.make(plugins, "test")
   yield* MessagingTools.Plugin.effect(pluginHost)
   const root = yield* sessions.create({ location: Location.Ref.make({ directory: location.directory }), title: "Lead" })
   const child = yield* sessions.create({ parentID: root.id, title: "Worker" })

@@ -19,7 +19,13 @@ describe("acp errors", () => {
 
 describe("acp error boundary over the wire", () => {
   test.each<[string, (acp: Wire) => void, string[]]>([
-    ["ends", (acp) => acp.server.closeEvents(), []],
+    // This fork's client reconnects an event stream that ends unexpectedly (#2321), so a clean end
+    // behaves like a dropped connection once the server stops.
+    [
+      "ends",
+      (acp) => acp.server.closeEvents(),
+      ["ACP catalog event stream failed", "ACP selection event stream failed"],
+    ],
     [
       "drops its connection",
       (acp) => acp.server.dropEvents(),

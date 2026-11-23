@@ -99,7 +99,7 @@ describe("ConfigToolPlugin.Plugin", () => {
           const plugins = yield* Plugin.Service
           const tools = yield* Tool.Service
           yield* config.setEntries([new Directory({ type: "directory", path: AbsolutePath.make(tmp.path) })])
-          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins))
+          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test"))
 
           const names = (yield* tools.list()).map((tool) => tool.name).toSorted()
           expect(names).toContain("echotest")
@@ -176,7 +176,7 @@ describe("ConfigToolPlugin.Plugin", () => {
             new Directory({ type: "directory", path: AbsolutePath.make(globalRoot) }),
             new Directory({ type: "directory", path: AbsolutePath.make(projectRoot) }),
           ])
-          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins))
+          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test"))
 
           const names = (yield* tools.list()).map((tool) => tool.name).filter((name) => name === "dup")
           expect(names).toHaveLength(1)
@@ -205,7 +205,7 @@ describe("ConfigToolPlugin.Plugin", () => {
           const plugins = yield* Plugin.Service
           const tools = yield* Tool.Service
           yield* config.setEntries([new Directory({ type: "directory", path: AbsolutePath.make(tmp.path) })])
-          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins))
+          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test"))
           expect((yield* tools.list()).map((tool) => tool.name)).not.toContain("late")
 
           yield* writeTools(tmp.path, {
@@ -260,7 +260,7 @@ describe("ConfigToolPlugin.Plugin", () => {
           const plugins = yield* Plugin.Service
           const tools = yield* Tool.Service
           yield* config.setEntries([new Directory({ type: "directory", path: AbsolutePath.make(tmp.path) })])
-          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins))
+          yield* ConfigToolPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test"))
           expect((yield* tools.list()).map((tool) => tool.name)).toContain("abortprobe")
 
           const snapshot = yield* tools.snapshot()

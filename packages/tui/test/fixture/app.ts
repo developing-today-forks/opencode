@@ -1,4 +1,4 @@
-import { createTestRenderer } from "@opentui/core/testing"
+import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing"
 import { Effect, FileSystem } from "effect"
 import path from "node:path"
 import { Global } from "@opencode/util/global"
@@ -15,22 +15,33 @@ export async function createAppFixture(
     config?: Config.Info
     args?: TuiInput["args"]
     fetch?: FetchHandler
+    // A renderer whose owner already set up its terminal, such as the simulation renderer.
+    setup?: TestRendererSetup
   } = {},
 ) {
   const { run } = await import("../../src/app")
   const root = await tmpdir()
-  const setup = await createTestRenderer({
-    width: input.width ?? 100,
-    height: input.height ?? 30,
-    useThread: false,
-    kittyKeyboard: true,
-  })
+  const setup =
+    input.setup ??
+    (await createTestRenderer({
+      width: input.width ?? 100,
+      height: input.height ?? 30,
+      kittyKeyboard: true,
+    }))
+  if (!input.setup) await setup.renderer.setupTerminal()
   setup.renderer.start()
   const ready = Promise.withResolvers<void>()
   const events = createEventStream()
   const calls = createFetch(input.fetch, events)
   // Updates apply to a copy, as a config file would, so preference writes persist for the rest of the test.
-  let config: Config.Info = structuredClone(input.config ?? { animations: false })
+  // Tests were written for the previous designs and theme, so they keep new designs off and use
+  // opencode-classic unless they choose otherwise.
+  const base = input.config ?? { animations: false }
+  let config: Config.Info = structuredClone({
+    ...base,
+    experimental: { "new-designs": false, ...base.experimental },
+    theme: { name: "opencode-classic", ...base.theme },
+  })
   const server = Bun.serve({ port: 0, fetch: (request) => calls.fetch(request) })
   const task = Effect.runPromise(
     run({

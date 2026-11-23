@@ -312,9 +312,9 @@ describe("permissions policy (#1503)", () => {
     expect(violations[0].job).toBe("test")
   })
 
-  test("honors a baselined write grant and job block (test.yml: checks, ci-fix)", () => {
+  test("honors a baselined write grant and job block (check-test.yml: checks, ci-fix)", () => {
     const violations = sourceViolations(
-      ".github/workflows/test.yml",
+      ".github/workflows/check-test.yml",
       base("permissions: { contents: read, checks: write }", [
         "  ci-fix:",
         "    timeout-minutes: 15",
@@ -326,7 +326,7 @@ describe("permissions policy (#1503)", () => {
 
   test("flags a baselined job block that exceeds its scope levels", () => {
     const violations = sourceViolations(
-      ".github/workflows/test.yml",
+      ".github/workflows/check-test.yml",
       base("permissions: { contents: read, checks: write }", [
         "  ci-fix:",
         "    timeout-minutes: 15",
@@ -339,7 +339,7 @@ describe("permissions policy (#1503)", () => {
 
   test("flags scalar shorthand in a baselined job block", () => {
     const violations = sourceViolations(
-      ".github/workflows/test.yml",
+      ".github/workflows/check-test.yml",
       base("permissions: { contents: read, checks: write }", [
         "  ci-fix:",
         "    timeout-minutes: 15",
@@ -354,7 +354,7 @@ describe("permissions policy (#1503)", () => {
     ["contents", "admin", "permissions-level"],
   ])("validates job-level permission scope and level (%s: %s)", (scope, level, rule) => {
     const violations = sourceViolations(
-      ".github/workflows/test.yml",
+      ".github/workflows/check-test.yml",
       base("permissions: { contents: read, checks: write }", [
         "  ci-fix:",
         "    timeout-minutes: 15",
@@ -366,7 +366,7 @@ describe("permissions policy (#1503)", () => {
 
   test("flags a baselined write grant that is no longer used", () => {
     const violations = sourceViolations(
-      ".github/workflows/test.yml",
+      ".github/workflows/check-test.yml",
       base("permissions: { contents: read }", [
         "  ci-fix:",
         "    timeout-minutes: 15",
@@ -389,7 +389,7 @@ describe("permissions policy (#1503)", () => {
     const violations = absentFileExceptions([".github/workflows/check.yml"])
     expect(violations.length).toBeGreaterThan(0)
     expect(violations.every((violation) => violation.rule === "stale-permission-exception")).toBe(true)
-    expect(violations.map((violation) => violation.file)).toContain(".github/workflows/containers.yml")
+    expect(violations.map((violation) => violation.file)).toContain(".github/workflows/release.yml")
     expect(absentFileExceptions([]).length).toBeGreaterThan(0)
   })
 
@@ -400,7 +400,7 @@ describe("permissions policy (#1503)", () => {
 
   test("flags a baselined job block that is no longer used", () => {
     const violations = sourceViolations(
-      ".github/workflows/test.yml",
+      ".github/workflows/check-test.yml",
       base("permissions: { contents: read, checks: write }"),
     )
     expect(violations.map((violation) => violation.rule)).toEqual(["stale-permission-exception"])
@@ -413,7 +413,7 @@ describe("the current tree", () => {
     const root = join(import.meta.dir, "..")
     const { files, violations } = collectViolations(root)
     expect(files.length).toBeGreaterThan(0)
-    expect(files).toContain(".github/workflows/test.yml")
+    expect(files).toContain(".github/workflows/check-test.yml")
     expect(violations).toEqual([])
     expect(workflowFiles(root)).toEqual(files)
   })

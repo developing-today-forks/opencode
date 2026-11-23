@@ -11,12 +11,13 @@ export const Plugin = define({
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
     const compaction = yield* SessionCompaction.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["compaction"], compaction.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, compaction.reload(), ["compaction"])
     yield* compaction.transform((editor) => {
       for (const entry of loaded.entries) {
         if (entry.type !== "document" || !entry.info.compaction) continue
         editor.configure({
           ...(entry.info.compaction.auto === undefined ? {} : { auto: entry.info.compaction.auto }),
+          ...(entry.info.compaction.background === undefined ? {} : { background: entry.info.compaction.background }),
           ...(entry.info.compaction.buffer === undefined ? {} : { buffer: entry.info.compaction.buffer }),
           ...(entry.info.compaction.keep?.tokens === undefined ? {} : { keep: entry.info.compaction.keep.tokens }),
         })

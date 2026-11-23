@@ -81,8 +81,8 @@ export const Plugin = define({
     const loaded = yield* ConfigEntryObserver.observe(
       config,
       ctx.event,
-      ["experimental"],
       ctx.provider.reload().pipe(Effect.andThen(ctx.tool.reload())),
+      ["experimental"],
     )
 
     ModelRouteLog.onCaptureErrorBodies(() => configuredLog(loaded.entries)?.captureErrorBodies === true)

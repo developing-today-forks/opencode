@@ -1,6 +1,6 @@
 export * as McpxDiagnose from "./mcpx-diagnose.js"
 
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import { Tool } from "@opencode/schema/tool"
 import type { ToolHooks } from "@opencode/plugin/effect/tool"
 import { Effect, Schema } from "effect"

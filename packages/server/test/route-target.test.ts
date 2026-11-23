@@ -6,7 +6,7 @@ import { ModelRoute } from "@opencode/core/model-route"
 import { Effect, Schema } from "effect"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
-import { ServerFetch } from "../src/fetch"
+import { serveRoutes } from "./fixture/routes"
 
 // POST/GET /api/session/:id/route-target (#2671): the pin a client sets is the pin routing reads.
 
@@ -30,13 +30,16 @@ const setup = Effect.gen(function* () {
       }),
     ),
   )
-  const handler = yield* ServerFetch.make({
+  const server = yield* serveRoutes({
     app: { version: "test" },
     database: { path: ":memory:" },
     config: { directory: global },
     fs: { filewatcher: false },
     models: { fetch: false },
   })
+  // Pools come from the config plugin, which loads after the server answers; a client waits for them, as this does.
+  yield* server.pluginsLoaded(global)
+  const handler = server.handler
   const request = (route: string, body?: unknown) =>
     Effect.promise(async () => {
       const response = await handler(
@@ -48,9 +51,7 @@ const setup = Effect.gen(function* () {
       )
       return { status: response.status, body: (await response.json()) as unknown }
     })
-  // The session lives in the config directory, like the completions tests' location: a fresh
-  // project directory under the isolated test HOME takes longer than the handler's 5s wait for
-  // plugin activation (it answers 503 then), which is the test environment, not the endpoint.
+  // The session lives in the config directory, whose plugins the setup waited for.
   const created = yield* request("/api/session", { location: { directory: global } })
   expect(created.status).toBe(200)
   return { request, sessionID: Schema.decodeUnknownSync(SessionResponse)(created.body).data.id }

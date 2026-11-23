@@ -443,7 +443,7 @@ it.effect("a route whose targets are all transform-created exists after the plug
     const normalized = ConfigNormalize.normalize(raw)
     if (normalized.type !== "normalized") throw new Error("the test config must normalize")
     const entries = [new Document({ type: "document", info: Schema.decodeUnknownSync(Info)(normalized.encoded) })]
-    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins)).pipe(
+    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test")).pipe(
       Effect.provide(Config.testLayer(entries)),
     )
     const models = yield* Model.Service
@@ -498,7 +498,7 @@ it.effect("a pool built by the later model transform (matching keys) keeps its c
     const normalized = ConfigNormalize.normalize(raw)
     if (normalized.type !== "normalized") throw new Error("the test config must normalize")
     const entries = [new Document({ type: "document", info: Schema.decodeUnknownSync(Info)(normalized.encoded) })]
-    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins)).pipe(
+    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test")).pipe(
       Effect.provide(Config.testLayer(entries)),
     )
     const models = yield* Model.Service
@@ -551,7 +551,7 @@ it.effect("pools keep their config order in the catalog, however late a pool is 
     const normalized = ConfigNormalize.normalize(raw)
     if (normalized.type !== "normalized") throw new Error("the test config must normalize")
     const entries = [new Document({ type: "document", info: Schema.decodeUnknownSync(Info)(normalized.encoded) })]
-    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins)).pipe(
+    yield* ConfigModelRoutesPlugin.Plugin.effect(yield* PluginHost.make(plugins, "test")).pipe(
       Effect.provide(Config.testLayer(entries)),
     )
     const models = yield* Model.Service

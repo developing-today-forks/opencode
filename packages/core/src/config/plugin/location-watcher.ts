@@ -11,7 +11,7 @@ export const Plugin = define({
   effect: Effect.fn(function* (ctx) {
     const config = yield* Config.Service
     const policy = yield* LocationWatcherPolicy.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["watcher"], policy.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, policy.reload(), ["watcher"])
     yield* policy.transform((editor) => {
       for (const entry of loaded.entries) {
         if (entry.type !== "document" || !entry.info.watcher?.ignore) continue

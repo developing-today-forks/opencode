@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
-import { AIError, HttpContext, LanguageModel, LLM, LLMEvent, QuotaExceededError, RateLimitError } from "@opencode/ai"
+import { AIError, HttpContext, LanguageModel, ai, LLMEvent, QuotaExceededError, RateLimitError } from "@opencode/ai/effect"
 import { OpenAIChat } from "@opencode/ai/protocols/openai-chat"
 import { TestLLM } from "@opencode/ai/testing"
 import { Agent } from "@opencode/core/agent"
@@ -396,7 +396,7 @@ describe("live step wiring", () => {
             toolNames: ["bash", RenderCard.RENDER_TOOL_NAME],
             prepared: {
               retry: () => Effect.void,
-              request: LLM.request({ model: model.model, prompt: "Check the service" }),
+              request: ai.request({ model: model.model, prompt: "Check the service" }),
               options: {},
               executeTool: () => Effect.die("not used"),
             },
@@ -453,7 +453,7 @@ describe("live step wiring", () => {
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -521,7 +521,7 @@ describe("live step wiring", () => {
             toolNames: ["bash", RenderCard.RENDER_TOOL_NAME],
             prepared: {
               retry: () => Effect.void,
-              request: LLM.request({ model: model.model, prompt: "Check the service" }),
+              request: ai.request({ model: model.model, prompt: "Check the service" }),
               options: {},
               executeTool: () => Effect.die("not used"),
             },
@@ -596,7 +596,7 @@ describe("live step wiring", () => {
           model,
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -660,7 +660,7 @@ describe("live step wiring", () => {
           toolNames: ["bash", RenderCard.RENDER_TOOL_NAME],
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Check the service" }),
+            request: ai.request({ model: model.model, prompt: "Check the service" }),
             options: {},
             executeTool: () => Effect.die("not used"),
           },
@@ -717,7 +717,7 @@ describe("live step wiring", () => {
           toolNames: [RenderCard.RENDER_TOOL_NAME],
           prepared: {
             retry: () => Effect.void,
-            request: LLM.request({ model: model.model, prompt: "Choose a tier" }),
+            request: ai.request({ model: model.model, prompt: "Choose a tier" }),
             options: {},
             executeTool: () =>
               Effect.succeed({

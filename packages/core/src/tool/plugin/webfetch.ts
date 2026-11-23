@@ -1,10 +1,11 @@
 export * as WebFetchTool from "./webfetch.js"
 
 import type { Context } from "@opencode/plugin/effect/plugin"
-import { ToolFailure } from "@opencode/ai"
+import { ToolFailure } from "@opencode/ai/effect"
 import { Duration, Effect, Schema } from "effect"
-import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http"
+import { FetchHttpClient, HttpClient, HttpClientError, HttpClientRequest, HttpClientResponse } from "effect/http"
 import { Parser } from "htmlparser2"
+import { Mime } from "../../mime.js"
 import { Permission } from "../../permission.js"
 import { convertHTMLToMarkdown, MAX_MARKDOWN_BYTES } from "../html-markdown.js"
 import { collectBoundedResponseBody } from "../http-body.js"
@@ -13,7 +14,6 @@ export const name = "webfetch"
 export const MAX_RESPONSE_BYTES = MAX_MARKDOWN_BYTES
 export const DEFAULT_TIMEOUT_SECONDS = 30
 export const MAX_TIMEOUT_SECONDS = 120
-export const MAX_REDIRECTS = 10
 
 export const description = `Fetch content from an HTTP or HTTPS URL and return it as text, markdown, or HTML. Markdown is the default.
 
@@ -32,9 +32,7 @@ export const Input = Schema.Struct({
 })
 
 const Output = Schema.Struct({
-  url: Schema.String,
   contentType: Schema.String,
-  format: Input.fields.format,
   output: Schema.String,
 })
 type Format = (typeof Input.Type)["format"]
@@ -60,13 +58,9 @@ const openCodeUserAgent =
   "Mozilla/5.0 AppleWebKit/537.36 (KHTML, like Gecko); compatible; OpenCode-User/1.0; +https://opencode.ai"
 
 const isCloudflareChallenge = (error: unknown) => {
-  // Redirect and permission errors also flow through this predicate; only an
-  // HttpClientError carries a `reason` to inspect.
-  const reason = (
-    error as { reason?: { _tag?: string; response?: { status: number; headers: Record<string, string> } } }
-  ).reason
-  if (reason?._tag !== "StatusCodeError" || !reason.response) return false
-  return reason.response.status === 403 && reason.response.headers["cf-mitigated"] === "challenge"
+  if (!HttpClientError.isHttpClientError(error) || error.reason._tag !== "StatusCodeError") return false
+  const response = error.reason.response
+  return response.status === 403 && response.headers["cf-mitigated"] === "challenge"
 }
 
 const request = (url: string, format: Format, userAgent = openCodeUserAgent) =>
@@ -74,17 +68,43 @@ const request = (url: string, format: Format, userAgent = openCodeUserAgent) =>
 
 const assertHttpUrl = (url: URL) => {
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("URL must use http:// or https://")
+  // Rules match the URL, so `https://user@evil.com` would slip past a rule for `https://evil.com/*`.
+  if (url.username || url.password) throw new Error("URL must not include credentials")
 }
 
-// Redirects are followed manually: the transport must not follow them itself,
-// or a permitted URL could redirect to a destination that was never checked.
-const execute = (http: HttpClient.HttpClient, url: string, format: Format, userAgent = openCodeUserAgent) =>
-  http
-    .execute(request(url, format, userAgent))
-    .pipe(Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }))
+export const MAX_REDIRECTS = 10
+const redirectStatuses = new Set([301, 302, 303, 307, 308])
 
-const isRedirect = (response: HttpClientResponse.HttpClientResponse) =>
-  response.status >= 300 && response.status < 400 && response.headers["location"] !== undefined
+// Follows redirects here instead of in fetch so each new URL is checked against the permission rules first.
+const execute = (
+  http: HttpClient.HttpClient,
+  check: (url: string) => Effect.Effect<void, Error>,
+  url: string,
+  format: Format,
+  userAgent = openCodeUserAgent,
+  redirects = 0,
+): Effect.Effect<HttpClientResponse.HttpClientResponse, Error> =>
+  http.execute(request(url, format, userAgent)).pipe(
+    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+    Effect.flatMap((response) => {
+      const location = response.headers.location
+      if (!redirectStatuses.has(response.status) || !location) return HttpClientResponse.filterStatusOk(response)
+      if (redirects >= MAX_REDIRECTS) return Effect.fail(new Error(`Too many redirects (more than ${MAX_REDIRECTS})`))
+      return Effect.gen(function* () {
+        const next = yield* Effect.try({
+          try: () => {
+            const target = new URL(location, url)
+            assertHttpUrl(target)
+            target.hash = ""
+            return target.href
+          },
+          catch: (error) => (error instanceof Error ? error : new Error(String(error))),
+        })
+        yield* check(next)
+        return yield* execute(http, check, next, format, userAgent, redirects + 1)
+      })
+    }),
+  )
 
 const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
   collectBoundedResponseBody(
@@ -96,15 +116,6 @@ const collectBody = (response: HttpClientResponse.HttpClientResponse) =>
 const mimeFrom = (contentType: string) => contentType.split(";", 1)[0]?.trim().toLowerCase() ?? ""
 const isImageAttachment = (mime: string) =>
   mime.startsWith("image/") && mime !== "image/svg+xml" && mime !== "image/vnd.fastbidsheet"
-const isTextualMime = (mime: string) =>
-  !mime ||
-  mime.startsWith("text/") ||
-  mime === "application/json" ||
-  mime.endsWith("+json") ||
-  mime === "application/xml" ||
-  mime.endsWith("+xml") ||
-  mime === "application/javascript" ||
-  mime === "application/x-javascript"
 const convert = (content: string, contentType: string, format: Format) => {
   if (!contentType.includes("text/html")) return content
   if (format === "markdown") return convertHTMLToMarkdown(content)
@@ -128,70 +139,38 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
+              // Rules match the URL as written. The fragment is never sent, and would keep a rule for the exact
+              // URL from matching.
+              const url = input.url.split("#")[0]
               yield* Effect.try({
-                try: () => assertHttpUrl(new URL(input.url)),
+                try: () => assertHttpUrl(new URL(url)),
                 catch: (error) => error,
               })
 
               yield* permission.assert({
                 action: name,
-                resources: [input.url],
+                resources: [url],
                 save: ["*"],
                 metadata: input,
-                sessionID: context.sessionID,
-                agent: context.agent,
-                source: { type: "tool", messageID: context.messageID, id: context.id },
+                ...Permission.invocation(context),
               })
 
               const { body, contentType } = yield* Effect.gen(function* () {
-                // Every redirect destination is resolved, scheme-checked, and
-                // permission-checked before it is fetched. The initial URL was
-                // already asserted above, so it is seeded into the checked set;
-                // a destination is asserted at most once per fetch.
-                const checked = new Set([input.url])
-                const fetchFinal = (userAgent: string) =>
-                  Effect.gen(function* () {
-                    let url = input.url
-                    let redirects = 0
-                    while (true) {
-                      const response = yield* execute(http, url, input.format, userAgent)
-                      if (!isRedirect(response)) return yield* HttpClientResponse.filterStatusOk(response)
-                      if (redirects >= MAX_REDIRECTS)
-                        return yield* Effect.fail(new Error(`Too many redirects: exceeded ${MAX_REDIRECTS} redirects`))
-                      redirects++
-                      const location = response.headers["location"]!
-                      const destination = yield* Effect.try({
-                        try: () => new URL(location, url),
-                        catch: () => new Error(`Invalid redirect Location header: ${location}`),
-                      })
-                      yield* Effect.try({
-                        try: () => assertHttpUrl(destination),
-                        catch: (error) => error,
-                      })
-                      const destinationUrl = destination.toString()
-                      if (!checked.has(destinationUrl)) {
-                        checked.add(destinationUrl)
-                        yield* permission.assert({
-                          action: name,
-                          resources: [destinationUrl],
-                          save: ["*"],
-                          metadata: { ...input, url: destinationUrl },
-                          sessionID: context.sessionID,
-                          agent: context.agent,
-                          source: { type: "tool", messageID: context.messageID, id: context.id },
-                        })
-                      }
-                      url = destinationUrl
-                    }
+                const check = (next: string) =>
+                  permission.assertNotDenied({
+                    action: name,
+                    resources: [next],
+                    metadata: { ...input, url: next },
+                    ...Permission.invocation(context),
                   })
-                const response = yield* fetchFinal(openCodeUserAgent).pipe(
-                  Effect.catchIf(isCloudflareChallenge, () => fetchFinal("opencode")),
+                const response = yield* execute(http, check, url, input.format).pipe(
+                  Effect.catchIf(isCloudflareChallenge, () => execute(http, check, url, input.format, "opencode")),
                 )
                 const contentType = response.headers["content-type"] || ""
                 const mime = mimeFrom(contentType)
                 if (isImageAttachment(mime))
                   return yield* Effect.fail(new Error(`Unsupported fetched image content type: ${mime}`))
-                if (!isTextualMime(mime))
+                if (!Mime.isTextual(mime))
                   return yield* Effect.fail(new Error(`Unsupported fetched file content type: ${mime}`))
                 return { body: yield* collectBody(response), contentType }
               }).pipe(
@@ -205,13 +184,7 @@ export const Plugin = {
                 try: () => convert(content, contentType, input.format),
                 catch: (error) => error,
               })
-              const result = {
-                url: input.url,
-                contentType,
-                format: input.format,
-                output,
-              }
-              return { output: result, content: result.output, metadata: { contentType: result.contentType } }
+              return { output: { contentType, output }, content: output, metadata: { contentType } }
             }).pipe(Effect.mapError((error) => new ToolFailure({ message: `Unable to fetch ${input.url}`, error }))),
         }),
       )

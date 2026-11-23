@@ -13,7 +13,7 @@
  * first-token timeout (`session/runner/step.ts`). Nothing here touches the network or a real
  * provider quota.
  */
-import { AIError, TransportError } from "@opencode/ai"
+import { AIError, TransportError } from "@opencode/ai/effect"
 import { RequestExecutor } from "@opencode/ai/route"
 
 /** One scripted attempt outcome. Queues are consumed in order; the last outcome repeats, so a

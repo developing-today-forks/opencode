@@ -1,6 +1,14 @@
 export * as SharedEvents from "./shared-events.js"
 
-export type SubscribeOptions = {
+/** The members of event union `A` whose type matches one of `Type`, including `rpc.*` events. */
+export type SelectedEvent<A extends { readonly type: string }, Type extends string> = A extends unknown
+  ? [Extract<Type, A["type"]>] extends [never]
+    ? never
+    : A
+  : never
+
+export type SubscribeOptions<Type extends string = string> = {
+  readonly types?: ReadonlyArray<Type>
   readonly signal?: AbortSignal
   /** Reports transport activity on the shared stream, including keepalive frames that carry no event. */
   readonly onActivity?: () => void
@@ -37,7 +45,6 @@ export function make<A extends { readonly type: string }>(
   options?: { readonly reconnect?: ReconnectPolicy },
 ) {
   type Completion = { readonly error: unknown } | Record<string, never>
-  type Delivery = { readonly value: A; readonly id?: string }
   type Subscriber = {
     push: (value: A, id?: string) => void
     finish: (completion: Completion) => void
@@ -167,14 +174,28 @@ export function make<A extends { readonly type: string }>(
   }
 
   return {
-    subscribe(options?: SubscribeOptions): AsyncIterable<A> {
+    subscribe<
+      Type extends Exclude<A["type"], "server.connected" | "server.resync"> = Exclude<
+        A["type"],
+        "server.connected" | "server.resync"
+      >,
+    >(
+      options?: SubscribeOptions<Type>,
+    ): AsyncIterable<SelectedEvent<A, Type | "server.connected" | "server.resync">> {
       return {
         [Symbol.asyncIterator]() {
-          const pending: ReturnType<typeof Promise.withResolvers<IteratorResult<A>>>[] = []
-          const queued: Delivery[] = []
+          // server.connected and server.resync always come through so a filtered subscriber still sees reconnects and
+          // a lost replay, and can resync.
+          type Item = A & SelectedEvent<A, Type | "server.connected" | "server.resync">
+          type ItemDelivery = { readonly value: Item; readonly id?: string }
+          const pending: ReturnType<typeof Promise.withResolvers<IteratorResult<Item>>>[] = []
+          const queued: ItemDelivery[] = []
           let started = false
           let completion: Completion | undefined
           let connection: Connection | undefined
+          const types = options?.types?.length ? new Set<string>(options.types) : undefined
+          const selected = (value: A): value is Item =>
+            !types || value.type === "server.connected" || value.type === "server.resync" || types.has(value.type)
 
           function finish(result: Completion, discard = true) {
             completion = result
@@ -192,7 +213,7 @@ export function make<A extends { readonly type: string }>(
           }
 
           // The id is reported when the event is handed to the consumer, not when it is queued.
-          function take(delivery: Delivery): IteratorResult<A> {
+          function take(delivery: ItemDelivery): IteratorResult<Item> {
             if (delivery.id !== undefined) options?.onEventId?.(delivery.id)
             return { done: false, value: delivery.value }
           }
@@ -204,6 +225,7 @@ export function make<A extends { readonly type: string }>(
             },
             push(value, id) {
               if (completion) return
+              if (!selected(value)) return
               const request = pending.shift()
               if (request) {
                 request.resolve(take({ value, id }))
@@ -234,7 +256,7 @@ export function make<A extends { readonly type: string }>(
           }
 
           return {
-            next(): Promise<IteratorResult<A>> {
+            next(): Promise<IteratorResult<Item>> {
               const delivery = queued.shift()
               if (delivery) return Promise.resolve(take(delivery))
               if (completion) {
@@ -245,7 +267,7 @@ export function make<A extends { readonly type: string }>(
                 abort()
                 return Promise.resolve({ done: true, value: undefined })
               }
-              const request = Promise.withResolvers<IteratorResult<A>>()
+              const request = Promise.withResolvers<IteratorResult<Item>>()
               pending.push(request)
               if (!started) {
                 started = true
@@ -254,7 +276,7 @@ export function make<A extends { readonly type: string }>(
               }
               return request.promise
             },
-            return(): Promise<IteratorResult<A>> {
+            return(): Promise<IteratorResult<Item>> {
               finish({})
               return Promise.resolve({ done: true, value: undefined })
             },

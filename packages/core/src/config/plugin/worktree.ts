@@ -17,7 +17,7 @@ export const Plugin = define({
     const location = yield* Location.Service
     const global = yield* Global.Service
     const worktrees = yield* WorktreeStrategies.Service
-    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, ["worktree"], worktrees.reload())
+    const loaded = yield* ConfigEntryObserver.observe(config, ctx.event, worktrees.reload(), ["worktree"])
     yield* worktrees.transform((editor) => {
       for (const entry of loaded.entries) {
         if (entry.type !== "document" || !entry.info.worktree) continue

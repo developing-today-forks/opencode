@@ -65,7 +65,7 @@ const addPlugins = Effect.fn(function* (entries: Entry[]) {
     Effect.provideService(HttpClient.HttpClient, unavailableModels),
     Effect.provide(config),
   )
-  yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin)).pipe(Effect.provide(config))
+  yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin, ConfigProviderPlugin.Plugin.id)).pipe(Effect.provide(config))
 })
 
 const chatgpt = (access: string) =>

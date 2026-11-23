@@ -28,6 +28,7 @@ export function getFilenameTruncated(path: string | undefined, maxLength = 20) {
 }
 
 export function truncateMiddle(text: string, maxLength = 20) {
+  if (maxLength <= 0) return ""
   if (text.length <= maxLength) return text
   if (maxLength <= 0) return ""
   const available = maxLength - 1

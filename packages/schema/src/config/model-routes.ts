@@ -7,6 +7,14 @@ import { optional, PositiveInt } from "../schema.js"
 
 // Field descriptions sit inside optional(...): annotated outside it, a description never reaches the
 // generated JSON schema, so editors and the OpenAPI document show nothing for the field.
+// Custom checks carry a representation so client codegen can describe them. The client only needs the types;
+// the server's decode runs the real predicate.
+const routeFilter = <T>(name: string, predicate: (value: T) => string | undefined | boolean) =>
+  Schema.makeFilter(predicate, {
+    representation: { id: `opencode/config/model-routes/${name}`, payload: null },
+    toCode: () => ({ runtime: "Schema.makeFilter(() => undefined)" }),
+  })
+
 const BoundedPositiveInt = PositiveInt.check(Schema.isLessThanOrEqualTo(3_600_000))
 const SampleCount = PositiveInt.check(Schema.isLessThanOrEqualTo(50))
 const PositiveFinite = Schema.Finite.check(Schema.isGreaterThan(0))
@@ -175,7 +183,7 @@ const DAY_NAMES: ReadonlySet<string> = new Set([
 /** A weekday in a parser-accepted text form: a day name in any case or padding, or a
  * numeric string "0" to "6" (zero-padding allowed), mirroring the parser's dayOfWeek. */
 const DayOfWeekText = Schema.String.check(
-  Schema.makeFilter((value: string) => {
+  routeFilter("day-of-week", (value: string) => {
     const text = value.trim().toLowerCase()
     return /^0?[0-6]$/.test(text) || DAY_NAMES.has(text)
       ? undefined
@@ -214,7 +222,7 @@ const DayOfWeek = Schema.Union([
  * mirroring the parser's dayOfMonth: an optionally signed integer string whose value
  * is -1 or 1 to 31. */
 const DayOfMonthText = Schema.String.check(
-  Schema.makeFilter((value: string) => {
+  routeFilter("day-of-month", (value: string) => {
     const text = value.trim()
     const parsed = /^-?\d+$/.test(text) ? Number(text) : Number.NaN
     return parsed === -1 || (parsed >= 1 && parsed <= 31)
@@ -234,7 +242,7 @@ const DayOfMonth = Schema.Union([
 /** A window name: the parser trims before testing its pattern and stores the trimmed
  * name, so decode tests the trimmed value too (#2041). */
 const WindowName = Schema.String.check(
-  Schema.makeFilter((value: string) =>
+  routeFilter("window-name", (value: string) =>
     /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(value.trim())
       ? undefined
       : `invalid window name "${value}": expected 1 to 128 letters, digits, ".", "_" or "-", starting with a letter or digit`,
@@ -260,7 +268,7 @@ const isRealDate = (text: string): boolean => {
 /** One `dates`/`excludeDates` entry: a single "YYYY-MM-DD" day, or an inclusive
  * "YYYY-MM-DD/YYYY-MM-DD" range whose end is not before its start. */
 const DateEntry = Schema.String.check(
-  Schema.makeFilter((value: string) => {
+  routeFilter("date-entry", (value: string) => {
     const match = DATE_ENTRY.exec(value.trim())
     if (!match)
       return `invalid window date entry "${value}": expected "YYYY-MM-DD" or an inclusive "YYYY-MM-DD/YYYY-MM-DD" range`
@@ -288,7 +296,7 @@ const timeMinutes = (value: string): number | undefined => {
 
 const timeOfDay = (description: string) =>
   Schema.String.annotate({ description }).check(
-    Schema.makeFilter((value: string) =>
+    routeFilter("time-of-day", (value: string) =>
       timeMinutes(value) === undefined
         ? `invalid window time "${value}": expected "HH:mm" with hours 0-23 and minutes 0-59`
         : undefined,
@@ -299,7 +307,7 @@ const timeOfDay = (description: string) =>
  * The parser trims before resolving, so this check does the same. */
 const timezone = (description: string) =>
   Schema.String.annotate({ description }).check(
-    Schema.makeFilter((value: string) => {
+    routeFilter("timezone", (value: string) => {
       try {
         new Intl.DateTimeFormat("en-US", { timeZone: value.trim() })
         return undefined
@@ -352,7 +360,7 @@ class WindowClass extends Schema.Class<WindowClass>("Config.ModelRoute.Window")(
 }) {}
 
 export const Window = WindowClass.check(
-  Schema.makeFilter((window: WindowClass) => {
+  routeFilter("window", (window: WindowClass) => {
     // An empty list is unreadable to the runtime parser, which drops the window (#1681
     // for the date lists, #2041 for the day and exclusion lists).
     if (window.daysOfWeek !== undefined && window.daysOfWeek.length === 0)
@@ -415,7 +423,7 @@ class ScheduleClass extends Schema.Class<ScheduleClass>("Config.ModelRoute.Sched
  * its window and targets and then changes nothing — either way the operator believes
  * a weight change is in force that routing does not perform. */
 export const Schedule = ScheduleClass.check(
-  Schema.makeFilter((schedule: ScheduleClass) =>
+  routeFilter("schedule", (schedule: ScheduleClass) =>
     (schedule.factor === undefined) !== (schedule.weight === undefined)
       ? undefined
       : "a schedule must set exactly one of factor and weight",
@@ -465,7 +473,7 @@ class GlobalScheduleClass extends Schema.Class<GlobalScheduleClass>("Config.Mode
  * weight-wins path, so a both-set global schedule silently discards its `factor` and a
  * neither-set one is silently inert. */
 export const GlobalSchedule = GlobalScheduleClass.check(
-  Schema.makeFilter((schedule: GlobalScheduleClass) =>
+  routeFilter("global-schedule", (schedule: GlobalScheduleClass) =>
     (schedule.factor === undefined) !== (schedule.weight === undefined)
       ? undefined
       : "a global schedule must set exactly one of factor and weight",
@@ -719,7 +727,7 @@ class EscalationClass extends Schema.Class<EscalationClass>("Config.ModelRoute.S
  * when either side is omitted, so one-sided overrides are checked too. Equality is valid:
  * every outcome in the window giving up reaches the threshold exactly. */
 export const Escalation = EscalationClass.check(
-  Schema.makeFilter((escalation: EscalationClass) =>
+  routeFilter("escalation", (escalation: EscalationClass) =>
     (escalation.afterGiveUps ?? 2) <= (escalation.outcomeWindow ?? 5)
       ? undefined
       : "escalation afterGiveUps must not exceed outcomeWindow",
