@@ -175,3 +175,46 @@ describe("ConfigNormalize with Aliases", () => {
     expect(ModelAlias.resolve(aliases, "ds/deepseek-chat#hi")).toBe("deepseek/deepseek-chat#max")
   })
 })
+
+describe("ConfigNormalize alias cycles (#2567)", () => {
+  const cyclic = { models: { "a/x": "a/y", "a/y": "a/x" } }
+  const cycleMessage = "Cycle detected in alias resolution: a/x -> a/y -> a/x"
+
+  test("names an alias cycle in the default model", () => {
+    const result = ConfigNormalize.normalize({ aliases: cyclic, model: "a/x" })
+    expect(result.type).toBe("normalized")
+    expect(result.diagnostics).toContainEqual({ kind: "invalid", path: ["model"], message: cycleMessage })
+  })
+
+  test("names an alias cycle in an agent model", () => {
+    const result = ConfigNormalize.normalize({ aliases: cyclic, agent: { coder: { model: "a/x" } } })
+    expect(result.type).toBe("normalized")
+    expect(result.diagnostics).toContainEqual({
+      kind: "invalid",
+      path: ["agent", "coder", "model"],
+      message: cycleMessage,
+    })
+  })
+
+  test("names an alias cycle in a model route target", () => {
+    const result = ConfigNormalize.normalize({
+      aliases: cyclic,
+      experimental: { model_routes: { pool: { targets: ["a/x"], selection: "ordered" } } },
+    })
+    expect(result.type).toBe("normalized")
+    expect(result.diagnostics).toContainEqual({
+      kind: "invalid",
+      path: ["experimental", "model_routes", "pool", "targets"],
+      message: cycleMessage,
+    })
+  })
+
+  test("keeps the silent fallthrough for non-cycle alias errors", () => {
+    const result = ConfigNormalize.normalize({
+      aliases: { models: { bad: "a//b" } },
+      agent: { coder: { model: "bad" } },
+    })
+    expect(result.type).toBe("normalized")
+    expect(result.diagnostics.some((item) => item.message.includes("alias resolution"))).toBe(false)
+  })
+})

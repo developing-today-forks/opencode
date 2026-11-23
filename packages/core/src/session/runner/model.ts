@@ -29,7 +29,8 @@ export class ModelUnavailableError extends Schema.TaggedError<ModelUnavailableEr
 ) {
   override get message() {
     // A bare alias target carries an empty model id; name the original input, not a trailing slash.
-    if (!this.modelID) return `Model unavailable: ${this.providerID}`
+    if (!this.modelID)
+      return this.detail ? `Model unavailable: ${this.providerID}. ${this.detail}` : `Model unavailable: ${this.providerID}`
     if (this.providerID === "azure-cognitive-services")
       return `Model unavailable: ${this.providerID}/${this.modelID}. This provider has been deprecated; use azure/${this.modelID} instead.`
     if (this.providerID === "google-vertex-anthropic")
@@ -136,7 +137,15 @@ export const layer = Layer.effect(
           id: Model.ID.make(res.id),
           ...(res.variant ? { variant: Model.VariantID.make(res.variant) } : {}),
         })
-      } catch {
+      } catch (error) {
+        // An alias cycle or depth overrun is a configuration error: name it in the
+        // unavailable-model error instead of silently using the unresolved ref (#2567).
+        if (error instanceof ModelAlias.AliasCycleError || error instanceof ModelAlias.AliasMaxDepthError)
+          return yield* new ModelUnavailableError({
+            providerID: ref.providerID,
+            modelID: ref.id,
+            detail: error.message,
+          })
         return ref
       }
     })

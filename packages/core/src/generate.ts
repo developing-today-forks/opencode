@@ -473,6 +473,7 @@ export const layer = Layer.effect(
             "SessionRunnerModel.ModelInitializationError",
             "SessionRunnerModel.UnresolvedProviderVariablesError",
             "SessionRunnerModel.UnsupportedCompactionError",
+            "SessionRunnerModel.AliasResolutionError",
           ],
           (error) => {
             const mapped: CompletionError = requested
@@ -842,6 +843,7 @@ export const layer = Layer.effect(
               "SessionRunnerModel.ModelInitializationError",
               "SessionRunnerModel.UnresolvedProviderVariablesError",
               "SessionRunnerModel.UnsupportedCompactionError",
+              "SessionRunnerModel.AliasResolutionError",
             ],
             (error) =>
               Effect.fail(
