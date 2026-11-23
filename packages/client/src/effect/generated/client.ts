@@ -2412,7 +2412,9 @@ const EndpointVcsBase = (raw: RawClient["server.vcs"]) => (input?: VcsBaseInput)
 
 const EndpointVcsStatus = (raw: RawClient["server.vcs"]) => (input?: VcsStatusInput) =>
   preserveEffect<VcsStatusOutput>()(
-    raw["vcs.status"]({ query: { location: input?.["location"] } }).pipe(Effect.mapError(mapClientError)),
+    raw["vcs.status"]({ query: { location: input?.["location"], limit: input?.["limit"] } }).pipe(
+      Effect.mapError(mapClientError),
+    ),
   )
 
 const EndpointVcsBranchList = (raw: RawClient["server.vcs"]) => (input?: VcsBranchListInput) =>

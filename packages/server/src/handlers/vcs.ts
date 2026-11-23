@@ -3,6 +3,7 @@ import { Project } from "@opencode/core/project"
 import { Worktree } from "@opencode/core/worktree"
 import { Bus } from "@opencode/core/bus"
 import { PluginVcsBranchList } from "@opencode/core/plugin/vcs/branch-list"
+import { PluginVcsStatusList } from "@opencode/core/plugin/vcs/status-list"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-services"
 import { ConflictError, InvalidRequestError, ServiceUnavailableError } from "@opencode/protocol/errors"
@@ -71,11 +72,11 @@ export const VcsHandler = HttpApiBuilder.group(Api, "server.vcs", (handlers) =>
           }),
         ),
       )
-      .handle("vcs.status", () =>
+      .handle("vcs.status", (ctx) =>
         response(
           Effect.gen(function* () {
             const vcs = yield* Vcs.Service
-            return yield* vcs.status()
+            return yield* vcs.status({ limit: PluginVcsStatusList.statusListLimit(ctx.query.limit) })
           }),
         ),
       )

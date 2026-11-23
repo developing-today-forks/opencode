@@ -17610,6 +17610,14 @@
             "required": false,
             "style": "deepObject",
             "explode": true
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
           }
         ],
         "security": [],
@@ -17668,7 +17676,7 @@
             }
           }
         },
-        "description": "List uncommitted working-copy changes relative to the requested location.",
+        "description": "List uncommitted working-copy changes relative to the requested location. Results are bounded to one page (default 200, maximum 1000); when more changed files exist, the last entry of the page is marked `more`. Pass `limit` to choose a smaller page.",
         "summary": "VCS status"
       }
     },
@@ -32727,6 +32735,10 @@
           "status": {
             "type": "string",
             "enum": ["added", "deleted", "modified"]
+          },
+          "more": {
+            "type": "boolean",
+            "enum": [true]
           }
         },
         "required": ["file", "additions", "deletions", "status"],

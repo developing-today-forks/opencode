@@ -37,5 +37,7 @@ export const FileStatus = Schema.Struct({
   additions: NonNegativeInt,
   deletions: NonNegativeInt,
   status: Schema.Literals(["added", "deleted", "modified"]),
+  /** Marks the last entry of a status page that stopped at the result limit; more changed files exist beyond it. */
+  more: Schema.Literal(true).pipe(optional),
 }).annotate({ identifier: "Vcs.FileStatus" })
 export interface FileStatus extends Schema.Schema.Type<typeof FileStatus> {}

@@ -15,6 +15,7 @@ import { State } from "@opencode/core/state"
 import { Vcs } from "@opencode/core/vcs"
 import { VcsGitPlugin } from "@opencode/core/plugin/vcs/git"
 import { branchListLimit, listBranches } from "@opencode/core/plugin/vcs/branch-list"
+import { listStatus, statusListLimit } from "@opencode/core/plugin/vcs/status-list"
 import type { VcsDefinition, VcsDiffInput } from "@opencode/plugin/effect/vcs"
 import { FileSystem } from "@opencode/schema/filesystem"
 import { VcsEvent } from "@opencode/schema/vcs-event"
@@ -618,6 +619,69 @@ describe("Vcs", () => {
     ),
   )
 
+  it.live("status pages bound the result and mark the last row when truncated", () =>
+    withGit((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(async () => {
+          await fs.writeFile(path.join(directory, "tracked.txt"), "one\n")
+          await commitAll(directory, "initial")
+          for (let index = 1; index <= 12; index++) {
+            await fs.writeFile(path.join(directory, `f${String(index).padStart(2, "0")}.txt`), "x\n")
+          }
+        })
+        const vcs = yield* Vcs.Service
+        expect(Vcs.statusLimit()).toBe(200)
+        expect(Vcs.statusLimit(0)).toBe(1)
+        expect(Vcs.statusLimit(-5)).toBe(1)
+        expect(Vcs.statusLimit(1.5)).toBe(1)
+        expect(Vcs.statusLimit(2.9)).toBe(2)
+        expect(Vcs.statusLimit(Number.NaN)).toBe(200)
+        expect(Vcs.statusLimit(Number.POSITIVE_INFINITY)).toBe(200)
+        expect(Vcs.statusLimit(5_000)).toBe(1000)
+        expect(statusListLimit()).toBe(200)
+        expect(statusListLimit(5_000)).toBe(1000)
+        // Unbounded callers see every changed file, unmarked.
+        const all = yield* vcs.status()
+        expect(all.length).toBe(12)
+        expect(all.every((row) => row.more === undefined)).toBe(true)
+        // A page stops at the limit; only its last row carries the marker.
+        const page = yield* vcs.status({ limit: 5 })
+        expect(page.length).toBe(5)
+        expect(page.map((row) => row.file)).toEqual(["f01.txt", "f02.txt", "f03.txt", "f04.txt", "f05.txt"])
+        expect(page.slice(0, 4).every((row) => row.more === undefined)).toBe(true)
+        expect(page[4]?.more).toBe(true)
+        // The plugin surface normalises the same way.
+        const pluginPage = yield* listStatus(vcs, { limit: 3 })
+        expect(pluginPage.length).toBe(3)
+        expect(pluginPage[2]?.more).toBe(true)
+        expect((yield* listStatus(vcs)).length).toBe(12)
+      }),
+    ),
+  )
+
+  it.live("service bounds a provider that ignores the status limit", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        const vcs = yield* Vcs.Service
+        const rows = Array.from({ length: 10 }, (_, index) => ({
+          file: `f${String(index + 1).padStart(2, "0")}.txt`,
+          additions: 1,
+          deletions: 0,
+          status: "added" as const,
+        }))
+        yield* vcs.transform((editor) => {
+          editor.add(provider({ status: () => Effect.succeed(rows) }))
+          editor.default.set("custom")
+        })
+        const page = yield* vcs.status({ limit: 4 })
+        expect(page.length).toBe(4)
+        expect(page.slice(0, 3).every((row) => row.more === undefined)).toBe(true)
+        expect(page[3]?.more).toBe(true)
+        expect((yield* vcs.status()).length).toBe(10)
+      }).pipe(provide(directory)),
+    ),
+  )
+
   it.live("lists remote branches without remote HEAD symrefs", () =>
     withGit((directory) =>
       Effect.gen(function* () {
@@ -766,6 +830,7 @@ describe("Vcs", () => {
               diff: yield* vcs.diff("working", { untracked: "folders" }),
               all: yield* vcs.diff("working"),
               status: yield* vcs.status(),
+              statusAll: yield* vcs.status({ limit: 1000 }),
             }
           }).pipe(provide(path.join(directory, scope), { git: true, worktree: directory }))
 
@@ -774,7 +839,10 @@ describe("Vcs", () => {
         expect(root.diff[1]).toMatchObject({ status: "added", additions: 0, deletions: 0 })
         // Callers that do not ask for folders, such as the TUI and plugins, still get every file.
         expect(root.all).toHaveLength(1 + 50 + 1 + 505 + 1)
-        expect(root.status).toHaveLength(1 + 50 + 1 + 505 + 1)
+        expect(root.statusAll).toHaveLength(1 + 50 + 1 + 505 + 1)
+        // The default status page is bounded and marks its last row.
+        expect(root.status).toHaveLength(200)
+        expect(root.status.at(-1)?.more).toBe(true)
 
         const folder = yield* review("research")
         expect(folder.diff).toHaveLength(53)

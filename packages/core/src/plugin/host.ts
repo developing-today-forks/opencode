@@ -41,6 +41,7 @@ import { Permission } from "../permission.js"
 import { PluginHooks } from "./hooks.js"
 import { PluginServerUrl } from "./server-url.js"
 import { PluginVcsBranchList } from "./vcs/branch-list.js"
+import { PluginVcsStatusList } from "./vcs/status-list.js"
 import type { Interface } from "../plugin.js"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 
@@ -564,7 +565,7 @@ export const make = Effect.fn("PluginHost.make")(function* (plugin: Pick<Interfa
       branch: {
         list: (input) => response(PluginVcsBranchList.listBranches(vcs, input)),
       },
-      status: () => response(vcs.status()),
+      status: (input) => response(PluginVcsStatusList.listStatus(vcs, input)),
       diff: (input) => response(vcs.diff(input.mode, { context: input.context, base: input.base })),
       transform: vcs.transform,
       reload: vcs.reload,

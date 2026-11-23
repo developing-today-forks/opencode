@@ -11,8 +11,8 @@ import { FileDiff } from "@opencode/schema/file-diff"
 import { Base, BranchList, FileStatus, Info, Mode } from "@opencode/schema/vcs"
 import { AppProcess } from "@opencode/util/process"
 import { Location } from "../../location.js"
-import type { Adapter, BranchOptions, DiffOptions, Untracked } from "../../vcs.js"
-import { DiffError } from "../../vcs.js"
+import type { Adapter, BranchOptions, DiffOptions, StatusOptions, Untracked } from "../../vcs.js"
+import { DiffError, statusLimit } from "../../vcs.js"
 import { gitExecutable } from "../../util/git-executable.js"
 import {
   chunksByFile,
@@ -51,7 +51,7 @@ export const Plugin = define({
         info: () => adapter.info(),
         base: () => adapter.base(),
         branches: (input) => adapter.branches({ search: input.search, limit: input.limit }),
-        status: () => adapter.status(),
+        status: (input) => adapter.status({ limit: input.limit }),
         diff: (input) =>
           adapter.diff(input.mode, { context: input.context, base: input.base, untracked: input.untracked }),
       })
@@ -80,7 +80,7 @@ function make(proc: AppProcess.Interface, input: { directory: string; worktree: 
     branches: Effect.fn("VcsGit.branches")(function* (options?: BranchOptions) {
       return yield* ctx.git.branches(ctx.directory, options)
     }),
-    status: Effect.fn("VcsGit.status")(function* () {
+    status: Effect.fn("VcsGit.status")(function* (options?: StatusOptions) {
       const git = ctx.git
       const ref = (yield* git.hasHead(ctx.directory)) ? "HEAD" : undefined
       const [list, stats] = yield* Effect.all(
@@ -91,27 +91,32 @@ function make(proc: AppProcess.Interface, input: { directory: string; worktree: 
         { concurrency: 2 },
       )
       const map = nums(stats)
+      // Page before any per-file work: rows beyond the page are never statted
+      // or serialized, and the last row of a truncated page is marked `more`.
+      const sorted = list.toSorted((a, b) => a.file.localeCompare(b.file))
+      const page = sorted.slice(0, statusLimit(options?.limit))
       const untracked = yield* untrackedBatch(
         ctx,
-        list.filter((item) => item.status === "added" && !map.has(item.file)).map((item) => item.file),
+        page.filter((item) => item.status === "added" && !map.has(item.file)).map((item) => item.file),
       )
-      return yield* Effect.forEach(
-        list.toSorted((a, b) => a.file.localeCompare(b.file)),
-        (item) =>
-          Effect.gen(function* () {
-            const stat =
-              map.get(item.file) ??
-              (item.status === "added"
-                ? (untracked.stats.get(item.file) ?? (yield* git.statUntracked(ctx.worktree, item.file)))
-                : undefined)
-            return {
-              file: item.file,
-              additions: stat?.additions ?? 0,
-              deletions: stat?.deletions ?? 0,
-              status: item.status,
-            } satisfies FileStatus
-          }),
+      const rows: FileStatus[] = yield* Effect.forEach(page, (item) =>
+        Effect.gen(function* () {
+          const stat =
+            map.get(item.file) ??
+            (item.status === "added"
+              ? (untracked.stats.get(item.file) ?? (yield* git.statUntracked(ctx.worktree, item.file)))
+              : undefined)
+          return {
+            file: item.file,
+            additions: stat?.additions ?? 0,
+            deletions: stat?.deletions ?? 0,
+            status: item.status,
+          } satisfies FileStatus
+        }),
       )
+      const last = rows[rows.length - 1]
+      if (last && sorted.length > page.length) rows[rows.length - 1] = { ...last, more: true }
+      return rows
     }),
     diff: Effect.fn("VcsGit.diff")(function* (mode: Mode, options?: DiffOptions) {
       const git = ctx.git
