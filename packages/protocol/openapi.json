@@ -10990,6 +10990,32 @@
               "description": "An absolute path or a path relative to the requested location. Defaults to the location directory."
             },
             "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Maximum number of entries to return, at most 200. Defaults to 100."
+            },
+            "required": false
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Number of entries to skip in the directories-first sorted order before the page starts. Defaults to 0."
+            },
+            "required": false
           }
         ],
         "security": [],
@@ -11055,7 +11081,7 @@
             }
           }
         },
-        "description": "List direct children using an absolute path or a path relative to the requested location, including parents and siblings outside its directory. Entry paths remain relative to the requested location; listing does not switch locations.",
+        "description": "List direct children using an absolute path or a path relative to the requested location, including parents and siblings outside its directory. Entry paths remain relative to the requested location; listing does not switch locations. Results are paged in a deterministic directories-first sorted order: limit (default 100, at most 200) bounds the page and offset skips entries before it, so a page shorter than the limit marks the end of the listing and a full page may be followed by more entries at offset + limit.",
         "summary": "List directory"
       }
     },

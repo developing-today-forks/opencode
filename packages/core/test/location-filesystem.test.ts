@@ -65,6 +65,35 @@ describe("FileSystem", () => {
     ),
   )
 
+  it.live("bounds list pages at the ceiling and pages through with offset", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        // 250 files: more than the 200-entry page ceiling (#2508).
+        yield* Effect.promise(() =>
+          Promise.all(
+            Array.from({ length: 250 }, (_, i) =>
+              fs.writeFile(path.join(directory, `file-${String(i).padStart(3, "0")}.txt`), "x"),
+            ),
+          ),
+        )
+        const filesystem = yield* FileSystem.Service
+        const first = yield* filesystem.list()
+        expect(first).toHaveLength(100)
+        const capped = yield* filesystem.list({ limit: 500 })
+        expect(capped).toHaveLength(200)
+        const second = yield* filesystem.list({ limit: 100, offset: 100 })
+        const third = yield* filesystem.list({ limit: 100, offset: 200 })
+        expect(second).toHaveLength(100)
+        expect(third).toHaveLength(50)
+        // The pages are disjoint slices of one deterministic sorted order.
+        const paged = [...first, ...second, ...third].map((entry) => entry.path)
+        expect(new Set(paged).size).toBe(250)
+        expect(paged).toEqual([...paged].sort((a, b) => a.localeCompare(b)))
+        expect(capped.map((entry) => entry.path)).toEqual(paged.slice(0, 200))
+      }).pipe(provide(directory)),
+    ),
+  )
+
   it.live("skips host canonicalization for workspace locations at boot", () =>
     withTmp((directory) =>
       Effect.gen(function* () {

@@ -2676,7 +2676,12 @@ export function make(options: ClientOptions) {
           {
             method: "GET",
             path: `/api/fs/list`,
-            query: { location: input?.["location"], path: input?.["path"] },
+            query: {
+              location: input?.["location"],
+              path: input?.["path"],
+              limit: input?.["limit"],
+              offset: input?.["offset"],
+            },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
             empty: false,

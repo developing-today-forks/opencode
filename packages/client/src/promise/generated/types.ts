@@ -5564,6 +5564,8 @@ export type FileReadOutput = globalThis.Uint8Array
 export type FileListInput = {
   readonly location?: { readonly directory?: string | undefined } | undefined
   readonly path?: string | undefined
+  readonly limit?: number | undefined
+  readonly offset?: number | undefined
 }
 
 export type FileListOutput = { location: LocationPublicRef; data: Array<FileSystemEntry> }
