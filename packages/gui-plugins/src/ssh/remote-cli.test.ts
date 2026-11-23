@@ -264,6 +264,37 @@ function runDiscoverScript(precedingPrint?: string) {
   }
 }
 
+// Runs the real discoverScript with the desktop-ssh cache options bootstrap
+// uses, against a fake staged CLI for each given beta suffix, and returns the
+// script's raw output plus the staged path for a suffix.
+function runDiscoverCacheScript(suffixes: string[]) {
+  const home = mkdtempSync(path.join(tmpdir(), "ssh-discover-cache-"))
+
+  try {
+    for (const suffix of suffixes) {
+      const cli = path.join(home, ".opencode/desktop-ssh", `0.0.0-beta-${suffix}`, "opencode")
+      mkdirSync(path.dirname(cli), { recursive: true })
+      writeFileSync(cli, "#!/bin/sh\n")
+      chmodSync(cli, 0o755)
+    }
+
+    const result = spawnSync("sh", ["-s"], {
+      input: RemoteCli.discoverScript({ cache: { directory: ".opencode/desktop-ssh", prefix: "0.0.0-beta-" } }),
+      encoding: "utf8",
+      env: { ...process.env, HOME: home },
+    })
+
+    if (result.status !== 0) throw new Error(`discoverScript exited ${result.status}: ${result.stderr}`)
+
+    return {
+      output: result.stdout,
+      staged: (suffix: string) => path.join(home, ".opencode/desktop-ssh", `0.0.0-beta-${suffix}`, "opencode"),
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+}
+
 describe("SSH probeScript and discoverScript", () => {
   test("probeScript prints the target marker with a leading newline", () => {
     expect(RemoteCli.probeScript).toContain(`printf '\\nOPENCODE_REMOTE_TARGET=%s\\n' "$target"`)
@@ -298,6 +329,31 @@ describe("SSH probeScript and discoverScript", () => {
       const clean = runDiscoverScript()
 
       expect(clean.output.split(/\r?\n/)).toContain(clean.cli)
+    },
+  )
+
+  test.skipIf(process.platform === "win32")(
+    "prints the newest cached beta, not the lexically-last one, through the real discoverScript",
+    () => {
+      const multi = runDiscoverCacheScript(["9", "10"])
+
+      expect(multi.output.split(/\r?\n/)).toContain(multi.staged("10"))
+      expect(multi.output.split(/\r?\n/)).not.toContain(multi.staged("9"))
+
+      const low = runDiscoverCacheScript(["2", "10"])
+
+      expect(low.output.split(/\r?\n/)).toContain(low.staged("10"))
+      expect(low.output.split(/\r?\n/)).not.toContain(low.staged("2"))
+    },
+  )
+
+  test.skipIf(process.platform === "win32")(
+    "keeps the single-cache and no-cache output, through the real discoverScript",
+    () => {
+      const single = runDiscoverCacheScript(["9"])
+
+      expect(single.output.split(/\r?\n/)).toContain(single.staged("9"))
+      expect(runDiscoverCacheScript([]).output.trim()).toBe("")
     },
   )
 })
