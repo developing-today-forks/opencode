@@ -380,10 +380,18 @@ const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest) {
           functionResponse: {
             ...(omitCallIds ? {} : { id: part.id }),
             name: part.name,
-            response: {
-              name: part.name,
-              content: ProviderShared.toolResultText(part),
-            },
+            response:
+              part.result.type === "error"
+                ? {
+                    // Gemini's documented error convention: functionResponse.response
+                    // carries an `error` key instead of `content` for failed results.
+                    name: part.name,
+                    error: ProviderShared.toolResultText(part),
+                  }
+                : {
+                    name: part.name,
+                    content: ProviderShared.toolResultText(part),
+                  },
           },
         })
         continue
