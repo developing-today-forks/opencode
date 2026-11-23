@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, open, rm, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, open, rm, symlink, type FileHandle } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -237,6 +237,85 @@ test("uploads refuse a path swapped for an outside symlink between the check and
   } finally {
     await rm(dir, { recursive: true, force: true })
     await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test("uploads reject an over-total selection without reading the payload of the file that crosses the limit", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "browser-upload-"))
+  try {
+    const size = 2 * 1024 * 1024
+    const names = ["a.bin", "b.bin", "c.bin"]
+    const paths: string[] = []
+    for (const name of names) {
+      const path = join(dir, name)
+      const handle = await open(path, "w")
+      await handle.truncate(size)
+      await handle.close()
+      paths.push(path)
+    }
+    const canonical = await Effect.runPromise(BrowserFiles.physical(paths))
+    // The seam counts the payload bytes read from each opened file, so the test can show the
+    // aggregate budget is enforced during the reads: the file whose measured size crosses the
+    // remaining budget is refused before a single byte of its payload is read, instead of all
+    // three payloads being materialized first and the selection rejected afterwards.
+    const readBytes = new Map<string, number>()
+    const counting = async (candidate: string) => {
+      const handle = await open(candidate, "r")
+      const read = handle.read.bind(handle)
+      handle.read = (async (buffer: Buffer, offset: number, length: number, position: number) => {
+        const result = await read(buffer, offset, length, position)
+        readBytes.set(candidate, (readBytes.get(candidate) ?? 0) + result.bytesRead)
+        return result
+      }) as typeof handle.read
+      return handle
+    }
+    await expect(Effect.runPromise(BrowserFiles.read(canonical, paths, counting))).rejects.toThrow(
+      "The selected upload files exceed 5 MiB in total.",
+    )
+    expect(readBytes.get(canonical[0]!)).toBe(size)
+    expect(readBytes.get(canonical[1]!)).toBe(size)
+    expect(readBytes.get(canonical[2]!) ?? 0).toBe(0)
+
+    // A single file larger than the whole budget is refused the same way, also unread.
+    const big = join(dir, "big.bin")
+    const handle = await open(big, "w")
+    await handle.truncate(Browser.MAX_FILE_BYTES + 1024)
+    await handle.close()
+    const [bigCanonical] = await Effect.runPromise(BrowserFiles.physical([big]))
+    readBytes.clear()
+    await expect(Effect.runPromise(BrowserFiles.read([bigCanonical!], [big], counting))).rejects.toThrow(
+      "The selected upload files exceed 5 MiB in total.",
+    )
+    expect(readBytes.get(bigCanonical!) ?? 0).toBe(0)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("a file that grows after it was measured cannot push its read past the measured size", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "browser-upload-"))
+  try {
+    const path = join(dir, "growing.txt")
+    await Bun.write(path, "0123456789")
+    const paths = await Effect.runPromise(BrowserFiles.physical([path]))
+    // The deterministic growth: the opened handle reports the size measured when the file was
+    // checked (4), while the file on disk has already grown past it (10). The read must stay
+    // bounded by the measured size instead of following the growth to the new end of file.
+    const grown = async (candidate: string) => {
+      const handle = await open(candidate, "r")
+      const info = await handle.stat()
+      return {
+        stat: async () => ({ dev: info.dev, ino: info.ino, size: 4, isFile: () => true }),
+        read: (buffer: Buffer, offset: number, length: number, position: number) =>
+          handle.read(buffer, offset, length, position),
+        close: () => handle.close(),
+      } as unknown as FileHandle
+    }
+    const [file] = await Effect.runPromise(BrowserFiles.read(paths, [path], grown))
+    expect(file?.data.byteLength).toBe(4)
+    expect(new TextDecoder().decode(file?.data)).toBe("0123")
+  } finally {
+    await rm(dir, { recursive: true, force: true })
   }
 })
 
