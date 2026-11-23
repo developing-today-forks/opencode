@@ -1,4 +1,5 @@
 import { describe, expect } from "bun:test"
+import fs from "node:fs"
 import path from "node:path"
 import { Agent } from "@opencode/schema/agent"
 import { Location } from "@opencode/schema/location"
@@ -10,7 +11,7 @@ import { Tool } from "@opencode/schema/tool"
 import { Effect } from "effect"
 import { GitHubFiles } from "../src/files.js"
 import { GitHubProcess } from "../src/process.js"
-import { it } from "./lib"
+import { it, tmpdirScoped } from "./lib"
 
 const context: Tool.Context = {
   sessionID: Session.ID.make("ses_files"),
@@ -26,6 +27,25 @@ const context: Tool.Context = {
 // source and keep their literal form in the expectations below.
 const root = path.resolve("/work/repo")
 const outside = path.join(path.parse(root).root, "tmp", "out")
+
+// External targets are reported by their canonical path (#2641), which differs
+// from the lexical spelling where an existing ancestor is a symlink (for
+// example /tmp on macOS). Expectations for outside paths are stated canonically.
+const canonical = (absolute: string): string => {
+  let current = absolute
+  const tail: string[] = []
+  while (true) {
+    try {
+      const resolved = fs.realpathSync(current)
+      return tail.length === 0 ? resolved : path.join(resolved, ...tail.reverse())
+    } catch {
+      const parent = path.dirname(current)
+      if (parent === current) return absolute
+      tail.push(path.basename(current))
+      current = parent
+    }
+  }
+}
 
 const make = () => {
   const asserted: Array<{ action: string; resources: ReadonlyArray<string> }> = []
@@ -72,17 +92,103 @@ describe("GitHubFiles", () => {
   it.live("paths outside the project need external-directory approval for their directory first", () =>
     Effect.gen(function* () {
       const { files, asserted } = make()
-      const shot = path.join(outside, "shot.png")
-      const downloads = path.join(path.parse(root).root, "tmp", "downloads")
-      const file = yield* files.authorizeRead(shot, context)
-      expect(file).toEqual({ absolute: shot, resource: shot.replaceAll("\\", "/"), external: outside })
+      const shot = canonical(path.join(outside, "shot.png"))
+      const canonicalOutside = canonical(outside)
+      const downloads = canonical(path.join(path.parse(root).root, "tmp", "downloads"))
+      const file = yield* files.authorizeRead(path.join(outside, "shot.png"), context)
+      expect(file).toEqual({ absolute: shot, resource: shot.replaceAll("\\", "/"), external: canonicalOutside })
       const directory = yield* files.resolve({ path: downloads, kind: "directory" })
       yield* files.authorizeExternal([directory], context)
       expect(asserted).toEqual([
-        { action: "external_directory", resources: [`${outside.replaceAll("\\", "/")}/*`] },
+        { action: "external_directory", resources: [`${canonicalOutside.replaceAll("\\", "/")}/*`] },
         { action: "read", resources: [shot.replaceAll("\\", "/")] },
         { action: "external_directory", resources: [`${downloads.replaceAll("\\", "/")}/*`] },
       ])
+    }),
+  )
+})
+
+describe("GitHubFiles canonical classification", () => {
+  const makeAt = (directory: string) => {
+    const asserted: Array<{ action: string; resources: ReadonlyArray<string> }> = []
+    const files = GitHubFiles.make({
+      location: new Location.Info({
+        directory: AbsolutePath.make(directory),
+        project: {
+          id: Project.ID.global,
+          directory: AbsolutePath.make(directory),
+          canonical: AbsolutePath.make(directory),
+        },
+      }),
+      permission: {
+        assert: (input) => Effect.sync(() => void asserted.push({ action: input.action, resources: input.resources })),
+      },
+    })
+    return { files, asserted }
+  }
+
+  it.live(
+    "an in-project symlink to a file outside the project needs external-directory approval for the canonical directory",
+    () =>
+      Effect.gen(function* () {
+        const tmp = yield* tmpdirScoped()
+        const project = path.join(tmp.path, "project")
+        const outsideDir = path.join(tmp.path, "outside")
+        fs.mkdirSync(project, { recursive: true })
+        fs.mkdirSync(outsideDir, { recursive: true })
+        const secret = path.join(outsideDir, "secret.txt")
+        fs.writeFileSync(secret, "secret\n")
+        fs.symlinkSync(secret, path.join(project, "linked.txt"))
+        const { files, asserted } = makeAt(project)
+        const target = yield* files.resolve({ path: "linked.txt", kind: "file" })
+        expect(target).toEqual({
+          absolute: secret,
+          resource: secret.replaceAll("\\", "/"),
+          external: outsideDir,
+        })
+        const read = yield* files.authorizeRead("linked.txt", context)
+        // The path handed back is the canonical file, so the file that was authorized is the file that is read.
+        expect(read.absolute).toBe(secret)
+        expect(asserted).toEqual([
+          { action: "external_directory", resources: [`${outsideDir.replaceAll("\\", "/")}/*`] },
+          { action: "read", resources: [secret.replaceAll("\\", "/")] },
+        ])
+      }),
+  )
+
+  it.live("a path through a symlinked in-project directory to an outside file is external", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const project = path.join(tmp.path, "project")
+      const outsideDir = path.join(tmp.path, "outside")
+      fs.mkdirSync(project, { recursive: true })
+      fs.mkdirSync(outsideDir, { recursive: true })
+      const secret = path.join(outsideDir, "secret.txt")
+      fs.writeFileSync(secret, "secret\n")
+      fs.symlinkSync(outsideDir, path.join(project, "links"), "dir")
+      const { files } = makeAt(project)
+      const target = yield* files.resolve({ path: "links/secret.txt", kind: "file" })
+      expect(target).toEqual({
+        absolute: secret,
+        resource: secret.replaceAll("\\", "/"),
+        external: outsideDir,
+      })
+    }),
+  )
+
+  it.live("an in-project symlink to another in-project file stays internal", () =>
+    Effect.gen(function* () {
+      const tmp = yield* tmpdirScoped()
+      const project = path.join(tmp.path, "project")
+      fs.mkdirSync(project, { recursive: true })
+      const real = path.join(project, "real.txt")
+      fs.writeFileSync(real, "real\n")
+      fs.symlinkSync(real, path.join(project, "inner.txt"))
+      const { files, asserted } = makeAt(project)
+      const read = yield* files.authorizeRead("inner.txt", context)
+      expect(asserted).toEqual([{ action: "read", resources: ["inner.txt"] }])
+      // The read is authorized on the lexical resource; the path handed back is the canonical file.
+      expect(read).toEqual({ absolute: real, resource: "inner.txt" })
     }),
   )
 })
