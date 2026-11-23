@@ -76,7 +76,7 @@ async fn config_reads_and_update_refreshes_are_opt_in() {
     );
     let config_reads = || requests.get().iter().filter(|path| *path == "/api/config").count();
     let event =
-        json!({ "id": "evt_config", "created": 1, "type": "config.updated", "location": location(), "data": {} });
+        json!({ "id": "evt_config", "created": 1, "type": "config.updated", "location": location(), "data": { "sections": [] } });
 
     data.location_sync(None).await.unwrap();
     emit(&data, event.clone());
