@@ -8,6 +8,7 @@ import {
   parseKeyringCreds,
   refresh,
   TOKEN_REFRESH_MAX_RESPONSE_BYTES,
+  tokenRefreshRejection,
 } from "../../src/providers/antigravity-auth.js"
 import { handlerLayer, observe } from "../lib/http.js"
 import { it } from "../lib/effect.js"
@@ -184,6 +185,44 @@ describe("Antigravity blank-credential rule (#1765)", () => {
       )
       const token = yield* refresh("refresh-fixture").pipe(Effect.provide(layer))
       expect(token.accessToken).toBe("fresh-token")
+    }),
+  )
+})
+
+describe("Antigravity token refresh rejection facts (#2693)", () => {
+  it.effect("a 400 whose body carries an OAuth error code propagates code and status; the message is unchanged", () =>
+    Effect.gen(function* () {
+      const layer = handlerLayer((input) =>
+        Effect.succeed(
+          input.respond(JSON.stringify({ error: "unauthorized_client", error_description: "fixture rejection" }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          }),
+        ),
+      )
+      const error = yield* refresh("refresh-fixture").pipe(Effect.provide(layer), Effect.flip)
+      expect(error.message).toBe("token endpoint rejected refresh (HTTP 400)")
+      expect(tokenRefreshRejection(error)).toEqual({ status: 400, oauthError: "unauthorized_client" })
+    }),
+  )
+
+  it.effect("a rejection with a non-JSON body carries the status and no code", () =>
+    Effect.gen(function* () {
+      const layer = handlerLayer((input) => Effect.succeed(input.respond("upstream exploded", { status: 500 })))
+      const error = yield* refresh("refresh-fixture").pipe(Effect.provide(layer), Effect.flip)
+      expect(error.message).toBe("token endpoint rejected refresh (HTTP 500)")
+      expect(tokenRefreshRejection(error)).toEqual({ status: 500 })
+    }),
+  )
+
+  it.effect("a failure that is not a token-endpoint rejection carries no facts", () =>
+    Effect.gen(function* () {
+      const error = yield* refresh("refresh-fixture", undefined, "").pipe(
+        Effect.provide(FetchHttpClient.layer),
+        Effect.flip,
+      )
+      expect(error.message).toBe(CLIENT_SECRET_NOT_FOUND_MESSAGE)
+      expect(tokenRefreshRejection(error)).toBeUndefined()
     }),
   )
 })
