@@ -77,6 +77,7 @@ import m74 from "./migration/20261116181958_automation_event_position.js"
 import m75 from "./migration/20261116213417_automation_active_index.js"
 import m76 from "./migration/20261119211416_machine.js"
 import m77 from "./migration/20261120004954_machine-key.js"
+import m78 from "./migration/20261123234500_session_inbox_started.js"
 
 export const migrations = [
   m00,
@@ -157,4 +158,5 @@ export const migrations = [
   m75,
   m76,
   m77,
+  m78,
 ] satisfies DatabaseMigration.Migration[]

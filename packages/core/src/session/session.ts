@@ -268,6 +268,7 @@ export const make = Effect.fn("Session.make")(function* () {
     SessionOperation.run({
       session,
       operation,
+      db: database.db,
       bus,
       notify: (note) =>
         synthetic(session.id, { ...note, resume: false }).pipe(
