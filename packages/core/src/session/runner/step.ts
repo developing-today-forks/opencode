@@ -996,10 +996,12 @@ export const make = Effect.gen(function* () {
         // while eligible candidates remain (#1014).
         // Output already started keeps this gate closed on purpose: partial output is already
         // published on this assistant message, so another model's output must not be appended
-        // to it. That case continues in a new assistant message instead: through the Continue
-        // outcome below when a retry is granted -- re-selection sees the target marked failed
-        // above -- and otherwise through ContinueOn, on the next member of this attempt's own
-        // fallback chain.
+        // to it. That case continues in a new assistant message instead, on the next member of
+        // this attempt's own fallback chain (the ContinueOn outcome below) — whether or not a
+        // retry was granted. A granted retry is spent on that continuation, never on blind
+        // re-selection: re-selection dealt the just-failed member again in the recovery-three
+        // run (#2681). Only when the chain serves no member does a granted retry fall back to
+        // the Retry outcome's re-selection.
         if (
           input.model.routing &&
           llmFailure &&
@@ -1046,14 +1048,17 @@ export const make = Effect.gen(function* () {
             }
             if (failover && input.sessionID)
               ModelRoute.moved(input.model.routing.routeID, input.sessionID, input.model.routing.target)
-          } else if (!retry?.retry && tools.declines.length === 0 && !tools.interrupted) {
-            // No further request was granted: the failure cannot be retried, or the step's
-            // retry budget (the route's `attempts`, two by default) is spent. That budget is
-            // for asking a target again, and must not end a pool's turn while another member
-            // could answer (#1806: a session errors only when every candidate is exhausted).
-            // The next member comes from this attempt's own fallback chain, which skips every
-            // member already tried, so no member is asked twice and the walk ends after the
-            // last one.
+          } else if (tools.declines.length === 0 && !tools.interrupted) {
+            // The turn moves on to the next member: either no further request was granted —
+            // the failure cannot be retried, or the step's retry budget (the route's
+            // `attempts`, two by default) is spent — or a retry WAS granted and is spent
+            // here, on the continuation this branch deals. That budget is for asking again,
+            // and must not end a pool's turn while another member could answer (#1806: a
+            // session errors only when every candidate is exhausted); nor may a granted
+            // retry re-ask the member that just failed, which blind re-selection did
+            // (#2681). The next member comes from this attempt's own fallback chain, which
+            // skips every member already tried, so no member is asked twice and the walk
+            // ends after the last one.
             const fallback = yield* Effect.result(input.model.routing.fallback())
             if (Result.isSuccess(fallback) && fallback.success) {
               continueOn = {
@@ -1266,11 +1271,13 @@ export const make = Effect.gen(function* () {
             })
         }
 
-        // Output already started: the retry continues on a fresh assistant message.
-        if (llmError && retry?.retry && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
-          return Outcome.Retry({ error: llmError, decision: retry, freshAssistant: true })
+        // Output already started: a continuation the fallback chain dealt above wins over
+        // the retry outcome — the granted retry was spent dealing it. Only a granted retry
+        // the chain could not serve continues by re-selection, on a fresh assistant message.
         if (continueOn && llmError && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
           return Outcome.ContinueOn({ model: continueOn.model, error: llmError })
+        if (llmError && retry?.retry && record.outputStarted && tools.declines.length === 0 && !tools.interrupted)
+          return Outcome.Retry({ error: llmError, decision: retry, freshAssistant: true })
 
         // Quota wall (#2384 slice 3): every serving path above — same-target
         // retry, credential switch, route failover, continuation — has had
