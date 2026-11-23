@@ -341,6 +341,16 @@ interface HealthState {
    * standing, since a transport error between two 429s is no evidence the throttle
    * lifted. */
   consecutiveRateLimits?: number
+  /** When this target last served a request successfully (stamped by `completed`):
+   * the sibling evidence the provider-scope narrowing in `providerQuotaBlocked`
+   * judges by (code#13693 Slice F) — a success after a provider gate's evidence
+   * time is proof this target draws on a window that is not the walled one. */
+  lastSuccessAt?: number
+  /** When a quota-class bench (quota / quota retry-after / plan-wall) was last
+   * planted on this state (stamped by `bench`, and by `seedCooldowns` from the
+   * persisted row's planted time): the bench-state half of the timed quota-failure
+   * record the narrowing consults, alongside the `quotaEvents` timestamps. */
+  lastQuotaFailureAt?: number
   /** The effort this state is the traffic scope for, stamped by the traffic entry
    * factories; undefined at pool scope. Health log rows carry it as a reason
    * suffix so restart replay restores the bench onto the same leg it was planted
@@ -578,6 +588,7 @@ const logHealth = (
     | "quota-gated"
     | "quota-readmitted"
     | "quota-walled-below-1pct"
+    | "quota-scope-narrowed"
     | "bench-probe"
     | "bench-probe-release"
     | "infra-hold"
@@ -874,6 +885,7 @@ const bench = (
           ? "auth"
           : "failure"
   state.benchReason = reason
+  if (reason === "quota" || reason === "quota retry-after" || reason === "plan-wall") state.lastQuotaFailureAt = now
   state.benchLong = cooldown >= ladder.longBenchMs
   state.benchQuotaResetAt = hint?.quota ? quotaResetAt : undefined
   state.probeClaimedAt = undefined
@@ -1737,7 +1749,8 @@ const gatheredProviderQuota = new Map<string, QuotaGateState>()
  * and no per-model reading for this target — the shape `gatheredQuotaWall`'s
  * provider branch judges. Per-model shapes keep their model-scope plant, and
  * several entries are per-account readings, which state no provider wall
- * (Drew, 2026-11-07). Aggregation mirrors the wall's own: the reading's
+ * unless EVERY account reads known-full (code#13693 Slice F aggregation in the
+ * body below). Aggregation mirrors the wall's own: the reading's
  * percent is the maximum over its windows, and the reset carried is the
  * fullest window's own. Returns whether the gate record changed. */
 export const observeGatheredProviderWall = (
@@ -1747,8 +1760,75 @@ export const observeGatheredProviderWall = (
   location?: string,
 ): boolean => {
   const entries = readings.filter((reading) => reading.providerID === target.providerID)
-  if (entries.length !== 1) return false
+  if (entries.length === 0) return false
   if (modelWindowReading(entries, target.providerID, target.id as string)) return false
+  if (entries.length > 1) {
+    // All-accounts-full aggregation (code#13693 Slice F, design rule 3): several
+    // entries are per-account readings, and a proper subset of full accounts
+    // states no provider wall — the accounts are addressed individually. But
+    // when EVERY account entry reads known-full, the provider is walled at
+    // every account, so a provider gate is recorded from the aggregate: its
+    // percent is the LOWEST fullest-window percent across entries (the gate is
+    // exactly as strong as the least-full account), its reset is the EARLIEST
+    // stated reset among entries, and its evidence time is the OLDEST entry
+    // measuredAt (staleness judges by the weakest evidence). Any entry that is
+    // stale, incomplete (no windows, or a percent-less window), or below
+    // known-full on its fullest window states no aggregate — no change.
+    const threshold = currentConstants(location).quotaGate.balanceDeadThreshold
+    let percent: number | undefined
+    let resetAt: number | null = null
+    let observedAt: number | undefined
+    for (const account of entries) {
+      if (now - account.measuredAt > GATHERED_WALL_MAX_AGE_MS) return false
+      if (account.windows.length === 0) return false
+      let accountPercent: number | undefined
+      let accountResetAt: number | null = null
+      for (const window of account.windows) {
+        if (window.usedPercent === null) return false
+        if (accountPercent === undefined || window.usedPercent >= accountPercent) {
+          accountPercent = window.usedPercent
+          accountResetAt = window.resetAt
+        }
+      }
+      if (accountPercent === undefined) return false
+      const accountSnapshot = {
+        planID: "quota-current",
+        window: "gathered",
+        providerID: target.providerID,
+        percent: accountPercent,
+        remaining: null,
+        resetAt: accountResetAt,
+        observedAt: account.measuredAt,
+        stale: false,
+      }
+      if (!QuotaSnapshot.isKnownFull(accountSnapshot, now, threshold)) return false
+      if (percent === undefined || accountPercent < percent) percent = accountPercent
+      if (accountResetAt !== null && (resetAt === null || accountResetAt < resetAt)) resetAt = accountResetAt
+      observedAt = observedAt === undefined ? account.measuredAt : Math.min(observedAt, account.measuredAt)
+    }
+    if (percent === undefined || observedAt === undefined) return false
+    const snapshot = {
+      planID: "quota-current",
+      window: "gathered",
+      providerID: target.providerID,
+      percent,
+      remaining: null,
+      resetAt,
+      observedAt,
+      stale: false,
+    }
+    if (!QuotaSnapshot.isKnownFull(snapshot, now, threshold)) return false
+    const previous = gatheredProviderQuota.get(target.providerID)
+    gatheredProviderQuota.set(target.providerID, { snapshot, target, gated: true })
+    if (!previous?.gated)
+      logHealth(
+        target,
+        "quota-gated",
+        `provider:${target.providerID} quota-known-full (gathered, all accounts full)`,
+        resetAt ?? undefined,
+      )
+    return true
+  }
   const entry = entries[0]
   let percent: number | undefined
   let resetAt: number | null = null
@@ -3469,6 +3549,48 @@ export const credentialQuotaBlocked = (
   return undefined
 }
 
+/** Gates whose provider-scope narrowing has already been logged, keyed by target
+ * and gate evidence time: the narrowing is logged when it first applies for a
+ * given gate record, not on every judgement that re-applies it. Process-local,
+ * cleared with health in `resetHealth`. */
+const scopeNarrowedLogged = new Set<string>()
+
+/** Sibling-evidence narrowing of a provider-scope gate (code#13693 Slice F,
+ * design rule 2 / RC-3): a provider gate's evidence names the provider, but the
+ * cap it states binds only the models that draw on the walled window. A target
+ * with a recorded success (`completed`'s `lastSuccessAt` stamp) MORE RECENT than
+ * the gate's evidence time — the stored snapshot's `observedAt`, on both the
+ * gathered and the plan-fed path — is demonstrably serving, so the provider
+ * gate does not block it: its own pair-scope machinery (benches, pair quota
+ * skips) governs it instead. The exemption is revoked by the target's own
+ * quota-class failure on record AFTER that success, judged from the same stores
+ * `quotaFailureSignal` consults — the `quotaEvents` timestamps and the health
+ * bench state's quota-failure stamp — so no separate exemption registry exists
+ * to drift: a later quota failure re-blocks the target through those stores
+ * alone. No success on record, or a success no newer than the gate's evidence,
+ * states no narrowing and the provider gate applies exactly as before. */
+const providerScopeNarrowed = (target: Model.Ref, evidenceAt: number): boolean => {
+  const state = health.get(key(target))
+  const successAt = state?.lastSuccessAt
+  if (successAt === undefined || successAt <= evidenceAt) return false
+  const base = key(target)
+  for (const [id, events] of quotaEvents) {
+    if (id !== base && !id.startsWith(`${base}#`)) continue
+    if (events.some((at) => at > successAt)) return false
+  }
+  if (state?.lastQuotaFailureAt !== undefined && state.lastQuotaFailureAt > successAt) return false
+  const logKey = `${base}@${evidenceAt}`
+  if (!scopeNarrowedLogged.has(logKey)) {
+    scopeNarrowedLogged.add(logKey)
+    logHealth(
+      target,
+      "quota-scope-narrowed",
+      `provider:${target.providerID} gate evidence at ${evidenceAt} predates this target's recorded success at ${successAt}; pair scope governs`,
+    )
+  }
+  return true
+}
+
 /** Whether a target's own provider quota gate currently blocks it: the provider-scope
  * mirror of `credentialQuotaBlocked`, judged from the provider's own gate state alone.
  * There is no pool-level verdict (Drew, 2026-11-07): a pool cannot run out — only
@@ -3505,7 +3627,12 @@ export const providerQuotaBlocked = (
     }
     return undefined
   })()
-  if (fed) return fed
+  if (fed) {
+    // Sibling-evidence narrowing (code#13693 Slice F): a target serving after
+    // the fed snapshot was observed is not blocked by the provider-scope fed
+    // gate; the gathered gate below is still judged on its own evidence time.
+    if (!state || !providerScopeNarrowed(target, state.snapshot.observedAt)) return fed
+  }
   // The gathered snapshot's provider-wide wall (fork #2479): a provider no
   // plan-derived feed carries can still stand walled on the gatherer's own
   // reading. Judged with the same known-full rule, and with staleness
@@ -3521,6 +3648,12 @@ export const providerQuotaBlocked = (
         currentConstants(location).quotaGate.balanceDeadThreshold,
       )
     ) {
+      // Sibling-evidence narrowing (code#13693 Slice F): this target's recorded
+      // success postdates the gathered reading, so the provider-scope wall does
+      // not block it — the gate record itself stands for its siblings, and a
+      // later quota-class failure of this target revokes the narrowing through
+      // the failure stores, with no change to the record.
+      if (providerScopeNarrowed(target, gathered.snapshot.observedAt)) return undefined
       gathered.gated = true
       return { until: gathered.snapshot.resetAt }
     }
@@ -3698,6 +3831,7 @@ export const completed = (
   }
   const state = entry(target)
   state.outcomes = pushOutcome(state.outcomes, true)
+  state.lastSuccessAt = now
   state.consecutiveFailures = 0
   state.consecutiveRateLimits = 0
   // A live provider success ends the provider-scope terminal-auth run (#2519): whatever
@@ -3783,6 +3917,7 @@ export const resetHealth = () => {
   providerQuota.clear()
   gatheredProviderQuota.clear()
   providerHardFailures.clear()
+  scopeNarrowedLogged.clear()
   quotaEvents.clear()
   restoredDemotionAttempts.clear()
   quotaFailureSources.clear()
@@ -4288,6 +4423,11 @@ export const seedCooldowns = (
     // still arm its half-open probe (#1123). The stored reason names the credential on
     // credential rows; the class is the part before that suffix.
     if (benchClass) state.benchReason = benchClass
+    if (
+      (benchClass === "quota" || benchClass === "quota retry-after" || benchClass === "plan-wall") &&
+      row.plantedAt !== undefined
+    )
+      state.lastQuotaFailureAt = Math.max(state.lastQuotaFailureAt ?? 0, row.plantedAt)
     // The row is a failure's record: restore the count with the bench, or an
     // auth / long retry-after bench would lapse open at expiry instead of
     // converting to its half-open probe (recover() tells conversion from a
