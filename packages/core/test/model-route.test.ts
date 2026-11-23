@@ -3281,8 +3281,10 @@ describe("ModelRoute gathered quota wall: plant side and window aggregation (cod
     })
     expect(ModelRoute.observeGatheredProviderWall(leaf, perModel, now)).toBe(false)
     expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toBeUndefined()
-    // Several entries for one provider are per-account readings: no provider
-    // wall is synthesized from them, however full one account reads.
+    // Several entries for one provider are per-account readings: a proper
+    // subset of full accounts synthesizes no provider wall (code#13693 rule 3:
+    // only EVERY account reading known-full aggregates to a provider gate —
+    // that case is covered in the wall-scoping suite below).
     const codexLeaf = ModelRoute.ref({ providerID: "codex", model: "gpt-6-luna" })
     const entry = (weekly: number) => ({
       providerID: "codex",
@@ -3290,7 +3292,7 @@ describe("ModelRoute gathered quota wall: plant side and window aggregation (cod
       windows: [{ name: "weekly", usedPercent: weekly, resetAt: now + 3 * 86_400_000, measuredAt: now }],
       models: {},
     })
-    expect(ModelRoute.observeGatheredProviderWall(codexLeaf, [entry(100), entry(100)], now)).toBe(false)
+    expect(ModelRoute.observeGatheredProviderWall(codexLeaf, [entry(100), entry(65)], now)).toBe(false)
     expect(ModelRoute.providerQuotaBlocked(codexLeaf, now + 1)).toBeUndefined()
     // A stale provider-wide reading states no wall either.
     const stale = gathered({
@@ -3400,6 +3402,225 @@ describe("ModelRoute gathered quota wall: plant side and window aggregation (cod
       ),
     ).toBeUndefined()
     expect(ModelRoute.skipped(leaf, now + 120_001)).toBe(true)
+  })
+})
+
+describe("ModelRoute wall scoping: sibling-evidence narrowing + all-accounts-full aggregation (code#13693 Slice F)", () => {
+  const hour = 3_600_000
+  const policy = ModelRoute.policy({ cooldownMs: 1_000, quotaCooldownMs: 1_000 })
+  const fast = { firstTokenMs: 10, responseMs: 10, tokensPerSecond: 30 }
+
+  const gathered = (opts: {
+    providerID: string
+    at: number
+    windows?: Array<{ name: string; usedPercent: number | null; resetAt?: number | null }>
+    models?: Record<string, Array<{ name: string; usedPercent: number | null; resetAt?: number | null }>>
+  }) => [
+    {
+      providerID: opts.providerID,
+      measuredAt: opts.at,
+      windows: (opts.windows ?? []).map((window) => ({
+        name: window.name,
+        usedPercent: window.usedPercent,
+        resetAt: window.resetAt ?? null,
+        measuredAt: opts.at,
+      })),
+      models: Object.fromEntries(
+        Object.entries(opts.models ?? {}).map(([modelID, windows]) => [
+          modelID,
+          windows.map((window) => ({
+            name: window.name,
+            usedPercent: window.usedPercent,
+            resetAt: window.resetAt ?? null,
+            measuredAt: opts.at,
+          })),
+        ]),
+      ),
+    },
+  ]
+
+  test("a serving model is exempt from a gathered provider gate its sibling stays under (code#13693 rule 2)", () => {
+    const now = 900_000_000
+    const leafA = ModelRoute.ref({ providerID: "cline-pass", model: "model-a" })
+    const leafB = ModelRoute.ref({ providerID: "cline-pass", model: "model-b" })
+    ModelRoute.resetHealth()
+    const resetAt = now + 21 * 86_400_000
+    const reading = gathered({
+      providerID: "cline-pass",
+      at: now,
+      windows: [{ name: "monthly", usedPercent: 100, resetAt }],
+    })
+    // Oracle (code#13693 scope rule): the single-entry gathered provider gate
+    // stands for the provider as a whole...
+    expect(ModelRoute.observeGatheredProviderWall(leafA, reading, now)).toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 1)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(leafB, now + 1)).toEqual({ until: resetAt })
+    // ...but model A records a success AFTER the gate's evidence time (the
+    // reading's observedAt): A is demonstrably serving, so the provider-scope
+    // gate no longer blocks it — its pair scope governs it instead.
+    ModelRoute.completed(leafA, policy, fast, now + 60_000)
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 60_001)).toBeUndefined()
+    // Model B has no success on record: the gate applies exactly as before.
+    expect(ModelRoute.providerQuotaBlocked(leafB, now + 60_001)).toEqual({ until: resetAt })
+  })
+
+  test("a quota-class failure after the exempting success revokes the narrowing (code#13693 rule 2)", () => {
+    const now = 910_000_000
+    const leafA = ModelRoute.ref({ providerID: "cline-pass", model: "model-a" })
+    ModelRoute.resetHealth()
+    const resetAt = now + 21 * 86_400_000
+    const reading = gathered({
+      providerID: "cline-pass",
+      at: now,
+      windows: [{ name: "monthly", usedPercent: 100, resetAt }],
+    })
+    expect(ModelRoute.observeGatheredProviderWall(leafA, reading, now)).toBe(true)
+    ModelRoute.completed(leafA, policy, fast, now + 60_000)
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 60_001)).toBeUndefined()
+    // Oracle: A's own quota-class failure after that success is on record in
+    // the same stores quotaFailureSignal consults (quotaEvents + health bench
+    // state), so the exemption is revoked through those stores alone — A is
+    // blocked by the provider gate again, with no registry to update.
+    ModelRoute.failed(leafA, policy, now + 120_000, { quota: true })
+    expect(ModelRoute.quotaFailureSignal(leafA, now + 120_001)).toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 120_001)).toEqual({ until: resetAt })
+  })
+
+  test("no sibling success anywhere: every model of the gated provider stays blocked (fork #2479 regression)", () => {
+    const now = 920_000_000
+    const leafA = ModelRoute.ref({ providerID: "opendesign", model: "model-a" })
+    const leafB = ModelRoute.ref({ providerID: "opendesign", model: "model-b" })
+    ModelRoute.resetHealth()
+    const resetAt = now + 2 * 86_400_000
+    const reading = gathered({
+      providerID: "opendesign",
+      at: now,
+      windows: [
+        { name: "5h", usedPercent: 0, resetAt: now + 5 * hour },
+        { name: "7d", usedPercent: 100, resetAt },
+      ],
+    })
+    // Oracle: with no recorded success more recent than the gate's evidence,
+    // today's #2479 behaviour is unchanged — the whole provider is blocked.
+    expect(ModelRoute.observeGatheredProviderWall(leafA, reading, now)).toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 1)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(leafB, now + 1)).toEqual({ until: resetAt })
+    // A success OLDER than the gate's evidence states no narrowing either.
+    ModelRoute.completed(leafA, policy, fast, now - 60_000)
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 1)).toEqual({ until: resetAt })
+  })
+
+  test("the plan-fed provider gate narrows on the same sibling evidence (code#13693 rule 2)", () => {
+    const now = 930_000_000
+    const leafA = ModelRoute.ref({ providerID: "fed-prov", model: "model-a" })
+    const leafB = ModelRoute.ref({ providerID: "fed-prov", model: "model-b" })
+    ModelRoute.resetHealth()
+    ModelRoute.setAdjustments([])
+    const resetAt = now + 3_600_000
+    ModelRoute.observeProviderQuota(
+      leafA,
+      {
+        planID: "plan",
+        window: "weekly",
+        providerID: "fed-prov",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: now,
+        stale: false,
+      },
+      now,
+    )
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 1)).toEqual({ until: resetAt })
+    expect(ModelRoute.providerQuotaBlocked(leafB, now + 1)).toEqual({ until: resetAt })
+    // Oracle: the fed path judges narrowing against its own state snapshot's
+    // observedAt, exactly as the gathered path judges against its reading's.
+    ModelRoute.completed(leafA, policy, fast, now + 60_000)
+    expect(ModelRoute.providerQuotaBlocked(leafA, now + 60_001)).toBeUndefined()
+    expect(ModelRoute.providerQuotaBlocked(leafB, now + 60_001)).toEqual({ until: resetAt })
+  })
+
+  test("all-accounts-full gathered readings aggregate to a provider gate; any shortfall states none (code#13693 rule 3)", () => {
+    const now = 940_000_000
+    const leaf = ModelRoute.ref({ providerID: "codex", model: "gpt-6-luna" })
+    ModelRoute.resetHealth()
+    const entry = (opts: {
+      at?: number
+      windows: Array<{ name: string; usedPercent: number | null; resetAt?: number | null }>
+    }) => ({
+      providerID: "codex",
+      measuredAt: opts.at ?? now,
+      windows: opts.windows.map((window) => ({
+        name: window.name,
+        usedPercent: window.usedPercent,
+        resetAt: window.resetAt ?? null,
+        measuredAt: opts.at ?? now,
+      })),
+      models: {},
+    })
+    const resetEarly = now + 2 * 86_400_000
+    const resetLate = now + 3 * 86_400_000
+    // Oracle: EVERY account entry fresh, complete and known-full on its
+    // fullest window -> the provider gate is recorded from the aggregate,
+    // carrying the EARLIEST reset among the entries.
+    expect(
+      ModelRoute.observeGatheredProviderWall(
+        leaf,
+        [
+          entry({ windows: [{ name: "weekly", usedPercent: 100, resetAt: resetLate }] }),
+          entry({
+            windows: [
+              { name: "5h", usedPercent: 40, resetAt: now + 5 * hour },
+              { name: "weekly", usedPercent: 100, resetAt: resetEarly },
+            ],
+          }),
+        ],
+        now,
+      ),
+    ).toBe(true)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toEqual({ until: resetEarly })
+
+    // One entry below full -> no gate.
+    ModelRoute.resetHealth()
+    expect(
+      ModelRoute.observeGatheredProviderWall(
+        leaf,
+        [
+          entry({ windows: [{ name: "weekly", usedPercent: 100, resetAt: resetLate }] }),
+          entry({ windows: [{ name: "weekly", usedPercent: 65, resetAt: resetLate }] }),
+        ],
+        now,
+      ),
+    ).toBe(false)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toBeUndefined()
+
+    // One entry incomplete (a percent-less window) -> no gate.
+    ModelRoute.resetHealth()
+    expect(
+      ModelRoute.observeGatheredProviderWall(
+        leaf,
+        [
+          entry({ windows: [{ name: "weekly", usedPercent: 100, resetAt: resetLate }] }),
+          entry({ windows: [{ name: "weekly", usedPercent: null }] }),
+        ],
+        now,
+      ),
+    ).toBe(false)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toBeUndefined()
+
+    // One entry stale -> no gate.
+    ModelRoute.resetHealth()
+    expect(
+      ModelRoute.observeGatheredProviderWall(
+        leaf,
+        [
+          entry({ windows: [{ name: "weekly", usedPercent: 100, resetAt: resetLate }] }),
+          entry({ at: now - 31 * 60_000, windows: [{ name: "weekly", usedPercent: 100, resetAt: resetLate }] }),
+        ],
+        now,
+      ),
+    ).toBe(false)
+    expect(ModelRoute.providerQuotaBlocked(leaf, now + 1)).toBeUndefined()
   })
 })
 
