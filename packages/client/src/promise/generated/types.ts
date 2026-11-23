@@ -288,6 +288,13 @@ export type PtyTicketConnectToken = { ticket: string; expires_in: number }
 
 export type CredentialKey = { type: "key"; key: string; metadata?: { [x: string]: JsonValue } }
 
+export type CredentialSessionCookie = {
+  type: "session-cookie"
+  cookie: string
+  workspaceID: string
+  metadata?: { [x: string]: JsonValue }
+}
+
 export type RouteOverrideAction = "avoid" | "prefer" | "allow-over-budget"
 
 export type RouteOverrideWindow = {
@@ -301,6 +308,88 @@ export type RouteOverrideWindow = {
   excludeWindows?: Array<string>
   from?: number | "Infinity" | "-Infinity" | "NaN"
   until?: number | "Infinity" | "-Infinity" | "NaN"
+}
+
+export type RouteAttemptAttempt = {
+  id: number | "Infinity" | "-Infinity" | "NaN"
+  timeStarted: number | "Infinity" | "-Infinity" | "NaN"
+  timeEnded: number | "Infinity" | "-Infinity" | "NaN"
+  sessionID?: string
+  routeID: string
+  providerID: string
+  modelID: string
+  variant?: string
+  outcome: string
+  errorTag?: string
+  errorCode?: string
+  errorStatus?: number | "Infinity" | "-Infinity" | "NaN"
+  errorMessage?: string
+  retryable?: boolean
+  outputStarted: boolean
+  hedged?: boolean
+  firstTokenMs?: number | "Infinity" | "-Infinity" | "NaN"
+  responseMs?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensPerSecond?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensInput?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensOutput?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensReasoning?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensCacheRead?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensCacheWrite?: number | "Infinity" | "-Infinity" | "NaN"
+  costUsd?: number | "Infinity" | "-Infinity" | "NaN"
+  cacheSavingsUsd?: number | "Infinity" | "-Infinity" | "NaN"
+}
+
+export type RouteAttemptTargetTotal = {
+  providerID: string
+  modelID: string
+  attempts: number
+  successes: number
+  failures: number
+  policyRejections: number
+  timeouts: number
+  tokensInput: number
+  tokensOutput: number
+  tokensReasoning: number
+  tokensCacheRead: number
+  tokensCacheWrite: number
+  costUsd: number
+  cacheSavingsUsd: number
+  sessions: number
+  first: number | null
+  last: number | null
+}
+
+export type RouteAttemptErrorBreakdown = {
+  providerID: string
+  modelID: string
+  tag: string | null
+  code: string | null
+  status: number | null
+  count: number
+  lastTime: number
+  lastMessage: string | null
+}
+
+export type RouteAttemptCoverage = {
+  attempts: number
+  providers: number
+  models: number
+  sessions: number
+  routes: number
+  first: number | null
+  last: number | null
+}
+
+export type RouteAttemptDecision = {
+  id: number | "Infinity" | "-Infinity" | "NaN"
+  time: number | "Infinity" | "-Infinity" | "NaN"
+  sessionID?: string
+  routeID: string
+  selection: string
+  candidates: Array<string>
+  chosen?: string
+  reason: string
+  detail: JsonValue
 }
 
 export type ProjectVcs = string
@@ -1041,6 +1130,12 @@ export type RouteOverrideInfo = {
   text: string
   source: "user" | "interpreter"
   createdAt: number | "Infinity" | "-Infinity" | "NaN"
+}
+
+export type RouteAttemptStats = {
+  targets: Array<RouteAttemptTargetTotal>
+  errors: Array<RouteAttemptErrorBreakdown>
+  coverage: RouteAttemptCoverage
 }
 
 export type Project = {
@@ -2674,7 +2769,7 @@ export type VoiceModelsResponse = { data: { models: Array<VoiceModel>; default?:
 
 export type VoiceSessionResponse = { data: { transport: VoiceTransport } }
 
-export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal
+export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal | CredentialSessionCookie
 
 export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
 
@@ -5230,6 +5325,12 @@ export type CredentialCreateInput = {
       }
     | { readonly type: "key"; readonly key: string; readonly metadata?: { readonly [x: string]: JsonValue } }
     | { readonly type: "external"; readonly methodID: string; readonly metadata?: { readonly [x: string]: JsonValue } }
+    | {
+        readonly type: "session-cookie"
+        readonly cookie: string
+        readonly workspaceID: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+      }
   readonly activate?: boolean | undefined
 }
 
@@ -5283,6 +5384,31 @@ export type RouteOverrideAddOutput = { data: Array<RouteOverrideInfo> }["data"]
 export type RouteOverrideRemoveInput = { readonly overrideID: string }
 
 export type RouteOverrideRemoveOutput = void
+
+export type RouteAttemptListInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly provider?: string | undefined
+  readonly model?: string | undefined
+  readonly session?: string | undefined
+  readonly route?: string | undefined
+  readonly limit?: number | undefined
+}
+
+export type RouteAttemptListOutput = { data: Array<RouteAttemptAttempt> }["data"]
+
+export type RouteAttemptStatsInput = { readonly since?: number | undefined; readonly until?: number | undefined }
+
+export type RouteAttemptStatsOutput = { data: RouteAttemptStats }["data"]
+
+export type RouteDecisionListInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly route?: string | undefined
+  readonly limit?: number | undefined
+}
+
+export type RouteDecisionListOutput = { data: Array<RouteAttemptDecision> }["data"]
 
 export type ProjectListInput = { readonly archived?: boolean | undefined }
 

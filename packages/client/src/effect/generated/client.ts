@@ -207,6 +207,12 @@ import type {
   RouteOverrideAddOutput,
   RouteOverrideRemoveInput,
   RouteOverrideRemoveOutput,
+  RouteAttemptListInput,
+  RouteAttemptListOutput,
+  RouteAttemptStatsInput,
+  RouteAttemptStatsOutput,
+  RouteDecisionListInput,
+  RouteDecisionListOutput,
   ProjectListInput,
   ProjectListOutput,
   ProjectUpdateInput,
@@ -1498,12 +1504,50 @@ const EndpointRouteOverrideRemove = (raw: RawClient["server.route"]) => (input: 
     raw["route.override.remove"]({ params: { overrideID: input["overrideID"] } }).pipe(Effect.mapError(mapClientError)),
   )
 
+const EndpointRouteAttemptList = (raw: RawClient["server.route"]) => (input?: RouteAttemptListInput) =>
+  preserveEffect<RouteAttemptListOutput>()(
+    raw["route.attempt.list"]({
+      query: {
+        since: input?.["since"],
+        until: input?.["until"],
+        provider: input?.["provider"],
+        model: input?.["model"],
+        session: input?.["session"],
+        route: input?.["route"],
+        limit: input?.["limit"],
+      },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointRouteAttemptStats = (raw: RawClient["server.route"]) => (input?: RouteAttemptStatsInput) =>
+  preserveEffect<RouteAttemptStatsOutput>()(
+    raw["route.attempt.stats"]({ query: { since: input?.["since"], until: input?.["until"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointRouteDecisionList = (raw: RawClient["server.route"]) => (input?: RouteDecisionListInput) =>
+  preserveEffect<RouteDecisionListOutput>()(
+    raw["route.decision.list"]({
+      query: { since: input?.["since"], until: input?.["until"], route: input?.["route"], limit: input?.["limit"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const adaptGroupRoute = (raw: RawClient["server.route"]) => ({
   override: {
     list: EndpointRouteOverrideList(raw),
     add: EndpointRouteOverrideAdd(raw),
     remove: EndpointRouteOverrideRemove(raw),
   },
+  attempt: { list: EndpointRouteAttemptList(raw), stats: EndpointRouteAttemptStats(raw) },
+  decision: { list: EndpointRouteDecisionList(raw) },
 })
 
 const EndpointProjectList = (raw: RawClient["server.project"]) => (input?: ProjectListInput) =>

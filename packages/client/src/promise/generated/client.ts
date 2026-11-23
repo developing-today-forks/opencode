@@ -201,6 +201,12 @@ import type {
   RouteOverrideAddOutput,
   RouteOverrideRemoveInput,
   RouteOverrideRemoveOutput,
+  RouteAttemptListInput,
+  RouteAttemptListOutput,
+  RouteAttemptStatsInput,
+  RouteAttemptStatsOutput,
+  RouteDecisionListInput,
+  RouteDecisionListOutput,
   ProjectListInput,
   ProjectListOutput,
   ProjectUpdateInput,
@@ -2443,6 +2449,59 @@ export function make(options: ClientOptions) {
             },
             requestOptions,
           ),
+      },
+      attempt: {
+        list: (input?: RouteAttemptListInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteAttemptListOutput }>(
+            {
+              method: "GET",
+              path: `/api/route/attempts`,
+              query: {
+                since: input?.["since"],
+                until: input?.["until"],
+                provider: input?.["provider"],
+                model: input?.["model"],
+                session: input?.["session"],
+                route: input?.["route"],
+                limit: input?.["limit"],
+              },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        stats: (input?: RouteAttemptStatsInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteAttemptStatsOutput }>(
+            {
+              method: "GET",
+              path: `/api/route/attempts/stats`,
+              query: { since: input?.["since"], until: input?.["until"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+      },
+      decision: {
+        list: (input?: RouteDecisionListInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteDecisionListOutput }>(
+            {
+              method: "GET",
+              path: `/api/route/decisions`,
+              query: {
+                since: input?.["since"],
+                until: input?.["until"],
+                route: input?.["route"],
+                limit: input?.["limit"],
+              },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
       },
     },
     project: {

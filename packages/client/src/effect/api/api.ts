@@ -2189,12 +2189,121 @@ export type RouteOverrideRemoveOperation<E = never> = (
   input: RouteOverrideRemoveInput,
 ) => Effect.Effect<RouteOverrideRemoveOutput, E>
 
+export type RouteAttemptListInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly provider?: string | undefined
+  readonly model?: string | undefined
+  readonly session?: string | undefined
+  readonly route?: string | undefined
+  readonly limit?: number | undefined
+}
+export type RouteAttemptListOutput = ReadonlyArray<{
+  readonly id: number
+  readonly timeStarted: number
+  readonly timeEnded: number
+  readonly sessionID?: string | undefined
+  readonly routeID: string
+  readonly providerID: string
+  readonly modelID: string
+  readonly variant?: string | undefined
+  readonly outcome: string
+  readonly errorTag?: string | undefined
+  readonly errorCode?: string | undefined
+  readonly errorStatus?: number | undefined
+  readonly errorMessage?: string | undefined
+  readonly retryable?: boolean | undefined
+  readonly outputStarted: boolean
+  readonly hedged?: boolean | undefined
+  readonly firstTokenMs?: number | undefined
+  readonly responseMs?: number | undefined
+  readonly tokensPerSecond?: number | undefined
+  readonly tokensInput?: number | undefined
+  readonly tokensOutput?: number | undefined
+  readonly tokensReasoning?: number | undefined
+  readonly tokensCacheRead?: number | undefined
+  readonly tokensCacheWrite?: number | undefined
+  readonly costUsd?: number | undefined
+  readonly cacheSavingsUsd?: number | undefined
+}>
+export type RouteAttemptListOperation<E = never> = (
+  input?: RouteAttemptListInput,
+) => Effect.Effect<RouteAttemptListOutput, E>
+
+export type RouteAttemptStatsInput = { readonly since?: number | undefined; readonly until?: number | undefined }
+export type RouteAttemptStatsOutput = {
+  readonly targets: ReadonlyArray<{
+    readonly providerID: string
+    readonly modelID: string
+    readonly attempts: number
+    readonly successes: number
+    readonly failures: number
+    readonly policyRejections: number
+    readonly timeouts: number
+    readonly tokensInput: number
+    readonly tokensOutput: number
+    readonly tokensReasoning: number
+    readonly tokensCacheRead: number
+    readonly tokensCacheWrite: number
+    readonly costUsd: number
+    readonly cacheSavingsUsd: number
+    readonly sessions: number
+    readonly first: number | null
+    readonly last: number | null
+  }>
+  readonly errors: ReadonlyArray<{
+    readonly providerID: string
+    readonly modelID: string
+    readonly tag: string | null
+    readonly code: string | null
+    readonly status: number | null
+    readonly count: number
+    readonly lastTime: number
+    readonly lastMessage: string | null
+  }>
+  readonly coverage: {
+    readonly attempts: number
+    readonly providers: number
+    readonly models: number
+    readonly sessions: number
+    readonly routes: number
+    readonly first: number | null
+    readonly last: number | null
+  }
+}
+export type RouteAttemptStatsOperation<E = never> = (
+  input?: RouteAttemptStatsInput,
+) => Effect.Effect<RouteAttemptStatsOutput, E>
+
+export type RouteDecisionListInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly route?: string | undefined
+  readonly limit?: number | undefined
+}
+export type RouteDecisionListOutput = ReadonlyArray<{
+  readonly id: number
+  readonly time: number
+  readonly sessionID?: string | undefined
+  readonly routeID: string
+  readonly selection: string
+  readonly candidates: ReadonlyArray<string>
+  readonly chosen?: string | undefined
+  readonly reason: string
+  readonly detail?: unknown | undefined
+}>
+export type RouteDecisionListOperation<E = never> = (
+  input?: RouteDecisionListInput,
+) => Effect.Effect<RouteDecisionListOutput, E>
+
 export interface RouteApi<E = never> {
   readonly override: {
     readonly list: RouteOverrideListOperation<E>
     readonly add: RouteOverrideAddOperation<E>
     readonly remove: RouteOverrideRemoveOperation<E>
   }
+  readonly attempt: { readonly list: RouteAttemptListOperation<E>; readonly stats: RouteAttemptStatsOperation<E> }
+  readonly decision: { readonly list: RouteDecisionListOperation<E> }
 }
 
 export type ProjectListInput = { readonly archived?: boolean | undefined }
