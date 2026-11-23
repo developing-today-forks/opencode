@@ -168,6 +168,17 @@ permissions: [{ action: edit, resource: "*", effect: deny }]`,
     }),
   )
 
+  it.live("loads Markdown native permissions that name the media tools by their old experimental names", () =>
+    Effect.gen(function* () {
+      const agent = yield* loadMarkdownAgent(
+        `permissions: [{ action: experimental_image_generate, resource: "*", effect: deny }, { action: experimental_video_generate, resource: "*", effect: deny }]`,
+      )
+      expect(agent.permissions).toContainEqual({ action: "generate_image", resource: "*", effect: "deny" })
+      expect(agent.permissions).toContainEqual({ action: "generate_video", resource: "*", effect: "deny" })
+      expect(agent.permissions.filter((rule) => rule.action.startsWith("experimental_"))).toEqual([])
+    }),
+  )
+
   for (const variant of [undefined, "high"]) {
     it.live(`loads Markdown legacy temperature ${variant ? "with" : "without"} a separate variant`, () =>
       Effect.gen(function* () {
