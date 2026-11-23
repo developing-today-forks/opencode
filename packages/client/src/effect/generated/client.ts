@@ -1669,9 +1669,14 @@ const adaptGroupPermission = (raw: RawClient["server.permission"]) => ({
 
 const EndpointFileList = (raw: RawClient["server.fs"]) => (input?: FileListInput) =>
   preserveEffect<FileListOutput>()(
-    raw["fs.list"]({ query: { location: input?.["location"], path: input?.["path"] } }).pipe(
-      Effect.mapError(mapClientError),
-    ),
+    raw["fs.list"]({
+      query: {
+        location: input?.["location"],
+        path: input?.["path"],
+        limit: input?.["limit"],
+        offset: input?.["offset"],
+      },
+    }).pipe(Effect.mapError(mapClientError)),
   )
 
 const EndpointFileFind = (raw: RawClient["server.fs"]) => (input: FileFindInput) =>
