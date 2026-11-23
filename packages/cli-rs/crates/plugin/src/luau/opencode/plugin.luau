@@ -1658,6 +1658,11 @@ export type AgentInfo = {
     id: AgentID,
     name: string,
     model: ModelRef?,
+    models: { string }?,
+    excludedModels: { string }?,
+    subagentModels: { string }?,
+    subagentExcludedModels: { string }?,
+    maxDepth: number?,
     request: ProviderRequest,
     system: string?,
     description: string?,
@@ -1860,6 +1865,11 @@ export type ConfigAgentEncoded = {
         model: string,
         variant: string?,
     })?,
+    models: { string }?,
+    excluded_models: { string }?,
+    subagent_models: { string }?,
+    subagent_excluded_models: { string }?,
+    max_depth: number?,
     request: {
         headers: { [string]: string }?,
         body: { [string]: any }?,
@@ -1926,7 +1936,7 @@ export type ConfigInfoEncoded = {
     username: string?,
     timezone: string?,
     automations: boolean?,
-    permissions: PermissionRuleset?,
+    permissions: PermissionRuleset1?,
     policies: { {
         action: ("provider.use" | "tool.use" | "integration.connect" | "integration.use" | "mcp.use" | "skill.use" | "plugin.use" | "websearch.use"),
         resource: string,
@@ -1977,21 +1987,39 @@ export type ConfigInfoEncoded = {
     plugins: { (string | ConfigPluginEntryEncoded) }?,
     worktree: ConfigWorktree?,
     warming: (boolean | ConfigWarmingEncoded)?,
+    messaging: {
+        presets: { [string]: string }?,
+        vars: { [string]: string }?,
+        session_start: string?,
+        delivery: {
+            direct: ("none" | "inbox" | "wake")?,
+            root: ("none" | "inbox" | "wake")?,
+            user: ("hidden" | "visible" | "wake")?,
+        }?,
+        search: {
+            match: ("exact" | "regex" | "fuzzy" | "semantic" | "hybrid" | "advanced")?,
+            model: string?,
+        }?,
+        embedding: (string | ConfigMessagingEmbeddingEncoded)?,
+    }?,
     providers: { [string]: ConfigProviderEncoded }?,
+    aliases: {
+        providers: { [string]: string }?,
+        models: { [string]: string }?,
+        variants: { [string]: string }?,
+    }?,
     experimental: {
+        aliases: {
+            providers: { [string]: string }?,
+            models: { [string]: string }?,
+            variants: { [string]: string }?,
+        }?,
         portable_shell_scanner: boolean?,
         codemode_vm: boolean?,
         all_flags: boolean?,
         todo: boolean?,
         media_blob: boolean?,
         artifacts: boolean?,
-        video_generate: (boolean | {
-            model: (string | {
-                providerID: string,
-                model: string,
-                variant: string?,
-            })?,
-        })?,
         console_watches: boolean?,
         recommended_api: boolean?,
         full_codemode: boolean?,
@@ -1999,6 +2027,13 @@ export type ConfigInfoEncoded = {
         home_memory: boolean?,
         project_overlay: boolean?,
         sqlite_fts: boolean?,
+        video_generate: (boolean | {
+            model: (string | {
+                providerID: string,
+                model: string,
+                variant: string?,
+            })?,
+        })?,
         part_rows: boolean?,
         image_generate: (boolean | {
             model: (string | {
@@ -2007,13 +2042,130 @@ export type ConfigInfoEncoded = {
                 variant: string?,
             })?,
         })?,
-        subagent_depth: number?,
         location_idle_timeout: (string | false)?,
+        subagent_depth: number?,
+        shell_timeout: number?,
         policies: { {
             action: ("provider.use" | "tool.use" | "integration.connect" | "integration.use" | "mcp.use" | "skill.use" | "plugin.use" | "websearch.use"),
             resource: string,
             effect: ("allow" | "deny"),
         } }?,
+        model_route_demotion: {
+            threshold: number?,
+            window_ms: number?,
+        }?,
+        routes: {
+            models: ConfigModelRoutes?,
+            providers: ConfigModelRouteProviderRoutes?,
+            schedules: { ConfigModelRouteGlobalScheduleEncoded }?,
+            windows: ConfigModelRouteWindows?,
+            tuning: {
+                enabled: boolean?,
+                intervalMinutes: number?,
+                windowHours: number?,
+                notes: { string }?,
+            }?,
+            log: {
+                captureErrorBodies: boolean?,
+            }?,
+            settings: {
+                bench: {
+                    maxCooldownMs: number?,
+                    multiplier: number?,
+                    failureCapMs: number?,
+                    retryAfterMinMs: number?,
+                    cooldownCapMs: number?,
+                    quotaCooldownCapMs: number?,
+                }?,
+                demotion: {
+                    after: number?,
+                    windowMs: number?,
+                    factor: number?,
+                }?,
+                quotaGate: {
+                    maxMs: number?,
+                    fallbackMs: number?,
+                    feedTtlMs: number?,
+                    balanceDeadThreshold: number?,
+                    rootStartMaxPct: number?,
+                    rootStartEnabled: boolean?,
+                }?,
+                escalation: {
+                    enabled: boolean?,
+                    afterGiveUps: number?,
+                    outcomeWindow: number?,
+                }?,
+                network: {
+                    windowMs: number?,
+                    providers: number?,
+                    providerModels: number?,
+                }?,
+                membership: {
+                    waitMs: number?,
+                }?,
+                continuity: {
+                    hedgeRequests: number?,
+                }?,
+                overrides: {
+                    preferredFactor: number?,
+                }?,
+            }?,
+        }?,
+        model_routes: ConfigModelRoutes1?,
+        provider_routes: ConfigModelRouteProviderRoutes1?,
+        model_route_schedules: { ConfigModelRouteGlobalScheduleEncoded }?,
+        model_route_windows: ConfigModelRouteWindows1?,
+        model_route_tuning: {
+            enabled: boolean?,
+            intervalMinutes: number?,
+            windowHours: number?,
+            notes: { string }?,
+        }?,
+        model_route_log: {
+            captureErrorBodies: boolean?,
+        }?,
+        model_route_settings: {
+            bench: {
+                maxCooldownMs: number?,
+                multiplier: number?,
+                failureCapMs: number?,
+                retryAfterMinMs: number?,
+                cooldownCapMs: number?,
+                quotaCooldownCapMs: number?,
+            }?,
+            demotion: {
+                after: number?,
+                windowMs: number?,
+                factor: number?,
+            }?,
+            quotaGate: {
+                maxMs: number?,
+                fallbackMs: number?,
+                feedTtlMs: number?,
+                balanceDeadThreshold: number?,
+                rootStartMaxPct: number?,
+                rootStartEnabled: boolean?,
+            }?,
+            escalation: {
+                enabled: boolean?,
+                afterGiveUps: number?,
+                outcomeWindow: number?,
+            }?,
+            network: {
+                windowMs: number?,
+                providers: number?,
+                providerModels: number?,
+            }?,
+            membership: {
+                waitMs: number?,
+            }?,
+            continuity: {
+                hedgeRequests: number?,
+            }?,
+            overrides: {
+                preferredFactor: number?,
+            }?,
+        }?,
     }?,
 }
 
@@ -2023,6 +2175,26 @@ export type ConfigLSPServerEncoded = {
     disabled: boolean?,
     env: { [string]: string }?,
     initialization: { [string]: any }?,
+}
+
+export type ConfigMessagingEmbeddingEncoded = {
+    tier: string?,
+    url: string?,
+    sha256: string?,
+    size: number?,
+    path: string?,
+    pooling: ("last" | "mean" | "cls")?,
+    query: string?,
+    server: string?,
+    autostart: boolean?,
+    gpu_layers: number?,
+    threads: number?,
+    remote: {
+        url: string,
+        model: string,
+        key: string?,
+        dimensions: number?,
+    }?,
 }
 
 export type ConfigModelCapabilities = {
@@ -2067,6 +2239,9 @@ export type ConfigModelEncoded = {
     } }?,
     cost: (ConfigModelCostEncoded | { ConfigModelCostEncoded })?,
     disabled: boolean?,
+    hidden: boolean?,
+    defaultVariant: string?,
+    lockVariant: boolean?,
     limit: {
         context: number?,
         input: number?,
@@ -2086,6 +2261,140 @@ export type ConfigModelReasoning = ({
     }?,
 })
 
+export type ConfigModelRouteBudgetEncoded = {
+    requestsPerMinute: number?,
+    requestsPerDay: number?,
+    tokensPerMinute: number?,
+    tokensPerDay: number?,
+    softLimit: number?,
+}
+
+export type ConfigModelRouteGlobalScheduleEncoded = {
+    id: string?,
+    providers: { string }?,
+    models: { string }?,
+    targets: { string }?,
+    routes: { string }?,
+    when: (ConfigModelRouteWindowEncoded | string),
+    factor: number?,
+    weight: number?,
+    note: string?,
+}
+
+export type ConfigModelRouteProviderRouteEncoded = {
+    providers: { string },
+    selection: ("ordered" | "round-robin" | "weighted")?,
+    weights: { [string]: number }?,
+    windows: { [string]: (string | {
+        name: string,
+        invert: boolean?,
+    }) }?,
+    schedules: { ConfigModelRouteScheduleEncoded }?,
+}
+
+--- Provider routes: named selections over concrete providers (ordered, round-robin, or weighted). A route target names one exactly like a concrete provider — `openai-plan/gpt-6.1-terra` — and resolution picks the member that serves the model, so a provider-level order is defined once instead of once per model.
+export type ConfigModelRouteProviderRoutes = { [string]: ConfigModelRouteProviderRouteEncoded }
+
+--- Deprecated: use experimental.routes.providers. Provider routes: named selections over concrete providers (ordered, round-robin, or weighted). A route target names one exactly like a concrete provider — `openai-plan/gpt-6.1-terra` — and resolution picks the member that serves the model, so a provider-level order is defined once instead of once per model.
+export type ConfigModelRouteProviderRoutes1 = { [string]: ConfigModelRouteProviderRouteEncoded }
+
+export type ConfigModelRouteRouteEncoded = {
+    name: string?,
+    system: string?,
+    class: string?,
+    targets: { ConfigModelRouteTarget }?,
+    include: { string }?,
+    exclude: { string }?,
+    contains: { string }?,
+    notContains: { string }?,
+    match: string?,
+    levels: { string }?,
+    variantRules: { ConfigModelRouteVariantRuleEncoded }?,
+    cache_format: ModelCacheFormat?,
+    health: {
+        firstTokenTimeoutMs: (number | false)?,
+        lastTargetTimeoutMs: (number | false)?,
+        maxResponseTimeMs: number?,
+        minOutputTokensPerSecond: number?,
+        sampleWindow: number?,
+        slowThreshold: number?,
+        cooldownMs: number?,
+        quotaCooldownMs: number?,
+    }?,
+    nestedTimeout: ("longest" | "shortest" | "own")?,
+    budgets: { [string]: ConfigModelRouteBudgetEncoded }?,
+    hedgeAfterMs: number?,
+    attempts: number?,
+    autonomy: ("fixed" | "rules" | "adaptive" | "predictive" | "agent")?,
+    selection: ("ordered" | "round-robin" | "weighted")?,
+    weights: { [string]: number }?,
+    schedules: { ConfigModelRouteScheduleEncoded }?,
+    limit: {
+        context: number,
+    }?,
+}
+
+export type ConfigModelRouteScheduleEncoded = {
+    id: string?,
+    targets: { string }?,
+    when: (ConfigModelRouteWindowEncoded | string),
+    factor: number?,
+    weight: number?,
+    note: string?,
+}
+
+export type ConfigModelRouteTarget = (ConfigModelSelectionEncoded | {
+    model: ConfigModelSelectionEncoded,
+    exclude: { string }?,
+    defaultVariant: string?,
+    variants: { [string]: (string | false) }?,
+    ["until"]: number?,
+    limit: {
+        context: number,
+    }?,
+    cache_format: ModelCacheFormat?,
+    window: (string | {
+        name: string,
+        invert: boolean?,
+    })?,
+})
+
+export type ConfigModelRouteVariantRuleEncoded = {
+    match: string,
+    map: { [string]: (string | false) },
+}
+
+export type ConfigModelRouteWindowEncoded = {
+    daysOfWeek: { (("sun" | "sunday" | "mon" | "monday" | "tue" | "tuesday" | "tues" | "wed" | "wednesday" | "thu" | "thursday" | "thur" | "thurs" | "fri" | "friday" | "sat" | "saturday") | number | string) }?,
+    daysOfMonth: { (number | string) }?,
+    dates: { string }?,
+    excludeDates: { string }?,
+    excludeWindows: { string }?,
+    start: string?,
+    ["end"]: string?,
+    timezone: string?,
+    from: number?,
+    ["until"]: number?,
+}
+
+--- Named, reusable time windows for route rules, keyed by name, e.g. "deepseek-peak": weekdays 01:00-04:00 and 06:00-10:00 UTC. Schedules reference a window by name instead of repeating it, and a route target can gate its eligibility on one: the target is a candidate only while its named window is active (or, inverted, only while it is not). Windows belong to the meter, not the model.
+export type ConfigModelRouteWindows = { [string]: ConfigModelRouteWindowEncoded }
+
+--- Deprecated: use experimental.routes.windows. Named, reusable time windows for route rules, keyed by name, e.g. "deepseek-peak": weekdays 01:00-04:00 and 06:00-10:00 UTC. Schedules reference a window by name instead of repeating it, and a route target can gate its eligibility on one: the target is a candidate only while its named window is active (or, inverted, only while it is not). Windows belong to the meter, not the model.
+export type ConfigModelRouteWindows1 = { [string]: ConfigModelRouteWindowEncoded }
+
+--- Named ordered provider/model routes with failure and performance failover
+export type ConfigModelRoutes = { [string]: ConfigModelRouteRouteEncoded }
+
+--- Deprecated: use experimental.routes.models. Named ordered provider/model routes with failure and performance failover
+export type ConfigModelRoutes1 = { [string]: ConfigModelRouteRouteEncoded }
+
+export type ConfigModelSelectionEncoded = (string | {
+    providerID: string,
+    model: string,
+    variant: string?,
+})
+
 export type ConfigModelSettings = { [string]: any }
 
 export type ConfigModelVariantSettings = { [string]: any }
@@ -2097,6 +2406,7 @@ export type ConfigPluginEntryEncoded = {
 
 export type ConfigProviderEncoded = {
     canonical: ProviderID?,
+    instanceOf: ProviderID1?,
     name: string?,
     env: { string }?,
     package: string?,
@@ -2128,7 +2438,9 @@ export type ConfigShellOption = {
     acceptable: boolean,
 }
 
-export type ConfigUpdated = _Event1<"config.updated", any>
+export type ConfigUpdated = _Event1<"config.updated", {
+    sections: { string },
+}>
 
 export type ConfigWarmingEncoded = {
     prompt: string?,
@@ -2140,6 +2452,7 @@ export type ConfigWebSearchInfoEncoded = {
     provider: ("random" | WebSearchID),
 }
 
+--- Directory defaults for local worktree creation
 export type ConfigWorktree = {
     directory: string,
 }
@@ -2149,6 +2462,7 @@ export type ConnectionCredentialInfo = {
     id: CredentialID,
     label: string,
     method: ("key" | "oauth" | "external"),
+    methodID: IntegrationMethodID?,
     status: ConnectionStatus?,
 }
 
@@ -2197,6 +2511,13 @@ export type CredentialOAuth = {
     metadata: { [string]: any }?,
 }
 
+export type CredentialSessionCookie = {
+    type: "session-cookie",
+    cookie: string,
+    workspaceID: string,
+    metadata: { [string]: any }?,
+}
+
 export type CredentialSwitched = _Event1<"credential.switched", {
     integrationID: IntegrationID,
     credentialID: CredentialID?,
@@ -2207,7 +2528,7 @@ export type CredentialUpdated = _Event1<"credential.updated", {
     credentialID: CredentialID,
 }>
 
-export type CredentialValue = (CredentialOAuth | CredentialKey | CredentialExternal)
+export type CredentialValue = (CredentialOAuth | CredentialKey | CredentialExternal | CredentialSessionCookie)
 
 export type EventID = string
 
@@ -2253,6 +2574,11 @@ export type FileSystemWrite = {
 export type FilesystemChanged = _Event1<"filesystem.changed", {
     file: string,
     event: ("add" | "change" | "unlink"),
+}>
+
+export type FilesystemWatcherDegraded = _Event1<"filesystem.watcher-degraded", {
+    directory: string,
+    cause: ("timeout" | "inotify-limit" | "unsupported" | "error"),
 }>
 
 export type FormAnswer = { [string]: FormValue }
@@ -2678,7 +3004,7 @@ export type InstructionEntryInfo = {
     value: any,
 }
 
---- Instruction entry key (lowercase alphanumerics plus . _ -)
+--- Instruction entry key (lowercase alphanumerics plus . _ -, never ending with a dot)
 export type InstructionEntryKey = string
 
 export type InstructionEntrySnapshot = { {
@@ -3020,6 +3346,266 @@ export type McpStatusPending = {
     status: "pending",
 }
 
+export type MessagingChain = {
+    chain: { MessagingSessionNode },
+    root: string,
+    depth: number,
+}
+
+export type MessagingChildWindow = {
+    total: number,
+    first: { MessagingSessionBrief },
+    latest: { MessagingSessionBrief },
+}
+
+export type MessagingDelivered = {
+    session: string,
+    delivery: MessagingDelivery,
+}
+
+--- none: store only (read on demand). inbox: queue a notice into the session without starting it. wake: queue it and start or steer the session.
+export type MessagingDelivery = ("none" | "inbox" | "wake")
+
+export type MessagingHiddenMode = ("exclude" | "include" | "only")
+
+export type MessagingLog = {
+    entries: { MessagingLogEntry },
+    total: number,
+    more: boolean,
+    match: MessagingMatchMode?,
+    note: string?,
+}
+
+export type MessagingLogEntry = {
+    session: string,
+    message: string,
+    index: number,
+    part: MessagingLogPart,
+    time: (number | ("Infinity" | "-Infinity" | "NaN")),
+    text: string,
+    tool: string?,
+    match: boolean?,
+    score: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+}
+
+export type MessagingLogPart = ("user" | "output" | "thinking" | "tools" | "results" | "system" | "synthetic" | "shell" | "events" | "compaction")
+
+--- exact substring, regex, fuzzy (typo tolerant), semantic (embedding similarity), hybrid (fuzzy + semantic), advanced (hybrid reranked by an LLM)
+export type MessagingMatchMode = ("exact" | "regex" | "fuzzy" | "semantic" | "hybrid" | "advanced")
+
+export type MessagingMessage = {
+    id: number,
+    topic: string,
+    seq: number,
+    kind: string,
+    type: string,
+    writer: string,
+    time: (number | ("Infinity" | "-Infinity" | "NaN")),
+    data: string,
+    meta: { [string]: any }?,
+    reply: number?,
+    hidden: boolean?,
+    score: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    ops: { MessagingOp }?,
+}
+
+export type MessagingMessageCreated = _Event1<"messaging.message.created", {
+    topic: string,
+    seq: number,
+    kind: string,
+    type: string,
+    writer: string,
+    time: (number | ("NaN" | "Infinity" | "-Infinity")),
+    preview: string,
+    inbox: boolean?,
+}>
+
+export type MessagingModelProgress = {
+    file: string,
+    received: number,
+    total: number?,
+}
+
+export type MessagingModelStatus = {
+    state: ("off" | "unavailable" | "pending" | "downloading" | "starting" | "ready" | "error"),
+    tier: string?,
+    model: string?,
+    dimensions: number?,
+    path: string?,
+    source: string?,
+    server: string?,
+    endpoint: string?,
+    remote: boolean?,
+    progress: { MessagingModelProgress }?,
+    error: string?,
+    indexed: number?,
+    pending: number?,
+    tiers: { {
+        name: string,
+        model: string,
+        size: string,
+        hardware: string,
+        available: boolean,
+    } }?,
+}
+
+export type MessagingOp = {
+    seq: number,
+    kind: string,
+    writer: string,
+    time: (number | ("Infinity" | "-Infinity" | "NaN")),
+    viewers: { string },
+    reason: string?,
+}
+
+export type MessagingParticipant = {
+    session: string,
+    title: string?,
+    reads: number,
+    writes: number,
+    first: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    last: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+}
+
+export type MessagingPreset = {
+    name: string,
+    template: string,
+    description: string,
+    policy: string,
+    value: string?,
+}
+
+export type MessagingQueryResult = {
+    messages: { MessagingMessage },
+    more: boolean,
+    match: MessagingMatchMode?,
+    note: string?,
+}
+
+export type MessagingSendResult = {
+    topic: string,
+    seq: number,
+    created: boolean,
+    forced: boolean?,
+    delivered: { MessagingDelivered },
+}
+
+export type MessagingSessionBrief = {
+    id: string,
+    title: string?,
+    agent: string?,
+    status: ("running" | "idle"),
+    created: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    updated: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+}
+
+export type MessagingSessionList = {
+    sessions: { MessagingSessionNode },
+    total: number,
+}
+
+export type MessagingSessionNode = {
+    id: string,
+    title: string?,
+    parentID: string?,
+    depth: number,
+    agent: string?,
+    model: string?,
+    directory: string,
+    status: ("running" | "idle"),
+    project: string?,
+    original: string?,
+    created: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    updated: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    outcome: string?,
+    children: number?,
+    descendants: number?,
+    messages: number?,
+    cost: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    tokens: number?,
+    topics: number?,
+    childWindow: MessagingChildWindow?,
+}
+
+export type MessagingTopic = {
+    name: string,
+    exists: boolean,
+    kind: string,
+    preset: string?,
+    owner: string?,
+    creator: string?,
+    description: string?,
+    mode: MessagingWriteMode,
+    writers: { MessagingWriter },
+    policy: string,
+    messages: number,
+    created: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    last: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    unread: number?,
+    subscribed: MessagingDelivery?,
+    writersWindow: MessagingWindow?,
+    readersWindow: MessagingWindow1?,
+    allowedWindow: MessagingWindow2?,
+}
+
+export type MessagingTopicList = {
+    topics: { MessagingTopic },
+    total: number,
+}
+
+export type MessagingVar = {
+    name: string,
+    kind: ("constant" | "context" | "time" | "custom"),
+    description: string,
+    template: string?,
+    value: string?,
+    scope: string?,
+}
+
+export type MessagingVars = {
+    presets: { MessagingPreset },
+    vars: { MessagingVar },
+    rendered: string?,
+}
+
+export type MessagingVisibilityResult = {
+    topic: string,
+    seq: number,
+    targets: { number },
+    viewers: { string },
+    default: boolean,
+}
+
+export type MessagingWindow = {
+    total: number,
+    first: { MessagingParticipant },
+    latest: { MessagingParticipant },
+}
+
+--- Sessions that read but never wrote
+export type MessagingWindow1 = {
+    total: number,
+    first: { MessagingParticipant },
+    latest: { MessagingParticipant },
+}
+
+--- Sessions allowed by limited-writer rules
+export type MessagingWindow2 = {
+    total: number,
+    first: { MessagingParticipant },
+    latest: { MessagingParticipant },
+}
+
+--- open: anyone writes. readonly: only the owner (and its ancestors) write. limited: only listed writers write.
+export type MessagingWriteMode = ("open" | "readonly" | "limited")
+
+export type MessagingWriter = {
+    session: string,
+    children: boolean?,
+    ancestors: boolean?,
+}
+
+--- Prompt-cache marker syntax the endpoint accepts. Overrides the route default; both send `cache_control`, and `alibaba` skips tool definitions. A model route may set it per route or per target; a target's own value overrides the route's and nested routes inherit it.
 export type ModelCacheFormat = ("anthropic" | "alibaba")
 
 export type ModelCapabilities = {
@@ -3034,6 +3620,9 @@ export type ModelCompatibility = {
     reasoningField: ModelReasoningField?,
     requireReasoning: boolean?,
     maxTokensField: ModelMaxTokensField?,
+    supportsStore: boolean?,
+    supportsStrictMode: boolean?,
+    zaiToolStream: boolean?,
     requireFinishReason: boolean?,
     requireAssistantAfterTool: boolean?,
     supportsPromptCacheKey: boolean?,
@@ -3078,6 +3667,9 @@ export type ModelInfo = {
     cost: { ModelCost },
     status: ("alpha" | "beta" | "deprecated" | "active"),
     enabled: boolean,
+    hidden: boolean?,
+    defaultVariant: string?,
+    lockVariant: boolean?,
     limit: {
         context: number,
         input: number?,
@@ -3169,6 +3761,9 @@ export type PermissionRule = {
 
 export type PermissionRuleset = { PermissionRule }
 
+--- Ordered tool permission rules applied to agent tool use
+export type PermissionRuleset1 = { PermissionRule }
+
 export type PermissionSavedID = string
 
 export type PermissionSavedInfo = {
@@ -3192,6 +3787,8 @@ export type PersistentPtyAdded = _Event1<"persistent-pty.added", {
     sessionID: SessionID,
     terminal: PersistentPtyInfo,
 }>
+
+export type PersistentPtyAttachmentID = string
 
 export type PersistentPtyHandoff = {
     directory: string,
@@ -3401,6 +3998,9 @@ export type ProviderCompatibility = {
     reasoningField: ModelReasoningField?,
     requireReasoning: boolean?,
     maxTokensField: ModelMaxTokensField?,
+    supportsStore: boolean?,
+    supportsStrictMode: boolean?,
+    zaiToolStream: boolean?,
     requireFinishReason: boolean?,
     requireAssistantAfterTool: boolean?,
     supportsPromptCacheKey: boolean?,
@@ -3411,10 +4011,14 @@ export type ProviderCompatibility = {
 
 export type ProviderID = string
 
-export type ProviderInfo = {
+--- Make this provider a copy of another provider with its own sign-in, such as `openai.work` with `openai`, so both accounts can be used at the same time
+export type ProviderID1 = string
+
+export type ProviderInfoWithModels = {
     id: ProviderID,
     canonical: ProviderID?,
     integrationID: IntegrationID?,
+    instanceOf: ProviderID?,
     name: string,
     activation: ("auto" | "enabled" | "disabled"),
     package: string,
@@ -3422,6 +4026,7 @@ export type ProviderInfo = {
     settings: ProviderSettings?,
     headers: { [string]: string }?,
     body: { [string]: any }?,
+    models: { ModelInfo },
 }
 
 export type ProviderRequest = {
@@ -3494,6 +4099,125 @@ export type ReferenceUpdated = _Event1<"reference.updated", any>
 
 export type RelativePath = string
 
+export type RouteAttemptAttempt = {
+    id: (number | ("Infinity" | "-Infinity" | "NaN")),
+    timeStarted: (number | ("Infinity" | "-Infinity" | "NaN")),
+    timeEnded: (number | ("Infinity" | "-Infinity" | "NaN")),
+    sessionID: string?,
+    routeID: string,
+    providerID: string,
+    modelID: string,
+    variant: string?,
+    outcome: string,
+    errorTag: string?,
+    errorCode: string?,
+    errorStatus: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    errorMessage: string?,
+    retryable: boolean?,
+    outputStarted: boolean,
+    hedged: boolean?,
+    firstTokenMs: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    responseMs: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    tokensPerSecond: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    tokensInput: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    tokensOutput: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    tokensReasoning: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    tokensCacheRead: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    tokensCacheWrite: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    costUsd: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    cacheSavingsUsd: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+}
+
+export type RouteAttemptCoverage = {
+    attempts: (number | ("Infinity" | "-Infinity" | "NaN")),
+    providers: (number | ("Infinity" | "-Infinity" | "NaN")),
+    models: (number | ("Infinity" | "-Infinity" | "NaN")),
+    sessions: (number | ("Infinity" | "-Infinity" | "NaN")),
+    routes: (number | ("Infinity" | "-Infinity" | "NaN")),
+    first: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    last: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+}
+
+export type RouteAttemptDecision = {
+    id: (number | ("Infinity" | "-Infinity" | "NaN")),
+    time: (number | ("Infinity" | "-Infinity" | "NaN")),
+    sessionID: string?,
+    routeID: string,
+    selection: string,
+    candidates: { string },
+    chosen: string?,
+    reason: string,
+    detail: any,
+}
+
+export type RouteAttemptErrorBreakdown = {
+    providerID: string,
+    modelID: string,
+    tag: string?,
+    code: string?,
+    status: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    count: (number | ("Infinity" | "-Infinity" | "NaN")),
+    lastTime: (number | ("Infinity" | "-Infinity" | "NaN")),
+    lastMessage: string?,
+}
+
+export type RouteAttemptStats = {
+    targets: { RouteAttemptTargetTotal },
+    errors: { RouteAttemptErrorBreakdown },
+    coverage: RouteAttemptCoverage,
+}
+
+export type RouteAttemptTargetTotal = {
+    providerID: string,
+    modelID: string,
+    attempts: (number | ("Infinity" | "-Infinity" | "NaN")),
+    successes: (number | ("Infinity" | "-Infinity" | "NaN")),
+    failures: (number | ("Infinity" | "-Infinity" | "NaN")),
+    policyRejections: (number | ("Infinity" | "-Infinity" | "NaN")),
+    timeouts: (number | ("Infinity" | "-Infinity" | "NaN")),
+    tokensInput: (number | ("Infinity" | "-Infinity" | "NaN")),
+    tokensOutput: (number | ("Infinity" | "-Infinity" | "NaN")),
+    tokensReasoning: (number | ("Infinity" | "-Infinity" | "NaN")),
+    tokensCacheRead: (number | ("Infinity" | "-Infinity" | "NaN")),
+    tokensCacheWrite: (number | ("Infinity" | "-Infinity" | "NaN")),
+    costUsd: (number | ("Infinity" | "-Infinity" | "NaN")),
+    cacheSavingsUsd: (number | ("Infinity" | "-Infinity" | "NaN")),
+    sessions: (number | ("Infinity" | "-Infinity" | "NaN")),
+    first: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    last: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+}
+
+export type RouteOverrideAction = ("avoid" | "prefer" | "allow-over-budget")
+
+export type RouteOverrideInfo = {
+    id: string,
+    action: RouteOverrideAction,
+    providers: { string },
+    models: { string },
+    routes: { string },
+    fixed: boolean,
+    factor: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    weight: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    schedule: RouteOverrideWindow?,
+    ["until"]: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    text: string,
+    source: ("user" | "interpreter"),
+    createdAt: (number | ("Infinity" | "-Infinity" | "NaN")),
+}
+
+export type RouteOverrideWindow = {
+    daysOfWeek: { (number | ("Infinity" | "-Infinity" | "NaN")) }?,
+    daysOfMonth: { (number | ("Infinity" | "-Infinity" | "NaN")) }?,
+    start: string?,
+    ["end"]: string?,
+    timezone: string?,
+    dates: { string }?,
+    excludeDates: { string }?,
+    excludeWindows: { string }?,
+    from: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+    ["until"]: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+}
+
 export type RpcOutput = {
     output: any,
 }
@@ -3511,6 +4235,15 @@ export type ServerInfo = {
     }?,
 }
 
+export type SessionAgentOverride = {
+    model: ModelRef?,
+    models: { string }?,
+    excludedModels: { string }?,
+    subagentModels: { string }?,
+    subagentExcludedModels: { string }?,
+    force: boolean?,
+}
+
 export type SessionAgentSelected = _Event2<"session.agent.selected", {
     sessionID: SessionID,
     agent: AgentID,
@@ -3519,7 +4252,14 @@ export type SessionAgentSelected = _Event2<"session.agent.selected", {
 
 export type SessionArchived = _Event2<"session.archived", {
     sessionID: SessionID,
+    time: number?,
 }>
+
+export type SessionAuthoritativeCost = {
+    cost: MoneyUSD,
+    cacheSavings: MoneyUSD,
+    tokens: TokenUsageInfo,
+}
 
 export type SessionCompactionDelta = _Event1<"session.compaction.delta", {
     sessionID: SessionID,
@@ -3562,7 +4302,9 @@ export type SessionCreated = _Event2<"session.created", {
     agent: AgentID?,
     model: ModelRef?,
     metadata: SessionMetadata?,
+    subagentPolicy: SessionSubagentPolicy?,
     permissions: PermissionRuleset?,
+    detached: true?,
     version: string,
 }>
 
@@ -3737,6 +4479,7 @@ export type SessionInfo = {
     agent: AgentID?,
     model: ModelRef?,
     cost: MoneyUSD,
+    costAuthoritative: SessionAuthoritativeCost?,
     tokens: TokenUsageInfo,
     outcome: ("succeeded" | "failed" | "interrupted")?,
     time: {
@@ -3750,7 +4493,9 @@ export type SessionInfo = {
     title: string?,
     subpath: RelativePath?,
     metadata: SessionMetadata?,
+    subagentPolicy: SessionSubagentPolicy?,
     permissions: PermissionRuleset?,
+    detached: true?,
     revert: SessionRevert?,
     location: LocationPublicRef,
 }
@@ -3966,6 +4711,7 @@ export type SessionMessageSynthetic = {
     time: {
         created: number,
     },
+    delivery: ("steer" | "queue")?,
     text: string,
     description: string?,
     type: "synthetic",
@@ -4014,6 +4760,7 @@ export type SessionMessageUser = {
     time: {
         created: number,
     },
+    delivery: ("steer" | "queue")?,
     text: string,
     files: { PromptFileAttachment }?,
     agents: { PromptAgentAttachment }?,
@@ -4110,6 +4857,11 @@ export type SessionRevertStaged = _Event2<"session.revert.staged", {
     revert: SessionRevert,
 }>
 
+export type SessionRouteTarget = {
+    routeID: string,
+    target: ModelRef,
+}
+
 export type SessionShellEnded = _Event2<"session.shell.ended", {
     sessionID: SessionID,
     shell: ShellInfo,
@@ -4205,6 +4957,7 @@ export type SessionStepEnded = _Event2<"session.step.ended", {
     tokens: TokenUsageInfo,
     snapshot: SnapshotID?,
     files: { RelativePath }?,
+    planNotices: { string }?,
 }>
 
 export type SessionStepFailed = _Event2<"session.step.failed", {
@@ -4243,11 +4996,24 @@ export type SessionStructuredError = {
     type: string,
     message: string,
     status: number?,
+    provider: string?,
+    model: string?,
     response: {
         body: string,
     }?,
     retryAfterMs: number?,
 }
+
+export type SessionSubagentPolicy = {
+    models: { string }?,
+    excludedModels: { string }?,
+    agentOverrides: { [string]: SessionAgentOverride }?,
+}
+
+export type SessionSubagentPolicyUpdated = _Event2<"session.subagent-policy.updated", {
+    sessionID: SessionID,
+    subagentPolicy: SessionSubagentPolicy,
+}>
 
 export type SessionSynthetic = _Event2<"session.synthetic", {
     sessionID: SessionID,
@@ -4348,6 +5114,11 @@ export type SessionUsageUpdated = _Event1<"session.usage.updated", {
     sessionID: SessionID,
     cost: MoneyUSD,
     tokens: TokenUsageInfo,
+    costAuthoritative: {
+        cost: MoneyUSD,
+        cacheSavings: MoneyUSD,
+        tokens: TokenUsageInfo,
+    }?,
 }>
 
 export type SessionViewed = _Event2<"session.viewed", {
@@ -4406,6 +5177,7 @@ export type SkillInfo = {
     name: SkillName,
     description: string?,
     autoinvoke: boolean?,
+    vars: boolean?,
     path: AbsolutePath,
     content: string,
 }
@@ -4505,7 +5277,7 @@ export type UsageLimitsMeter = {
     resetsAt: number,
 }
 
-export type V2Event = (LocationShutdown | ModelsDevRefreshed | CredentialUpdated | CredentialSwitched | IntegrationUpdated | ProviderUpdated | ModelUpdated | AgentUpdated | SessionCreated | SessionAgentSelected | SessionModelSelected | SessionMoved | SessionRenamed | SessionMetadataUpdated | SessionPermissions | SessionViewed | SessionArchived | SessionUnarchived | SessionUsageUpdated | SessionDeleted | SessionForked | SessionInboxDelivered | SessionInboxEnqueued | SessionInboxCancelled | SessionInboxDeliveryChanged | SessionExecutionStarted | SessionExecutionSucceeded | SessionExecutionFailed | SessionExecutionInterrupted | SessionInstructionsUpdated | SessionSynthetic | SessionSkillActivated | SessionShellStarted | SessionShellEnded | SessionStepStarted | SessionStepFirstToken | SessionStepStreamed | SessionStepEnded | SessionStepFailed | SessionTextStarted | SessionTextDelta | SessionTextEnded | SessionReasoningStarted | SessionReasoningDelta | SessionReasoningEnded | SessionToolInputStarted | SessionToolInputDelta | SessionToolInputEnded | SessionToolCalled | SessionToolProgress | SessionToolSuccess | SessionToolFailed | SessionRetryScheduled | SessionCompactionStarted | SessionCompactionDelta | SessionCompactionEnded | SessionCompactionFailed | SessionRevertStaged | SessionRevertCleared | SessionRevertCommitted | FilesystemChanged | ReferenceUpdated | PermissionAsked | PermissionReplied | PluginUpdated | ProjectUpdated | WorktreeUpdated | WorktreeResolved | CommandUpdated | ConfigUpdated | SkillUpdated | PtyCreated | PtyUpdated | PtyExited | PtyDeleted | PersistentPtyAdded | PersistentPtyRemoved | PersistentPtyUpdated | ShellCreated | ShellExited | ShellDeleted | ExperimentalJobUpdated | FormCreated | FormReplied | FormCancelled | WebsearchUpdated | ArtifactUpdated | SessionStatusUpdated | SessionIdle | TuiPromptAppend | TuiCommandExecute | TuiToastShow | TuiSessionSelect | InstallationUpdated | InstallationUpdateAvailable | VcsBranchUpdated | McpStatusChanged | McpResourcesChanged | ExperimentalMcpEvent | V2EventRpc | V2EventServerConnected)
+export type V2Event = (LocationShutdown | ModelsDevRefreshed | CredentialUpdated | CredentialSwitched | IntegrationUpdated | ProviderUpdated | ModelUpdated | AgentUpdated | SessionCreated | SessionAgentSelected | SessionModelSelected | SessionMoved | SessionRenamed | SessionMetadataUpdated | SessionPermissions | SessionSubagentPolicyUpdated | SessionViewed | SessionArchived | SessionUnarchived | SessionUsageUpdated | SessionDeleted | SessionForked | SessionInboxDelivered | SessionInboxEnqueued | SessionInboxCancelled | SessionInboxDeliveryChanged | SessionExecutionStarted | SessionExecutionSucceeded | SessionExecutionFailed | SessionExecutionInterrupted | SessionInstructionsUpdated | SessionSynthetic | SessionSkillActivated | SessionShellStarted | SessionShellEnded | SessionStepStarted | SessionStepFirstToken | SessionStepStreamed | SessionStepEnded | SessionStepFailed | SessionTextStarted | SessionTextDelta | SessionTextEnded | SessionReasoningStarted | SessionReasoningDelta | SessionReasoningEnded | SessionToolInputStarted | SessionToolInputDelta | SessionToolInputEnded | SessionToolCalled | SessionToolProgress | SessionToolSuccess | SessionToolFailed | SessionRetryScheduled | SessionCompactionStarted | SessionCompactionDelta | SessionCompactionEnded | SessionCompactionFailed | SessionRevertStaged | SessionRevertCleared | SessionRevertCommitted | FilesystemChanged | FilesystemWatcherDegraded | ReferenceUpdated | PermissionAsked | PermissionReplied | PluginUpdated | ProjectUpdated | WorktreeUpdated | WorktreeResolved | CommandUpdated | ConfigUpdated | SkillUpdated | PtyCreated | PtyUpdated | PtyExited | PtyDeleted | PersistentPtyAdded | PersistentPtyRemoved | PersistentPtyUpdated | ShellCreated | ShellExited | ShellDeleted | ExperimentalJobUpdated | FormCreated | FormReplied | FormCancelled | WebsearchUpdated | MessagingMessageCreated | ArtifactUpdated | SessionStatusUpdated | SessionIdle | TuiPromptAppend | TuiCommandExecute | TuiToastShow | TuiSessionSelect | InstallationUpdated | InstallationUpdateAvailable | VcsBranchUpdated | McpStatusChanged | McpResourcesChanged | ExperimentalMcpEvent | V2EventRpc | V2EventServerConnected | V2EventServerResync)
 
 export type V2EventRpc = {
     id: EventID,
@@ -4517,6 +5289,8 @@ export type V2EventRpc = {
 }
 
 export type V2EventServerConnected = _Event4<"server.connected", any>
+
+export type V2EventServerResync = _Event4<"server.resync", any>
 
 export type VcsBase = {
     name: string,
@@ -4540,6 +5314,7 @@ export type VcsFileStatus = {
     additions: number,
     deletions: number,
     status: ("added" | "deleted" | "modified"),
+    more: true?,
 }
 
 export type VcsInfo = {
@@ -4647,7 +5422,7 @@ export type Read = {
     --- The models of `location`, or where the TUI works; `nil` while they are not loaded.
     models: (self: Read, location: LocationRef?) -> { ModelInfo }?,
     --- The providers where the TUI works; `nil` while they are not loaded.
-    providers: (self: Read) -> { ProviderInfo }?,
+    providers: (self: Read) -> { ProviderInfoWithModels }?,
     --- The OpenCode Console workspace's usage limits; `nil` while they are not loaded.
     limits: (self: Read) -> UsageLimitsInfo?,
     model: (self: Read) -> ModelRef?,
@@ -4700,7 +5475,7 @@ export type Host = {
     --- The models of `location`, or where the TUI works; `nil` while they are not loaded.
     models: (self: Read, location: LocationRef?) -> { ModelInfo }?,
     --- The providers where the TUI works; `nil` while they are not loaded.
-    providers: (self: Read) -> { ProviderInfo }?,
+    providers: (self: Read) -> { ProviderInfoWithModels }?,
     --- The OpenCode Console workspace's usage limits; `nil` while they are not loaded.
     limits: (self: Read) -> UsageLimitsInfo?,
     model: (self: Read) -> ModelRef?,
@@ -4988,7 +5763,8 @@ export type Client = {
     },
     event: {
         subscribe: (input: {
-            types: { (("location.shutdown" | "models-dev.refreshed" | "credential.updated" | "credential.switched" | "integration.updated" | "provider.updated" | "model.updated" | "agent.updated" | "session.created" | "session.agent.selected" | "session.model.selected" | "session.moved" | "session.renamed" | "session.metadata.updated" | "session.permissions" | "session.viewed" | "session.archived" | "session.unarchived" | "session.usage.updated" | "session.deleted" | "session.forked" | "session.inbox.delivered" | "session.inbox.enqueued" | "session.inbox.cancelled" | "session.inbox.delivery.changed" | "session.execution.started" | "session.execution.succeeded" | "session.execution.failed" | "session.execution.interrupted" | "session.instructions.updated" | "session.synthetic" | "session.skill.activated" | "session.shell.started" | "session.shell.ended" | "session.step.started" | "session.step.first-token" | "session.step.streamed" | "session.step.ended" | "session.step.failed" | "session.text.started" | "session.text.delta" | "session.text.ended" | "session.reasoning.started" | "session.reasoning.delta" | "session.reasoning.ended" | "session.tool.input.started" | "session.tool.input.delta" | "session.tool.input.ended" | "session.tool.called" | "session.tool.progress" | "session.tool.success" | "session.tool.failed" | "session.retry.scheduled" | "session.compaction.started" | "session.compaction.delta" | "session.compaction.ended" | "session.compaction.failed" | "session.revert.staged" | "session.revert.cleared" | "session.revert.committed" | "filesystem.changed" | "reference.updated" | "permission.asked" | "permission.replied" | "plugin.updated" | "project.updated" | "worktree.updated" | "worktree.resolved" | "command.updated" | "config.updated" | "skill.updated" | "pty.created" | "pty.updated" | "pty.exited" | "pty.deleted" | "persistent-pty.added" | "persistent-pty.removed" | "persistent-pty.updated" | "shell.created" | "shell.exited" | "shell.deleted" | "experimental.job.updated" | "form.created" | "form.replied" | "form.cancelled" | "websearch.updated" | "artifact.updated" | "session.status" | "session.idle" | "tui.prompt.append" | "tui.command.execute" | "tui.toast.show" | "tui.session.select" | "installation.updated" | "installation.update-available" | "vcs.branch.updated" | "mcp.status.changed" | "mcp.resources.changed" | "experimental.mcp.event") | string) }?,
+            types: { (("location.shutdown" | "models-dev.refreshed" | "credential.updated" | "credential.switched" | "integration.updated" | "provider.updated" | "model.updated" | "agent.updated" | "session.created" | "session.agent.selected" | "session.model.selected" | "session.moved" | "session.renamed" | "session.metadata.updated" | "session.permissions" | "session.subagent-policy.updated" | "session.viewed" | "session.archived" | "session.unarchived" | "session.usage.updated" | "session.deleted" | "session.forked" | "session.inbox.delivered" | "session.inbox.enqueued" | "session.inbox.cancelled" | "session.inbox.delivery.changed" | "session.execution.started" | "session.execution.succeeded" | "session.execution.failed" | "session.execution.interrupted" | "session.instructions.updated" | "session.synthetic" | "session.skill.activated" | "session.shell.started" | "session.shell.ended" | "session.step.started" | "session.step.first-token" | "session.step.streamed" | "session.step.ended" | "session.step.failed" | "session.text.started" | "session.text.delta" | "session.text.ended" | "session.reasoning.started" | "session.reasoning.delta" | "session.reasoning.ended" | "session.tool.input.started" | "session.tool.input.delta" | "session.tool.input.ended" | "session.tool.called" | "session.tool.progress" | "session.tool.success" | "session.tool.failed" | "session.retry.scheduled" | "session.compaction.started" | "session.compaction.delta" | "session.compaction.ended" | "session.compaction.failed" | "session.revert.staged" | "session.revert.cleared" | "session.revert.committed" | "filesystem.changed" | "filesystem.watcher-degraded" | "reference.updated" | "permission.asked" | "permission.replied" | "plugin.updated" | "project.updated" | "worktree.updated" | "worktree.resolved" | "command.updated" | "config.updated" | "skill.updated" | "pty.created" | "pty.updated" | "pty.exited" | "pty.deleted" | "persistent-pty.added" | "persistent-pty.removed" | "persistent-pty.updated" | "shell.created" | "shell.exited" | "shell.deleted" | "experimental.job.updated" | "form.created" | "form.replied" | "form.cancelled" | "websearch.updated" | "messaging.message.created" | "artifact.updated" | "session.status" | "session.idle" | "tui.prompt.append" | "tui.command.execute" | "tui.toast.show" | "tui.session.select" | "installation.updated" | "installation.update-available" | "vcs.branch.updated" | "mcp.status.changed" | "mcp.resources.changed" | "experimental.mcp.event") | string) }?,
+            ["last-event-id"]: string?,
         }?) -> (nil, string?),
     },
     experimental: {
@@ -5257,7 +6033,7 @@ export type Client = {
             }) -> (PersistentPtySnapshot?, string?),
             update: (input: {
                 ptyID: string,
-                attachmentID: string?,
+                attachmentID: PersistentPtyAttachmentID?,
                 size: {
                     cols: number,
                     rows: number,
@@ -5481,6 +6257,154 @@ export type Client = {
             type: ("agent-switched" | "model-switched" | "location-switched" | "user" | "synthetic" | "system" | "skill" | "shell" | "assistant" | "compaction" | "idle")?,
         }) -> (SessionMessagesResponse?, string?),
     },
+    messaging: {
+        chain: (input: {
+            session: string,
+            depth: ("self" | "parent" | "all")?,
+            detail: ("brief" | "full")?,
+            expand: number?,
+        }) -> (MessagingChain?, string?),
+        inspect: (input: {
+            as: string?,
+            topic: string,
+            seq: number,
+        }) -> (MessagingMessage?, string?),
+        log: (input: {
+            as: string?,
+            sessions: { string },
+            op: ("head" | "tail" | "grep" | "search" | "pull")?,
+            include: { MessagingLogPart }?,
+            query: string?,
+            match: MessagingMatchMode?,
+            context: number?,
+            scope: ("all" | "context")?,
+            since: string?,
+            ["until"]: string?,
+            limit: number?,
+            offset: number?,
+            chars: number?,
+        }) -> (MessagingLog?, string?),
+        model: {
+            configure: (input: {
+                tier: string?,
+                url: string?,
+                path: string?,
+                start: boolean?,
+            }?) -> (MessagingModelStatus?, string?),
+            status: (input: {}?) -> (MessagingModelStatus?, string?),
+        },
+        query: (input: {
+            as: string?,
+            topics: { string }?,
+            query: string?,
+            match: MessagingMatchMode?,
+            from: { string }?,
+            types: { string }?,
+            kinds: { string }?,
+            since: string?,
+            ["until"]: string?,
+            after: number?,
+            before: number?,
+            hidden: MessagingHiddenMode?,
+            hiddenBy: { string }?,
+            hiddenFrom: { string }?,
+            hiddenSince: string?,
+            hiddenUntil: string?,
+            unread: boolean?,
+            inbox: boolean?,
+            limit: number?,
+            order: ("asc" | "desc")?,
+            markRead: boolean?,
+            wait: number?,
+        }?) -> (MessagingQueryResult?, string?),
+        send: (input: {
+            as: string?,
+            topic: string?,
+            to: string?,
+            text: string,
+            type: string?,
+            meta: { [string]: any }?,
+            reply: number?,
+            force: boolean?,
+            deliver: MessagingDelivery?,
+        }) -> (MessagingSendResult?, string?),
+        sessions: (input: {
+            as: string?,
+            ids: { string }?,
+            parent: string?,
+            ancestor: string?,
+            project: string?,
+            directory: string?,
+            agent: string?,
+            search: string?,
+            active: boolean?,
+            since: string?,
+            ["until"]: string?,
+            sort: ("created" | "updated")?,
+            order: ("asc" | "desc")?,
+            limit: number?,
+            offset: number?,
+            detail: ("brief" | "full")?,
+            expand: number?,
+        }?) -> (MessagingSessionList?, string?),
+        setVar: (input: {
+            as: string?,
+            scope: string?,
+            name: string,
+            value: string?,
+        }) -> (nil, string?),
+        settings: (input: {
+            as: string?,
+            topic: string,
+            mode: MessagingWriteMode?,
+            writers: { MessagingWriter }?,
+            description: string?,
+        }) -> (MessagingTopic?, string?),
+        subscribe: (input: {
+            as: string,
+            topic: string,
+            delivery: MessagingDelivery?,
+            remove: boolean?,
+        }) -> (MessagingTopic?, string?),
+        topic: (input: {
+            as: string?,
+            topic: string,
+            expand: number?,
+        }) -> (MessagingTopic?, string?),
+        topics: (input: {
+            as: string?,
+            topics: { string }?,
+            sessions: { string }?,
+            role: ("any" | "reader" | "writer" | "subscriber")?,
+            kinds: { string }?,
+            search: string?,
+            standard: boolean?,
+            sort: ("created" | "last")?,
+            order: ("asc" | "desc")?,
+            limit: number?,
+            offset: number?,
+            expand: number?,
+        }?) -> (MessagingTopicList?, string?),
+        user: (input: {
+            as: string,
+            text: string,
+            title: string?,
+            root: ("hidden" | "visible" | "wake")?,
+        }) -> (MessagingSendResult?, string?),
+        vars: (input: {
+            as: string?,
+            values: boolean?,
+            render: string?,
+        }?) -> (MessagingVars?, string?),
+        visibility: (input: {
+            as: string?,
+            topic: string,
+            action: ("hide" | "restore"),
+            seqs: { number }?,
+            ["for"]: { string }?,
+            reason: string?,
+        }) -> (MessagingVisibilityResult?, string?),
+    },
     model: {
         default: (input: {
             location: { directory: string? }?,
@@ -5589,13 +6513,13 @@ export type Client = {
             location: { directory: string? }?,
         }) -> ({
             location: LocationPublicRef,
-            data: ProviderInfo,
+            data: ProviderInfoWithModels,
         }?, string?),
         list: (input: {
             location: { directory: string? }?,
         }?) -> ({
             location: LocationPublicRef,
-            data: { ProviderInfo },
+            data: { ProviderInfoWithModels },
         }?, string?),
     },
     pty: {
@@ -5658,6 +6582,52 @@ export type Client = {
             data: { ReferenceInfo },
         }?, string?),
     },
+    route: {
+        attempt: {
+            list: (input: {
+                since: number?,
+                ["until"]: number?,
+                provider: string?,
+                model: string?,
+                session: string?,
+                route: string?,
+                limit: number?,
+            }?) -> ({ RouteAttemptAttempt }?, string?),
+            stats: (input: {
+                since: number?,
+                ["until"]: number?,
+            }?) -> (RouteAttemptStats?, string?),
+        },
+        decision: {
+            list: (input: {
+                since: number?,
+                ["until"]: number?,
+                route: string?,
+                limit: number?,
+            }?) -> ({ RouteAttemptDecision }?, string?),
+        },
+        override: {
+            add: (input: {
+                id: string,
+                action: RouteOverrideAction,
+                providers: { string },
+                models: { string },
+                routes: { string },
+                fixed: boolean,
+                factor: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+                weight: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+                schedule: RouteOverrideWindow?,
+                ["until"]: (number | ("Infinity" | "-Infinity" | "NaN"))?,
+                text: string,
+                source: ("user" | "interpreter"),
+                createdAt: (number | ("Infinity" | "-Infinity" | "NaN")),
+            }) -> ({ RouteOverrideInfo }?, string?),
+            list: (input: {}?) -> ({ RouteOverrideInfo }?, string?),
+            remove: (input: {
+                overrideID: string,
+            }) -> (nil, string?),
+        },
+    },
     rpc: {
         call: (input: {
             rpcID: string,
@@ -5667,11 +6637,42 @@ export type Client = {
         }) -> (RpcOutput?, string?),
     },
     server: {
+        completions: {
+            chat: (input: {
+                payload: { [string]: any },
+            }) -> (any?, string?),
+            embeddings: (input: {
+                payload: { [string]: any },
+            }) -> (any?, string?),
+            messages: (input: {
+                payload: { [string]: any },
+            }) -> (any?, string?),
+            model: (input: {
+                id: string,
+            }) -> (any?, string?),
+            modelRef: (input: {
+                provider: string,
+                model: string,
+            }) -> (any?, string?),
+            models: (input: {}?) -> (any?, string?),
+            responses: (input: {
+                payload: { [string]: any },
+            }) -> (any?, string?),
+            systemone: (input: {
+                payload: { [string]: any },
+            }) -> (any?, string?),
+            transcriptions: (input: {
+                payload: { [string]: any },
+            }) -> (any?, string?),
+        },
         connect: (input: {
             code: string,
         }) -> (PairingSession?, string?),
         info: (input: {}?) -> (ServerInfo?, string?),
         pair: (input: {}?) -> (PairingCode?, string?),
+        redeem: (input: {
+            code: string,
+        }) -> (PairingSession?, string?),
     },
     session: {
         active: (input: {}?) -> ({ [string]: any }?, string?),
@@ -5696,6 +6697,7 @@ export type Client = {
             sessionID: string,
         }) -> ({ SessionMessageInfo }?, string?),
         create: (input: {
+            directory: string?,
             id: SessionID?,
             parentID: SessionID?,
             title: string?,
@@ -5704,6 +6706,8 @@ export type Client = {
             location: LocationPublicRef?,
             metadata: SessionMetadata?,
             permissions: PermissionRuleset?,
+            subagentPolicy: SessionSubagentPolicy?,
+            detached: true?,
         }?) -> (SessionInfo?, string?),
         diff: (input: {
             sessionID: string,
@@ -5773,6 +6777,7 @@ export type Client = {
         interrupt: (input: {
             sessionID: string,
             resume: boolean?,
+            force: boolean?,
         }) -> (SessionInterruptResponse?, string?),
         list: (input: {
             limit: number?,
@@ -5823,6 +6828,16 @@ export type Client = {
                 files: boolean?,
             }) -> (SessionRevert?, string?),
         },
+        routeTarget: {
+            list: (input: {
+                sessionID: string,
+            }) -> ({ SessionRouteTarget }?, string?),
+            set: (input: {
+                sessionID: string,
+                routeID: string,
+                target: ModelRef?,
+            }) -> ({ SessionRouteTarget }?, string?),
+        },
         shell: (input: {
             sessionID: string,
             id: SessionMessageID?,
@@ -5850,7 +6865,11 @@ export type Client = {
             title: string?,
             metadata: SessionMetadata?,
             permissions: PermissionRuleset?,
+            subagentPolicy: SessionSubagentPolicy?,
             archived: boolean?,
+            experimental: {
+                archivedAt: number?,
+            }?,
         }) -> (nil, string?),
         view: (input: {
             sessionID: string,
@@ -5947,6 +6966,7 @@ export type Client = {
         }?) -> (nil, string?),
         status: (input: {
             location: { directory: string? }?,
+            limit: number?,
         }?) -> ({
             location: LocationPublicRef,
             data: { VcsFileStatus },

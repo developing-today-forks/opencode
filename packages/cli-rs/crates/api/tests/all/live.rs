@@ -126,7 +126,7 @@ async fn live_reads_decode() {
         );
         report.check("vcs.get", client.vcs_get(&VcsGetInput { location: location() }).await, |_| String::new());
         report
-            .check("vcs.status", client.vcs_status(&VcsStatusInput { location: location() }).await, |_| String::new());
+            .check("vcs.status", client.vcs_status(&VcsStatusInput { location: location(), limit: None }).await, |_| String::new());
         report.check(
             "vcs.branch.list",
             client.vcs_branch_list(&VcsBranchListInput { location: location(), ..Default::default() }).await,

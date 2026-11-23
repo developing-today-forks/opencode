@@ -97,6 +97,8 @@ export type SessionInboxDelivery = "steer" | "queue"
 
 export type SessionInboxSyntheticPayload = { text: string; description?: string; metadata?: { [x: string]: JsonValue } }
 
+export type SessionInboxShellPayload = { command: string }
+
 export type SessionInboxCompactionPayload = {}
 
 export type ShellID = string
@@ -288,6 +290,13 @@ export type PtyTicketConnectToken = { ticket: string; expires_in: number }
 
 export type CredentialKey = { type: "key"; key: string; metadata?: { [x: string]: JsonValue } }
 
+export type CredentialSessionCookie = {
+  type: "session-cookie"
+  cookie: string
+  workspaceID: string
+  metadata?: { [x: string]: JsonValue }
+}
+
 export type RouteOverrideAction = "avoid" | "prefer" | "allow-over-budget"
 
 export type RouteOverrideWindow = {
@@ -301,6 +310,88 @@ export type RouteOverrideWindow = {
   excludeWindows?: Array<string>
   from?: number | "Infinity" | "-Infinity" | "NaN"
   until?: number | "Infinity" | "-Infinity" | "NaN"
+}
+
+export type RouteAttemptAttempt = {
+  id: number | "Infinity" | "-Infinity" | "NaN"
+  timeStarted: number | "Infinity" | "-Infinity" | "NaN"
+  timeEnded: number | "Infinity" | "-Infinity" | "NaN"
+  sessionID?: string
+  routeID: string
+  providerID: string
+  modelID: string
+  variant?: string
+  outcome: string
+  errorTag?: string
+  errorCode?: string
+  errorStatus?: number | "Infinity" | "-Infinity" | "NaN"
+  errorMessage?: string
+  retryable?: boolean
+  outputStarted: boolean
+  hedged?: boolean
+  firstTokenMs?: number | "Infinity" | "-Infinity" | "NaN"
+  responseMs?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensPerSecond?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensInput?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensOutput?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensReasoning?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensCacheRead?: number | "Infinity" | "-Infinity" | "NaN"
+  tokensCacheWrite?: number | "Infinity" | "-Infinity" | "NaN"
+  costUsd?: number | "Infinity" | "-Infinity" | "NaN"
+  cacheSavingsUsd?: number | "Infinity" | "-Infinity" | "NaN"
+}
+
+export type RouteAttemptTargetTotal = {
+  providerID: string
+  modelID: string
+  attempts: number
+  successes: number
+  failures: number
+  policyRejections: number
+  timeouts: number
+  tokensInput: number
+  tokensOutput: number
+  tokensReasoning: number
+  tokensCacheRead: number
+  tokensCacheWrite: number
+  costUsd: number
+  cacheSavingsUsd: number
+  sessions: number
+  first: number | null
+  last: number | null
+}
+
+export type RouteAttemptErrorBreakdown = {
+  providerID: string
+  modelID: string
+  tag: string | null
+  code: string | null
+  status: number | null
+  count: number
+  lastTime: number
+  lastMessage: string | null
+}
+
+export type RouteAttemptCoverage = {
+  attempts: number
+  providers: number
+  models: number
+  sessions: number
+  routes: number
+  first: number | null
+  last: number | null
+}
+
+export type RouteAttemptDecision = {
+  id: number | "Infinity" | "-Infinity" | "NaN"
+  time: number | "Infinity" | "-Infinity" | "NaN"
+  sessionID?: string
+  routeID: string
+  selection: string
+  candidates: Array<string>
+  chosen?: string
+  reason: string
+  detail: JsonValue
 }
 
 export type ProjectVcs = string
@@ -587,6 +678,22 @@ export type LocationPublicInfo = {
 
 export type ModelRef = { id: string; providerID: ProviderID; variant?: string }
 
+export type SessionRouteUsage = {
+  lastServing: {
+    leaf: string
+    providerID: ProviderID
+    modelID: string
+    variant: string | null
+    routeID: string
+    outcome: string
+    attemptedLeaf: string
+    failedOver: boolean
+    failedOverTo: string | null
+    hedged: boolean
+    timeStarted: number
+  }
+}
+
 export type ProviderCache = { ttl?: ProviderCacheTTL; warming?: ProviderCacheWarming }
 
 export type ModelVariantSettings = { compaction?: ProviderCompaction; encoding?: ProviderEncoding } & {
@@ -673,6 +780,16 @@ export type PromptFileAttachment = {
 
 export type PromptAgentAttachment = { name: string; mention?: PromptMention }
 
+export type PromptInputFileAttachment = {
+  uri: string
+  source?: PromptFileSource
+  name?: string
+  description?: string
+  mention?: PromptMention
+}
+
+export type PromptInputSkillAttachment = { id: SkillID; mention?: PromptMention }
+
 export type PromptSkillAttachment = { id: SkillID; name: SkillName; text?: string; mention?: PromptMention }
 
 export type SessionMessageSkill = {
@@ -701,6 +818,15 @@ export type SessionInboxSynthetic = {
   time: { created: number }
   type: "synthetic"
   payload: SessionInboxSyntheticPayload
+  delivery: SessionInboxDelivery
+}
+
+export type SessionInboxShell = {
+  id: SessionMessageID
+  sessionID: SessionID
+  time: { created: number }
+  type: "shell"
+  payload: SessionInboxShellPayload
   delivery: SessionInboxDelivery
 }
 
@@ -1041,6 +1167,12 @@ export type RouteOverrideInfo = {
   text: string
   source: "user" | "interpreter"
   createdAt: number | "Infinity" | "-Infinity" | "NaN"
+}
+
+export type RouteAttemptStats = {
+  targets: Array<RouteAttemptTargetTotal>
+  errors: Array<RouteAttemptErrorBreakdown>
+  coverage: RouteAttemptCoverage
 }
 
 export type Project = {
@@ -1467,6 +1599,14 @@ export type GenerateImageResult = {
   cost?: MoneyUSD
   tokens?: GenerateUsage
   native?: GenerateNative
+}
+
+export type SessionInboxCommandPayload = {
+  command: string
+  text: string
+  files?: Array<PromptInputFileAttachment>
+  agents?: Array<PromptAgentAttachment>
+  skills?: Array<PromptInputSkillAttachment>
 }
 
 export type SessionInboxUserPayload = {
@@ -2674,7 +2814,7 @@ export type VoiceModelsResponse = { data: { models: Array<VoiceModel>; default?:
 
 export type VoiceSessionResponse = { data: { transport: VoiceTransport } }
 
-export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal
+export type CredentialValue = CredentialOAuth | CredentialKey | CredentialExternal | CredentialSessionCookie
 
 export type ConnectionInfo = ConnectionCredentialInfo | ConnectionEnvInfo
 
@@ -2909,6 +3049,15 @@ export type UsageLimitsInfo = {
 
 export type GenerateImageResponse = { data: GenerateImageResult }
 
+export type SessionInboxCommand = {
+  id: SessionMessageID
+  sessionID: SessionID
+  time: { created: number }
+  type: "command"
+  payload: SessionInboxCommandPayload
+  delivery: SessionInboxDelivery
+}
+
 export type SessionInboxUser = {
   id: SessionMessageID
   sessionID: SessionID
@@ -2939,6 +3088,8 @@ export type SessionInboxItem =
   | { type: "synthetic"; payload: SessionInboxSyntheticPayload1; delivery: SessionInboxDelivery }
   | { type: "compaction"; payload: SessionInboxCompactionPayload; delivery: SessionInboxDelivery }
   | { type: "move"; payload: SessionInboxMovePayload1; delivery: SessionInboxDelivery }
+  | { type: "shell"; payload: SessionInboxShellPayload; delivery: SessionInboxDelivery }
+  | { type: "command"; payload: SessionInboxCommandPayload; delivery: SessionInboxDelivery }
 
 export type SessionMessageAssistantTool1 = {
   type: "tool"
@@ -3420,6 +3571,7 @@ export type SessionInfo = {
   model?: ModelRef
   cost: MoneyUSD
   costAuthoritative?: SessionAuthoritativeCost
+  route_usage?: SessionRouteUsage
   tokens: TokenUsageInfo
   outcome?: "succeeded" | "failed" | "interrupted"
   time: { created: number; updated: number; busy?: number; idle?: number; viewed?: number; archived?: number }
@@ -3522,7 +3674,13 @@ export type AutomationInfo = {
   time: { created: number; updated: number }
 }
 
-export type SessionInboxInfo = SessionInboxUser | SessionInboxSynthetic | SessionInboxCompaction | SessionInboxMove
+export type SessionInboxInfo =
+  | SessionInboxUser
+  | SessionInboxSynthetic
+  | SessionInboxCompaction
+  | SessionInboxMove
+  | SessionInboxShell
+  | SessionInboxCommand
 
 export type SessionMessageAssistant = {
   id: SessionMessageID
@@ -3881,14 +4039,6 @@ export type CommandNotFoundError = {
 export const isCommandNotFoundError = (value: unknown): value is CommandNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "CommandNotFoundError"
 
-export type CommandExecutionError = {
-  readonly _tag: "CommandExecutionError"
-  readonly command: string
-  readonly message: string
-}
-export const isCommandExecutionError = (value: unknown): value is CommandExecutionError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "CommandExecutionError"
-
 export type SessionBusyError = {
   readonly _tag: "SessionBusyError"
   readonly sessionID: string
@@ -4130,6 +4280,10 @@ export type ArtifactNotFoundError = {
 }
 export const isArtifactNotFoundError = (value: unknown): value is ArtifactNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ArtifactNotFoundError"
+
+export type JobNotFoundError = { readonly _tag: "JobNotFoundError"; readonly jobID: string; readonly message: string }
+export const isJobNotFoundError = (value: unknown): value is JobNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "JobNotFoundError"
 
 export type MachineNotFoundError = {
   readonly _tag: "MachineNotFoundError"
@@ -4376,6 +4530,7 @@ export type SessionPromptOutput = { data: SessionInboxUser }["data"]
 
 export type SessionCommandInput = {
   readonly sessionID: string
+  readonly id?: string | null | undefined
   readonly name: string
   readonly text: string
   readonly files?:
@@ -4402,7 +4557,7 @@ export type SessionCommandInput = {
   readonly delivery?: ("steer" | "queue") | null | undefined
 }
 
-export type SessionCommandOutput = void
+export type SessionCommandOutput = { data: SessionInboxCommand }["data"]
 
 export type SessionSyntheticInput = {
   readonly sessionID: string
@@ -4420,9 +4575,10 @@ export type SessionShellInput = {
   readonly sessionID: string
   readonly id?: string | undefined
   readonly command: string
+  readonly delivery?: ("steer" | "queue") | undefined
 }
 
-export type SessionShellOutput = void
+export type SessionShellOutput = { data: SessionInboxShell }["data"]
 
 export type SessionCompactInput = {
   readonly sessionID: string
@@ -4779,6 +4935,21 @@ export type ExperimentalSessionImportInput = {
         readonly output: number
         readonly reasoning: number
         readonly cache: { readonly read: number; readonly write: number }
+      }
+    }
+    readonly route_usage?: {
+      readonly lastServing: {
+        readonly leaf: string
+        readonly providerID: string
+        readonly modelID: string
+        readonly variant: string | null
+        readonly routeID: string
+        readonly outcome: string
+        readonly attemptedLeaf: string
+        readonly failedOver: boolean
+        readonly failedOverTo: string | null
+        readonly hedged: boolean
+        readonly timeStarted: number
       }
     }
     readonly tokens: {
@@ -5230,6 +5401,12 @@ export type CredentialCreateInput = {
       }
     | { readonly type: "key"; readonly key: string; readonly metadata?: { readonly [x: string]: JsonValue } }
     | { readonly type: "external"; readonly methodID: string; readonly metadata?: { readonly [x: string]: JsonValue } }
+    | {
+        readonly type: "session-cookie"
+        readonly cookie: string
+        readonly workspaceID: string
+        readonly metadata?: { readonly [x: string]: JsonValue }
+      }
   readonly activate?: boolean | undefined
 }
 
@@ -5283,6 +5460,31 @@ export type RouteOverrideAddOutput = { data: Array<RouteOverrideInfo> }["data"]
 export type RouteOverrideRemoveInput = { readonly overrideID: string }
 
 export type RouteOverrideRemoveOutput = void
+
+export type RouteAttemptListInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly provider?: string | undefined
+  readonly model?: string | undefined
+  readonly session?: string | undefined
+  readonly route?: string | undefined
+  readonly limit?: number | undefined
+}
+
+export type RouteAttemptListOutput = { data: Array<RouteAttemptAttempt> }["data"]
+
+export type RouteAttemptStatsInput = { readonly since?: number | undefined; readonly until?: number | undefined }
+
+export type RouteAttemptStatsOutput = { data: RouteAttemptStats }["data"]
+
+export type RouteDecisionListInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly route?: string | undefined
+  readonly limit?: number | undefined
+}
+
+export type RouteDecisionListOutput = { data: Array<RouteAttemptDecision> }["data"]
 
 export type ProjectListInput = { readonly archived?: boolean | undefined }
 
@@ -5362,6 +5564,8 @@ export type FileReadOutput = globalThis.Uint8Array
 export type FileListInput = {
   readonly location?: { readonly directory?: string | undefined } | undefined
   readonly path?: string | undefined
+  readonly limit?: number | undefined
+  readonly offset?: number | undefined
 }
 
 export type FileListOutput = { location: LocationPublicRef; data: Array<FileSystemEntry> }
@@ -6123,7 +6327,29 @@ export type ConfigGetOutput = Array<ConfigEntry>
 
 export type ConfigShellsOutput = Array<ConfigShellOption>
 
-export type ExperimentalConfigUpdateInput = { readonly shell: string | null }
+export type ExperimentalConfigUpdateInput = {
+  readonly shell?: string | null | undefined
+  readonly providers?:
+    | {
+        readonly [x: string]: {
+          readonly name?: string
+          readonly package?: string
+          readonly env?: ReadonlyArray<string>
+          readonly settings?: { readonly [x: string]: JsonValue }
+          readonly headers?: { readonly [x: string]: string }
+          readonly body?: { readonly [x: string]: JsonValue }
+          readonly models?: {
+            readonly [x: string]: {
+              readonly name?: string
+              readonly modelID?: string
+              readonly settings?: { readonly [x: string]: JsonValue }
+              readonly headers?: { readonly [x: string]: string }
+            }
+          }
+        } | null
+      }
+    | undefined
+}
 
 export type ExperimentalConfigUpdateOutput = void
 

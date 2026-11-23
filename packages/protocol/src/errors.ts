@@ -180,6 +180,15 @@ export class SessionNotFoundError extends Schema.TaggedError<SessionNotFoundErro
   { httpApiStatus: 404 },
 ) {}
 
+export class JobNotFoundError extends Schema.TaggedError<JobNotFoundError>()(
+  "JobNotFoundError",
+  {
+    jobID: Schema.String,
+    message: Schema.String,
+  },
+  { httpApiStatus: 404 },
+) {}
+
 export class InstructionEntryNotFoundError extends Schema.TaggedError<InstructionEntryNotFoundError>()(
   "InstructionEntryNotFoundError",
   { key: Schema.String, message: Schema.String },

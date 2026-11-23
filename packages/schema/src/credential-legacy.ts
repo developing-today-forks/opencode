@@ -23,7 +23,7 @@ const Key = Schema.Struct({ ...Credential.Key.fields, configuration: optional(Fo
 )
 
 /** Decodes a stored or exported credential value of either shape into the current `Credential.Value`. */
-export const Value = Schema.Union([Credential.OAuth, Key, Credential.External])
+export const Value = Schema.Union([Credential.OAuth, Key, Credential.External, Credential.SessionCookie])
 
 /** Decodes an `auth export` entry of either shape into the current `Credential.Entry`. */
 export const Entry = Schema.Struct({ ...Credential.Entry.fields, value: Value })

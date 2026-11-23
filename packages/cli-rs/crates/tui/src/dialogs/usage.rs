@@ -1,7 +1,7 @@
 //! Workspace usage limits and account status.
 
 use opencode_api::generated::{
-    ModelInfo, ProviderInfo, UsageLimitsBudget, UsageLimitsBudgetCoverage, UsageLimitsBudgetPer,
+    ModelInfo, ProviderInfoWithModels, UsageLimitsBudget, UsageLimitsBudgetCoverage, UsageLimitsBudgetPer,
     UsageLimitsBudgetScope, UsageLimitsInfo,
 };
 use opencode_api::js::locale_compare;
@@ -38,13 +38,13 @@ pub enum Level {
     Reached,
 }
 
-pub fn served_by_console(provider: Option<&ProviderInfo>) -> bool {
+pub fn served_by_console(provider: Option<&ProviderInfoWithModels>) -> bool {
     provider.is_some_and(|provider| {
         provider.integration_id.as_ref().is_some_and(|id| id.0 == "opencode") && provider.id.0 != "opencode-go"
     })
 }
 
-pub fn model_usage(info: &UsageLimitsInfo, model: &ModelInfo, provider: Option<&ProviderInfo>) -> Option<ModelUsage> {
+pub fn model_usage(info: &UsageLimitsInfo, model: &ModelInfo, provider: Option<&ProviderInfoWithModels>) -> Option<ModelUsage> {
     if crate::dialogs::model::is_free(model) {
         return None;
     }

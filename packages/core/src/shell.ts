@@ -48,6 +48,22 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Shell.No
 const EXITED_LIMIT = 25
 export const RETENTION = Duration.days(7)
 export const DIRECTORY = "shell"
+
+/**
+ * Capture files of spawned commands that are still running, by absolute path. Spawned commands live in
+ * one Location's service while the retention sweep below is global, so the spawn path registers its
+ * capture on creation and unregisters it at a terminal state, and the sweep spares registered paths.
+ * Daemon commands need no entry: the sweep already spares the ones `listPipes` reports as running.
+ */
+const liveCaptures = new Set<string>()
+
+export const registerLiveCapture = (file: string) => {
+  liveCaptures.add(file)
+}
+
+export const unregisterLiveCapture = (file: string) => {
+  liveCaptures.delete(file)
+}
 export const DEFAULT_OUTPUT_LIMIT = 65536
 
 /**
@@ -275,13 +291,14 @@ export const cleanup = Effect.fn("Shell.cleanup")(function* () {
     { concurrency: 8 },
   )
   // Never starts the daemon. A command it still runs keeps its file; a finished one whose file expired is forgotten
-  // below.
+  // below. Spawned commands live in a Location, not the daemon: the ones still running keep theirs via
+  // `liveCaptures` (see registerLiveCapture).
   const processes = new Map(
     (yield* pty.listPipes().pipe(Effect.orElseSucceed(() => []))).map((process) => [process.outputPath, process]),
   )
   yield* FileRetention.cleanup(
     fs,
-    files.flat().filter((file) => processes.get(file)?.lifecycle.status !== "running"),
+    files.flat().filter((file) => processes.get(file)?.lifecycle.status !== "running" && !liveCaptures.has(file)),
     RETENTION,
   )
   // Finished processes whose file is gone, or that ended long ago, are of no use to any Location: forget them.
@@ -791,6 +808,7 @@ const layer = () =>
       yield* Effect.addFinalizer(() =>
         Effect.gen(function* () {
           for (const command of commands.values()) {
+            unregisterLiveCapture(command.info.file)
             if (command.timeoutFiber) yield* Fiber.interrupt(command.timeoutFiber)
             // Teardown interrupts pending commands; it is not a terminal command failure. Daemon commands are left
             // to the server.
@@ -813,6 +831,7 @@ const layer = () =>
         if (index !== -1) exitOrder.splice(index, 1)
         if (!command) return
         commands.delete(id)
+        unregisterLiveCapture(command.info.file)
         if (command.timeoutFiber) yield* Fiber.interrupt(command.timeoutFiber)
         // Unblock any wait still pending when the command is removed before it terminated.
         yield* Deferred.fail(command.done, new NotFoundError({ id }))
@@ -879,12 +898,14 @@ const layer = () =>
           )?.info
       })
 
+      // A read that fails (the capture was deleted mid-read, or is unreadable) is reported as failed, never
+      // as an empty page: a missing capture must not read as a successful empty one (#2759).
       const readRange = (file: string, start: number, length: number) =>
         length <= 0
-          ? Effect.succeed(Buffer.alloc(0))
+          ? Effect.succeed({ bytes: Buffer.alloc(0), failed: false })
           : Effect.promise(
               () =>
-                new Promise<Buffer>((resolve) => {
+                new Promise<{ bytes: Buffer; failed: boolean }>((resolve) => {
                   const buffer = Buffer.alloc(length)
                   const stream = createReadStream(file, { start, end: start + length - 1 })
                   let offset = 0
@@ -893,24 +914,34 @@ const layer = () =>
                     bytes.copy(buffer, offset)
                     offset += bytes.length
                   })
-                  stream.on("end", () => resolve(buffer.subarray(0, offset)))
-                  stream.on("error", () => resolve(buffer.subarray(0, 0)))
+                  stream.on("end", () => resolve({ bytes: buffer.subarray(0, offset), failed: false }))
+                  stream.on("error", () => resolve({ bytes: buffer.subarray(0, 0), failed: true }))
                 }),
             )
 
+      const missingCapture = (file: string) => `[output file ${file} is missing; the capture is no longer available]`
+
       // The capture a reader sees, bounded by MAX_OUTPUT_BYTES (#2486). The spawner stops writing at the cap. A daemon
       // command's file is the only record of its output and the daemon writes all of it, so its readable size is the
-      // file's up to the cap, and a longer file reads as truncated; a missing file is empty.
+      // file's up to the cap, and a longer file reads as truncated. Both kinds create their capture file up front, so
+      // a file that cannot be stat'ed has disappeared: it is reported missing, never read as an empty capture
+      // (#2759). A spawned command's size is its in-memory count, which survives the file.
       const captureOf = (command: Command) =>
         command.kind === "spawned"
-          ? Effect.succeed({ size: command.size, truncated: command.truncated })
+          ? Effect.promise(() =>
+              stat(command.info.file).then(
+                () => ({ size: command.size, truncated: command.truncated, missing: false }),
+                () => ({ size: command.size, truncated: command.truncated, missing: true }),
+              ),
+            )
           : Effect.promise(() =>
               stat(command.info.file).then(
                 (info) => ({
                   size: Math.min(info.size, MAX_OUTPUT_BYTES),
                   truncated: command.capped === true || info.size > MAX_OUTPUT_BYTES,
+                  missing: false,
                 }),
-                () => ({ size: 0, truncated: false }),
+                () => ({ size: 0, truncated: false, missing: true }),
               ),
             )
 
@@ -920,12 +951,15 @@ const layer = () =>
         const limit = outputLimit(input?.limit)
         const running = command.info.status === "running"
         // A capture that hit MAX_OUTPUT_BYTES reports truncated on every page (#2486).
-        const { size, truncated } = yield* captureOf(command)
+        const { size, truncated, missing } = yield* captureOf(command)
+        if (missing) return { output: missingCapture(command.info.file), cursor: size, size, truncated }
         if (cursor >= size) return { output: "", cursor: size, size, truncated }
         const start = cursor
         // A UTF-8 character can straddle either edge by up to three bytes.
         const offset = Math.max(0, start - 3)
-        const bytes = yield* readRange(command.info.file, offset, Math.min(size, start + limit + 3) - offset)
+        const page = yield* readRange(command.info.file, offset, Math.min(size, start + limit + 3) - offset)
+        if (page.failed) return { output: missingCapture(command.info.file), cursor: size, size, truncated }
+        const bytes = page.bytes
         const from = start - offset
         const to = Math.min(bytes.length, from + limit)
         const first = splitCharacter(bytes, from, running)?.end ?? from
@@ -968,7 +1002,8 @@ const layer = () =>
         const floor = Math.max(0, size - LINE_START_SCAN_LIMIT)
         while (end > floor && starts.length < 2) {
           const from = Math.max(floor, end - 65536)
-          const chunk = yield* readRange(file, from, end - from)
+          // A failed read scans as an empty chunk; captureOf has already reported a missing capture.
+          const chunk = (yield* readRange(file, from, end - from)).bytes
           for (let index = chunk.length - 1; index >= 0 && starts.length < 2; index--)
             if (chunk[index] === 10) starts.push(from + index + 1)
           end = from
@@ -1002,11 +1037,15 @@ const layer = () =>
           const maxBytes = limits?.max_bytes ?? ToolOutput.MAX_BYTES
           const command = yield* require(info.id)
           // The result reads a bounded tail of the capture, which stops at the cap for both hosts (#2486).
-          const { size, truncated: overCap } = yield* captureOf(command)
+          const { size, truncated: overCap, missing } = yield* captureOf(command)
+          const killed = command.killed ? { killed: command.killed } : {}
+          if (missing) return { output: missingCapture(info.file), truncated: false, ...killed }
           const start = Math.max(0, size - maxBytes)
           // Read the byte before the window too, to tell whether the window starts on a line boundary.
           const before = Math.max(0, start - 1)
-          const window = yield* readRange(info.file, before, size - before)
+          const read = yield* readRange(info.file, before, size - before)
+          if (read.failed) return { output: missingCapture(info.file), truncated: false, ...killed }
+          const window = read.bytes
           const page = TextBoundary.utf8Tail(window, size - start)
           const partial = start > 0 && window[0] !== 10
           const endsWithNewline = page.endsWith("\n")
@@ -1023,7 +1062,6 @@ const layer = () =>
             command.kind === "host" && command.outputError
               ? `\n\n[output file ${info.file} stopped early: ${command.outputError}]`
               : ""
-          const killed = command.killed ? { killed: command.killed } : {}
           if (partial && lines.length === 1) {
             const lineStarts = command.kind === "spawned" ? command.lineStarts : yield* lineStartsOf(info.file, size)
             const lineStart = endsWithNewline ? lineStarts[0] : lineStarts[1]
@@ -1201,6 +1239,7 @@ const layer = () =>
                 done: Deferred.makeUnsafe<Info, NotFoundError>(),
               }
               commands.set(id, command)
+              registerLiveCapture(file)
 
               const stream = createWriteStream(file)
               const outputDone = Latch.makeUnsafe()
@@ -1304,6 +1343,7 @@ const layer = () =>
                     if (outcome.signal !== undefined) draft.signal = outcome.signal
                     draft.time.completed = outcome.completed
                   })
+                  unregisterLiveCapture(file)
                   // Resolve waiters before retention eviction, so an evicted command still reports its
                   // terminal Info rather than the removal NotFoundError.
                   yield* Deferred.succeed(command.done, command.info)

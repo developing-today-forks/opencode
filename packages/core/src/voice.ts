@@ -173,7 +173,7 @@ const openCodeLive = { provider: "opencode", baseURL: "https://opencode.ai/infer
 const sessionAccess = (provider: string, credential: Credential.Value) => {
   if (provider !== openCodeLive.provider)
     return credential.type === "key" ? { apiKey: Redacted.make(credential.key) } : undefined
-  if (credential.type === "external") return undefined
+  if (credential.type === "external" || credential.type === "session-cookie") return undefined
   const orgID = credential.metadata?.orgID
   return {
     apiKey: Redacted.make(credential.type === "oauth" ? credential.access : credential.key),

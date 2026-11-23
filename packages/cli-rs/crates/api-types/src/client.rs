@@ -15,6 +15,13 @@ pub fn server_pair() -> Call<ServerPairOutput> {
     Call::new("POST", "/api/pair".to_owned(), Reply::Json, 200, &[400, 401])
 }
 
+/// `POST /auth/connect/:code` (`redeem`)
+pub fn server_redeem(input: &ServerRedeemInput) -> Call<ServerRedeemOutput> {
+    let mut call = Call::new("POST", String::new(), Reply::Json, 200, &[400, 401]);
+    call.path = format!("/auth/connect/{}", call.param(&input.code));
+    call
+}
+
 /// `GET /auth/connect/:code` (`connect`)
 pub fn server_connect(input: &ServerConnectInput) -> Call<ServerConnectOutput> {
     let mut call = Call::new("GET", String::new(), Reply::Json, 200, &[400, 401]);
@@ -135,6 +142,9 @@ pub fn session_list(input: &SessionListInput) -> Call<SessionListOutput> {
 pub fn session_create(input: &SessionCreateInput) -> Call<SessionCreateOutput> {
     let mut call = Call::new("POST", "/api/session".to_owned(), Reply::Data, 200, &[400, 401, 404]);
     call.object();
+    if let Some(value) = &input.directory {
+        call.query("directory", value);
+    }
     if let Some(value) = &input.id {
         call.field("id", value);
     }
@@ -158,6 +168,12 @@ pub fn session_create(input: &SessionCreateInput) -> Call<SessionCreateOutput> {
     }
     if let Some(value) = &input.permissions {
         call.field("permissions", value);
+    }
+    if let Some(value) = &input.subagent_policy {
+        call.field("subagentPolicy", value);
+    }
+    if let Some(value) = &input.detached {
+        call.field("detached", value);
     }
     call
 }
@@ -210,6 +226,23 @@ pub fn session_switch_model(input: &SessionSwitchModelInput) -> Call<()> {
     call
 }
 
+/// `GET /api/session/:sessionID/route-target` (`routeTarget.list`)
+pub fn session_route_target_list(input: &SessionRouteTargetListInput) -> Call<SessionRouteTargetListOutput> {
+    let mut call = Call::new("GET", String::new(), Reply::Data, 200, &[400, 401, 404]);
+    call.path = format!("/api/session/{}/route-target", call.param(&input.session_id));
+    call
+}
+
+/// `POST /api/session/:sessionID/route-target` (`routeTarget.set`)
+pub fn session_route_target_set(input: &SessionRouteTargetSetInput) -> Call<SessionRouteTargetSetOutput> {
+    let mut call = Call::new("POST", String::new(), Reply::Data, 200, &[400, 401, 404, 503]);
+    call.path = format!("/api/session/{}/route-target", call.param(&input.session_id));
+    call.object();
+    call.field("routeID", &input.route_id);
+    call.field("target", &input.target);
+    call
+}
+
 /// `PATCH /api/session/:sessionID` (`update`)
 pub fn session_update(input: &SessionUpdateInput) -> Call<()> {
     let mut call = Call::new("PATCH", String::new(), Reply::Empty, 204, &[400, 401, 404]);
@@ -224,8 +257,14 @@ pub fn session_update(input: &SessionUpdateInput) -> Call<()> {
     if let Some(value) = &input.permissions {
         call.field("permissions", value);
     }
+    if let Some(value) = &input.subagent_policy {
+        call.field("subagentPolicy", value);
+    }
     if let Some(value) = &input.archived {
         call.field("archived", value);
+    }
+    if let Some(value) = &input.experimental {
+        call.field("experimental", value);
     }
     call
 }
@@ -402,7 +441,7 @@ pub fn session_inbox_list(input: &SessionInboxListInput) -> Call<SessionInboxLis
 
 /// `DELETE /api/session/:sessionID/inbox/:inboxID` (`inbox.cancel`)
 pub fn session_inbox_cancel(input: &SessionInboxCancelInput) -> Call<()> {
-    let mut call = Call::new("DELETE", String::new(), Reply::Empty, 204, &[400, 401, 404]);
+    let mut call = Call::new("DELETE", String::new(), Reply::Empty, 204, &[400, 401, 404, 409]);
     call.path = format!("/api/session/{}/inbox/{}", call.param(&input.session_id), call.param(&input.inbox_id));
     call
 }
@@ -431,6 +470,9 @@ pub fn session_interrupt(input: &SessionInterruptInput) -> Call<SessionInterrupt
     call.path = format!("/api/session/{}/interrupt", call.param(&input.session_id));
     if let Some(value) = &input.resume {
         call.query("resume", value);
+    }
+    if let Some(value) = &input.force {
+        call.query("force", value);
     }
     call
 }
@@ -720,7 +762,7 @@ pub fn experimental_generate_video_create(
         "/api/experimental/generate/video".to_owned(),
         Reply::Data,
         200,
-        &[400, 401, 403, 404, 422, 502, 503],
+        &[400, 401, 404, 422, 502, 503],
     );
     call.object();
     call.field("model", &input.model);
@@ -753,7 +795,7 @@ pub fn experimental_generate_video_create(
 pub fn experimental_generate_video_get(
     input: &ExperimentalGenerateVideoGetInput,
 ) -> Call<ExperimentalGenerateVideoGetOutput> {
-    let mut call = Call::new("GET", String::new(), Reply::Data, 200, &[400, 401, 403, 404]);
+    let mut call = Call::new("GET", String::new(), Reply::Data, 200, &[400, 401, 404]);
     call.path = format!("/api/experimental/generate/video/{}", call.param(&input.id));
     call
 }
@@ -773,6 +815,71 @@ pub fn experimental_generate_decisions(
     call.field("model", &input.model);
     call.field("input", &input.input);
     call.field("questions", &input.questions);
+    call
+}
+
+/// `POST /v1/chat/completions` (`chat`)
+pub fn server_completions_chat(input: &ServerCompletionsChatInput) -> Call<ServerCompletionsChatOutput> {
+    let mut call = Call::new("POST", "/v1/chat/completions".to_owned(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.json(&input.payload);
+    call
+}
+
+/// `POST /v1/responses` (`responses`)
+pub fn server_completions_responses(input: &ServerCompletionsResponsesInput) -> Call<ServerCompletionsResponsesOutput> {
+    let mut call = Call::new("POST", "/v1/responses".to_owned(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.json(&input.payload);
+    call
+}
+
+/// `POST /v1/embeddings` (`embeddings`)
+pub fn server_completions_embeddings(
+    input: &ServerCompletionsEmbeddingsInput,
+) -> Call<ServerCompletionsEmbeddingsOutput> {
+    let mut call = Call::new("POST", "/v1/embeddings".to_owned(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.json(&input.payload);
+    call
+}
+
+/// `POST /v1/audio/transcriptions` (`transcriptions`)
+pub fn server_completions_transcriptions(
+    input: &ServerCompletionsTranscriptionsInput,
+) -> Call<ServerCompletionsTranscriptionsOutput> {
+    let mut call = Call::new("POST", "/v1/audio/transcriptions".to_owned(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.json(&input.payload);
+    call
+}
+
+/// `POST /v1/messages` (`messages`)
+pub fn server_completions_messages(input: &ServerCompletionsMessagesInput) -> Call<ServerCompletionsMessagesOutput> {
+    let mut call = Call::new("POST", "/v1/messages".to_owned(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.json(&input.payload);
+    call
+}
+
+/// `POST /v1/systemone` (`systemone`)
+pub fn server_completions_systemone(input: &ServerCompletionsSystemoneInput) -> Call<ServerCompletionsSystemoneOutput> {
+    let mut call = Call::new("POST", "/v1/systemone".to_owned(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.json(&input.payload);
+    call
+}
+
+/// `GET /v1/models` (`models`)
+pub fn server_completions_models() -> Call<ServerCompletionsModelsOutput> {
+    Call::new("GET", "/v1/models".to_owned(), Reply::Json, 200, &[400, 401, 404, 503])
+}
+
+/// `GET /v1/models/:id` (`model`)
+pub fn server_completions_model(input: &ServerCompletionsModelInput) -> Call<ServerCompletionsModelOutput> {
+    let mut call = Call::new("GET", String::new(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.path = format!("/v1/models/{}", call.param(&input.id));
+    call
+}
+
+/// `GET /v1/models/:provider/:model` (`modelRef`)
+pub fn server_completions_model_ref(input: &ServerCompletionsModelRefInput) -> Call<ServerCompletionsModelRefOutput> {
+    let mut call = Call::new("GET", String::new(), Reply::Json, 200, &[400, 401, 404, 503]);
+    call.path = format!("/v1/models/{}/{}", call.param(&input.provider), call.param(&input.model));
     call
 }
 
@@ -1088,7 +1195,7 @@ pub fn credential_create(input: &CredentialCreateInput) -> Call<CredentialCreate
 
 /// `PATCH /api/credential/:credentialID` (`update`)
 pub fn credential_update(input: &CredentialUpdateInput) -> Call<()> {
-    let mut call = Call::new("PATCH", String::new(), Reply::Empty, 204, &[400, 401]);
+    let mut call = Call::new("PATCH", String::new(), Reply::Empty, 204, &[400, 401, 404]);
     call.path = format!("/api/credential/{}", call.param(&input.credential_id));
     call.object();
     call.field("label", &input.label);
@@ -1097,15 +1204,112 @@ pub fn credential_update(input: &CredentialUpdateInput) -> Call<()> {
 
 /// `POST /api/credential/:credentialID/activate` (`activate`)
 pub fn credential_activate(input: &CredentialActivateInput) -> Call<()> {
-    let mut call = Call::new("POST", String::new(), Reply::Empty, 204, &[400, 401]);
+    let mut call = Call::new("POST", String::new(), Reply::Empty, 204, &[400, 401, 404]);
     call.path = format!("/api/credential/{}/activate", call.param(&input.credential_id));
     call
 }
 
 /// `DELETE /api/credential/:credentialID` (`remove`)
 pub fn credential_remove(input: &CredentialRemoveInput) -> Call<()> {
-    let mut call = Call::new("DELETE", String::new(), Reply::Empty, 204, &[400, 401]);
+    let mut call = Call::new("DELETE", String::new(), Reply::Empty, 204, &[400, 401, 404]);
     call.path = format!("/api/credential/{}", call.param(&input.credential_id));
+    call
+}
+
+/// `GET /api/route/overrides` (`override.list`)
+pub fn route_override_list() -> Call<RouteOverrideListOutput> {
+    Call::new("GET", "/api/route/overrides".to_owned(), Reply::Data, 200, &[400, 401])
+}
+
+/// `POST /api/route/overrides` (`override.add`)
+pub fn route_override_add(input: &RouteOverrideAddInput) -> Call<RouteOverrideAddOutput> {
+    let mut call = Call::new("POST", "/api/route/overrides".to_owned(), Reply::Data, 200, &[400, 401]);
+    call.object();
+    call.field("id", &input.id);
+    call.field("action", &input.action);
+    call.field("providers", &input.providers);
+    call.field("models", &input.models);
+    call.field("routes", &input.routes);
+    call.field("fixed", &input.fixed);
+    if let Some(value) = &input.factor {
+        call.field("factor", value);
+    }
+    if let Some(value) = &input.weight {
+        call.field("weight", value);
+    }
+    if let Some(value) = &input.schedule {
+        call.field("schedule", value);
+    }
+    if let Some(value) = &input.until {
+        call.field("until", value);
+    }
+    call.field("text", &input.text);
+    call.field("source", &input.source);
+    call.field("createdAt", &input.created_at);
+    call
+}
+
+/// `DELETE /api/route/overrides/:overrideID` (`override.remove`)
+pub fn route_override_remove(input: &RouteOverrideRemoveInput) -> Call<()> {
+    let mut call = Call::new("DELETE", String::new(), Reply::Empty, 204, &[400, 401]);
+    call.path = format!("/api/route/overrides/{}", call.param(&input.override_id));
+    call
+}
+
+/// `GET /api/route/attempts` (`attempt.list`)
+pub fn route_attempt_list(input: &RouteAttemptListInput) -> Call<RouteAttemptListOutput> {
+    let mut call = Call::new("GET", "/api/route/attempts".to_owned(), Reply::Data, 200, &[400, 401]);
+    if let Some(value) = &input.since {
+        call.query("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.query("until", value);
+    }
+    if let Some(value) = &input.provider {
+        call.query("provider", value);
+    }
+    if let Some(value) = &input.model {
+        call.query("model", value);
+    }
+    if let Some(value) = &input.session {
+        call.query("session", value);
+    }
+    if let Some(value) = &input.route {
+        call.query("route", value);
+    }
+    if let Some(value) = &input.limit {
+        call.query("limit", value);
+    }
+    call
+}
+
+/// `GET /api/route/attempts/stats` (`attempt.stats`)
+pub fn route_attempt_stats(input: &RouteAttemptStatsInput) -> Call<RouteAttemptStatsOutput> {
+    let mut call = Call::new("GET", "/api/route/attempts/stats".to_owned(), Reply::Data, 200, &[400, 401]);
+    if let Some(value) = &input.since {
+        call.query("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.query("until", value);
+    }
+    call
+}
+
+/// `GET /api/route/decisions` (`decision.list`)
+pub fn route_decision_list(input: &RouteDecisionListInput) -> Call<RouteDecisionListOutput> {
+    let mut call = Call::new("GET", "/api/route/decisions".to_owned(), Reply::Data, 200, &[400, 401]);
+    if let Some(value) = &input.since {
+        call.query("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.query("until", value);
+    }
+    if let Some(value) = &input.route {
+        call.query("route", value);
+    }
+    if let Some(value) = &input.limit {
+        call.query("limit", value);
+    }
     call
 }
 
@@ -1181,7 +1385,7 @@ pub fn permission_saved_update(input: &PermissionSavedUpdateInput) -> Call<Permi
 
 /// `DELETE /api/permission/saved/:id` (`saved.remove`)
 pub fn permission_saved_remove(input: &PermissionSavedRemoveInput) -> Call<()> {
-    let mut call = Call::new("DELETE", String::new(), Reply::Empty, 204, &[400, 401]);
+    let mut call = Call::new("DELETE", String::new(), Reply::Empty, 204, &[400, 401, 404]);
     call.path = format!("/api/permission/saved/{}", call.param(&input.id));
     call
 }
@@ -1278,7 +1482,7 @@ pub fn file_find(input: &FileFindInput) -> Call<FileFindOutput> {
 
 /// `POST /api/experimental/fs/write` (`write`)
 pub fn experimental_file_write(input: &ExperimentalFileWriteInput) -> Call<ExperimentalFileWriteOutput> {
-    let mut call = Call::new("POST", "/api/experimental/fs/write".to_owned(), Reply::Json, 200, &[400, 401, 404]);
+    let mut call = Call::new("POST", "/api/experimental/fs/write".to_owned(), Reply::Json, 200, &[400, 401, 404, 413]);
     if let Some(value) = &input.location {
         call.query("location", value);
     }
@@ -1346,6 +1550,9 @@ pub fn event_subscribe(input: &EventSubscribeInput) -> Call<Sse<EventSubscribeOu
     let mut call = Call::new("GET", "/api/event".to_owned(), Reply::Sse, 200, &[400, 401]);
     if let Some(value) = &input.types {
         call.query("types", value);
+    }
+    if let Some(value) = &input.last_event_id {
+        call.header("last-event-id", value);
     }
     call
 }
@@ -1903,6 +2110,427 @@ pub fn worktree_refresh(input: &WorktreeRefreshInput) -> Call<()> {
     call
 }
 
+/// `POST /api/messaging/message` (`send`)
+pub fn messaging_send(input: &MessagingSendInput) -> Call<MessagingSendOutput> {
+    let mut call = Call::new("POST", "/api/messaging/message".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    if let Some(value) = &input.topic {
+        call.field("topic", value);
+    }
+    if let Some(value) = &input.to {
+        call.field("to", value);
+    }
+    call.field("text", &input.text);
+    if let Some(value) = &input.r#type {
+        call.field("type", value);
+    }
+    if let Some(value) = &input.meta {
+        call.field("meta", value);
+    }
+    if let Some(value) = &input.reply {
+        call.field("reply", value);
+    }
+    if let Some(value) = &input.force {
+        call.field("force", value);
+    }
+    if let Some(value) = &input.deliver {
+        call.field("deliver", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/user` (`user`)
+pub fn messaging_user(input: &MessagingUserInput) -> Call<MessagingUserOutput> {
+    let mut call = Call::new("POST", "/api/messaging/user".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    call.field("as", &input.r#as);
+    call.field("text", &input.text);
+    if let Some(value) = &input.title {
+        call.field("title", value);
+    }
+    if let Some(value) = &input.root {
+        call.field("root", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/query` (`query`)
+pub fn messaging_query(input: &MessagingQueryInput) -> Call<MessagingQueryOutput> {
+    let mut call = Call::new("POST", "/api/messaging/query".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    if let Some(value) = &input.topics {
+        call.field("topics", value);
+    }
+    if let Some(value) = &input.query {
+        call.field("query", value);
+    }
+    if let Some(value) = &input.r#match {
+        call.field("match", value);
+    }
+    if let Some(value) = &input.from {
+        call.field("from", value);
+    }
+    if let Some(value) = &input.types {
+        call.field("types", value);
+    }
+    if let Some(value) = &input.kinds {
+        call.field("kinds", value);
+    }
+    if let Some(value) = &input.since {
+        call.field("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.field("until", value);
+    }
+    if let Some(value) = &input.after {
+        call.field("after", value);
+    }
+    if let Some(value) = &input.before {
+        call.field("before", value);
+    }
+    if let Some(value) = &input.hidden {
+        call.field("hidden", value);
+    }
+    if let Some(value) = &input.hidden_by {
+        call.field("hiddenBy", value);
+    }
+    if let Some(value) = &input.hidden_from {
+        call.field("hiddenFrom", value);
+    }
+    if let Some(value) = &input.hidden_since {
+        call.field("hiddenSince", value);
+    }
+    if let Some(value) = &input.hidden_until {
+        call.field("hiddenUntil", value);
+    }
+    if let Some(value) = &input.unread {
+        call.field("unread", value);
+    }
+    if let Some(value) = &input.inbox {
+        call.field("inbox", value);
+    }
+    if let Some(value) = &input.limit {
+        call.field("limit", value);
+    }
+    if let Some(value) = &input.order {
+        call.field("order", value);
+    }
+    if let Some(value) = &input.mark_read {
+        call.field("markRead", value);
+    }
+    if let Some(value) = &input.wait {
+        call.field("wait", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/inspect` (`inspect`)
+pub fn messaging_inspect(input: &MessagingInspectInput) -> Call<MessagingInspectOutput> {
+    let mut call = Call::new("POST", "/api/messaging/inspect".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    call.field("topic", &input.topic);
+    call.field("seq", &input.seq);
+    call
+}
+
+/// `POST /api/messaging/visibility` (`visibility`)
+pub fn messaging_visibility(input: &MessagingVisibilityInput) -> Call<MessagingVisibilityOutput> {
+    let mut call = Call::new("POST", "/api/messaging/visibility".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    call.field("topic", &input.topic);
+    call.field("action", &input.action);
+    if let Some(value) = &input.seqs {
+        call.field("seqs", value);
+    }
+    if let Some(value) = &input.r#for {
+        call.field("for", value);
+    }
+    if let Some(value) = &input.reason {
+        call.field("reason", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/settings` (`settings`)
+pub fn messaging_settings(input: &MessagingSettingsInput) -> Call<MessagingSettingsOutput> {
+    let mut call = Call::new("POST", "/api/messaging/settings".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    call.field("topic", &input.topic);
+    if let Some(value) = &input.mode {
+        call.field("mode", value);
+    }
+    if let Some(value) = &input.writers {
+        call.field("writers", value);
+    }
+    if let Some(value) = &input.description {
+        call.field("description", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/subscribe` (`subscribe`)
+pub fn messaging_subscribe(input: &MessagingSubscribeInput) -> Call<MessagingSubscribeOutput> {
+    let mut call = Call::new("POST", "/api/messaging/subscribe".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    call.field("as", &input.r#as);
+    call.field("topic", &input.topic);
+    if let Some(value) = &input.delivery {
+        call.field("delivery", value);
+    }
+    if let Some(value) = &input.remove {
+        call.field("remove", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/topic` (`topic`)
+pub fn messaging_topic(input: &MessagingTopicInput) -> Call<MessagingTopicOutput> {
+    let mut call = Call::new("POST", "/api/messaging/topic".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    call.field("topic", &input.topic);
+    if let Some(value) = &input.expand {
+        call.field("expand", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/topics` (`topics`)
+pub fn messaging_topics(input: &MessagingTopicsInput) -> Call<MessagingTopicsOutput> {
+    let mut call = Call::new("POST", "/api/messaging/topics".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    if let Some(value) = &input.topics {
+        call.field("topics", value);
+    }
+    if let Some(value) = &input.sessions {
+        call.field("sessions", value);
+    }
+    if let Some(value) = &input.role {
+        call.field("role", value);
+    }
+    if let Some(value) = &input.kinds {
+        call.field("kinds", value);
+    }
+    if let Some(value) = &input.search {
+        call.field("search", value);
+    }
+    if let Some(value) = &input.standard {
+        call.field("standard", value);
+    }
+    if let Some(value) = &input.sort {
+        call.field("sort", value);
+    }
+    if let Some(value) = &input.order {
+        call.field("order", value);
+    }
+    if let Some(value) = &input.limit {
+        call.field("limit", value);
+    }
+    if let Some(value) = &input.offset {
+        call.field("offset", value);
+    }
+    if let Some(value) = &input.expand {
+        call.field("expand", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/chain` (`chain`)
+pub fn messaging_chain(input: &MessagingChainInput) -> Call<MessagingChainOutput> {
+    let mut call = Call::new("POST", "/api/messaging/chain".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    call.field("session", &input.session);
+    if let Some(value) = &input.depth {
+        call.field("depth", value);
+    }
+    if let Some(value) = &input.detail {
+        call.field("detail", value);
+    }
+    if let Some(value) = &input.expand {
+        call.field("expand", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/sessions` (`sessions`)
+pub fn messaging_sessions(input: &MessagingSessionsInput) -> Call<MessagingSessionsOutput> {
+    let mut call = Call::new("POST", "/api/messaging/sessions".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    if let Some(value) = &input.ids {
+        call.field("ids", value);
+    }
+    if let Some(value) = &input.parent {
+        call.field("parent", value);
+    }
+    if let Some(value) = &input.ancestor {
+        call.field("ancestor", value);
+    }
+    if let Some(value) = &input.project {
+        call.field("project", value);
+    }
+    if let Some(value) = &input.directory {
+        call.field("directory", value);
+    }
+    if let Some(value) = &input.agent {
+        call.field("agent", value);
+    }
+    if let Some(value) = &input.search {
+        call.field("search", value);
+    }
+    if let Some(value) = &input.active {
+        call.field("active", value);
+    }
+    if let Some(value) = &input.since {
+        call.field("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.field("until", value);
+    }
+    if let Some(value) = &input.sort {
+        call.field("sort", value);
+    }
+    if let Some(value) = &input.order {
+        call.field("order", value);
+    }
+    if let Some(value) = &input.limit {
+        call.field("limit", value);
+    }
+    if let Some(value) = &input.offset {
+        call.field("offset", value);
+    }
+    if let Some(value) = &input.detail {
+        call.field("detail", value);
+    }
+    if let Some(value) = &input.expand {
+        call.field("expand", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/log` (`log`)
+pub fn messaging_log(input: &MessagingLogInput) -> Call<MessagingLogOutput> {
+    let mut call = Call::new("POST", "/api/messaging/log".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    call.field("sessions", &input.sessions);
+    if let Some(value) = &input.op {
+        call.field("op", value);
+    }
+    if let Some(value) = &input.include {
+        call.field("include", value);
+    }
+    if let Some(value) = &input.query {
+        call.field("query", value);
+    }
+    if let Some(value) = &input.r#match {
+        call.field("match", value);
+    }
+    if let Some(value) = &input.context {
+        call.field("context", value);
+    }
+    if let Some(value) = &input.scope {
+        call.field("scope", value);
+    }
+    if let Some(value) = &input.since {
+        call.field("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.field("until", value);
+    }
+    if let Some(value) = &input.limit {
+        call.field("limit", value);
+    }
+    if let Some(value) = &input.offset {
+        call.field("offset", value);
+    }
+    if let Some(value) = &input.chars {
+        call.field("chars", value);
+    }
+    call
+}
+
+/// `POST /api/messaging/vars` (`vars`)
+pub fn messaging_vars(input: &MessagingVarsInput) -> Call<MessagingVarsOutput> {
+    let mut call = Call::new("POST", "/api/messaging/vars".to_owned(), Reply::Data, 200, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    if let Some(value) = &input.values {
+        call.field("values", value);
+    }
+    if let Some(value) = &input.render {
+        call.field("render", value);
+    }
+    call
+}
+
+/// `PUT /api/messaging/vars` (`setVar`)
+pub fn messaging_set_var(input: &MessagingSetVarInput) -> Call<()> {
+    let mut call = Call::new("PUT", "/api/messaging/vars".to_owned(), Reply::Empty, 204, &[400, 401, 404, 409]);
+    call.object();
+    if let Some(value) = &input.r#as {
+        call.field("as", value);
+    }
+    if let Some(value) = &input.scope {
+        call.field("scope", value);
+    }
+    call.field("name", &input.name);
+    if let Some(value) = &input.value {
+        call.field("value", value);
+    }
+    call
+}
+
+/// `GET /api/messaging/model` (`model.status`)
+pub fn messaging_model_status() -> Call<MessagingModelStatusOutput> {
+    Call::new("GET", "/api/messaging/model".to_owned(), Reply::Data, 200, &[400, 401])
+}
+
+/// `POST /api/messaging/model` (`model.configure`)
+pub fn messaging_model_configure(input: &MessagingModelConfigureInput) -> Call<MessagingModelConfigureOutput> {
+    let mut call = Call::new("POST", "/api/messaging/model".to_owned(), Reply::Data, 200, &[400, 401]);
+    call.object();
+    if let Some(value) = &input.tier {
+        call.field("tier", value);
+    }
+    if let Some(value) = &input.url {
+        call.field("url", value);
+    }
+    if let Some(value) = &input.path {
+        call.field("path", value);
+    }
+    if let Some(value) = &input.start {
+        call.field("start", value);
+    }
+    call
+}
+
 /// `POST /api/vcs/init` (`init`)
 pub fn vcs_init(input: &VcsInitInput) -> Call<()> {
     let mut call = Call::new("POST", "/api/vcs/init".to_owned(), Reply::Empty, 204, &[400, 401, 404, 409, 501, 503]);
@@ -1938,6 +2566,9 @@ pub fn vcs_status(input: &VcsStatusInput) -> Call<VcsStatusOutput> {
     let mut call = Call::new("GET", "/api/vcs/status".to_owned(), Reply::Json, 200, &[400, 401, 404]);
     if let Some(value) = &input.location {
         call.query("location", value);
+    }
+    if let Some(value) = &input.limit {
+        call.query("limit", value);
     }
     call
 }
@@ -2068,6 +2699,7 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
     match name {
         "server.info" => Some((|| Ok(server_info().cast()))()),
         "server.pair" => Some((|| Ok(server_pair().cast()))()),
+        "server.redeem" => Some((|| Ok(server_redeem(&ServerRedeemInput { code: field(input, "code")? }).cast()))()),
         "server.connect" => Some((|| Ok(server_connect(&ServerConnectInput { code: field(input, "code")? }).cast()))()),
         "location.get" => {
             Some((|| Ok(location_get(&LocationGetInput { location: field(input, "location")? }).cast()))())
@@ -2109,6 +2741,7 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
         })()),
         "session.create" => Some((|| {
             Ok(session_create(&SessionCreateInput {
+                directory: field(input, "directory")?,
                 id: field(input, "id")?,
                 parent_id: field(input, "parentID")?,
                 title: field(input, "title")?,
@@ -2117,6 +2750,8 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
                 location: field(input, "location")?,
                 metadata: field(input, "metadata")?,
                 permissions: field(input, "permissions")?,
+                subagent_policy: field(input, "subagentPolicy")?,
+                detached: field(input, "detached")?,
             })
             .cast())
         })()),
@@ -2148,13 +2783,27 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
             })
             .cast())
         })()),
+        "session.routeTarget.list" => Some((|| {
+            Ok(session_route_target_list(&SessionRouteTargetListInput { session_id: field(input, "sessionID")? })
+                .cast())
+        })()),
+        "session.routeTarget.set" => Some((|| {
+            Ok(session_route_target_set(&SessionRouteTargetSetInput {
+                session_id: field(input, "sessionID")?,
+                route_id: field(input, "routeID")?,
+                target: field(input, "target")?,
+            })
+            .cast())
+        })()),
         "session.update" => Some((|| {
             Ok(session_update(&SessionUpdateInput {
                 session_id: field(input, "sessionID")?,
                 title: field(input, "title")?,
                 metadata: field(input, "metadata")?,
                 permissions: field(input, "permissions")?,
+                subagent_policy: field(input, "subagentPolicy")?,
                 archived: field(input, "archived")?,
+                experimental: field(input, "experimental")?,
             })
             .cast())
         })()),
@@ -2275,6 +2924,7 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
             Ok(session_interrupt(&SessionInterruptInput {
                 session_id: field(input, "sessionID")?,
                 resume: field(input, "resume")?,
+                force: field(input, "force")?,
             })
             .cast())
         })()),
@@ -2464,6 +3114,42 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
             })
             .cast())
         })()),
+        "server.completions.chat" => Some((|| {
+            Ok(server_completions_chat(&ServerCompletionsChatInput { payload: field(input, "payload")? }).cast())
+        })()),
+        "server.completions.responses" => Some((|| {
+            Ok(server_completions_responses(&ServerCompletionsResponsesInput { payload: field(input, "payload")? })
+                .cast())
+        })()),
+        "server.completions.embeddings" => Some((|| {
+            Ok(server_completions_embeddings(&ServerCompletionsEmbeddingsInput { payload: field(input, "payload")? })
+                .cast())
+        })()),
+        "server.completions.transcriptions" => Some((|| {
+            Ok(server_completions_transcriptions(&ServerCompletionsTranscriptionsInput {
+                payload: field(input, "payload")?,
+            })
+            .cast())
+        })()),
+        "server.completions.messages" => Some((|| {
+            Ok(server_completions_messages(&ServerCompletionsMessagesInput { payload: field(input, "payload")? })
+                .cast())
+        })()),
+        "server.completions.systemone" => Some((|| {
+            Ok(server_completions_systemone(&ServerCompletionsSystemoneInput { payload: field(input, "payload")? })
+                .cast())
+        })()),
+        "server.completions.models" => Some((|| Ok(server_completions_models().cast()))()),
+        "server.completions.model" => {
+            Some((|| Ok(server_completions_model(&ServerCompletionsModelInput { id: field(input, "id")? }).cast()))())
+        }
+        "server.completions.modelRef" => Some((|| {
+            Ok(server_completions_model_ref(&ServerCompletionsModelRefInput {
+                provider: field(input, "provider")?,
+                model: field(input, "model")?,
+            })
+            .cast())
+        })()),
         "experimental.voice.models" => Some((|| Ok(experimental_voice_models().cast()))()),
         "experimental.voice.session" => Some((|| {
             Ok(experimental_voice_session(&ExperimentalVoiceSessionInput {
@@ -2648,6 +3334,56 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
         "credential.remove" => Some((|| {
             Ok(credential_remove(&CredentialRemoveInput { credential_id: field(input, "credentialID")? }).cast())
         })()),
+        "route.override.list" => Some((|| Ok(route_override_list().cast()))()),
+        "route.override.add" => Some((|| {
+            Ok(route_override_add(&RouteOverrideAddInput {
+                id: field(input, "id")?,
+                action: field(input, "action")?,
+                providers: field(input, "providers")?,
+                models: field(input, "models")?,
+                routes: field(input, "routes")?,
+                fixed: field(input, "fixed")?,
+                factor: field(input, "factor")?,
+                weight: field(input, "weight")?,
+                schedule: field(input, "schedule")?,
+                until: field(input, "until")?,
+                text: field(input, "text")?,
+                source: field(input, "source")?,
+                created_at: field(input, "createdAt")?,
+            })
+            .cast())
+        })()),
+        "route.override.remove" => Some((|| {
+            Ok(route_override_remove(&RouteOverrideRemoveInput { override_id: field(input, "overrideID")? }).cast())
+        })()),
+        "route.attempt.list" => Some((|| {
+            Ok(route_attempt_list(&RouteAttemptListInput {
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+                provider: field(input, "provider")?,
+                model: field(input, "model")?,
+                session: field(input, "session")?,
+                route: field(input, "route")?,
+                limit: field(input, "limit")?,
+            })
+            .cast())
+        })()),
+        "route.attempt.stats" => Some((|| {
+            Ok(route_attempt_stats(&RouteAttemptStatsInput {
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+            })
+            .cast())
+        })()),
+        "route.decision.list" => Some((|| {
+            Ok(route_decision_list(&RouteDecisionListInput {
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+                route: field(input, "route")?,
+                limit: field(input, "limit")?,
+            })
+            .cast())
+        })()),
         "project.list" => {
             Some((|| Ok(project_list(&ProjectListInput { archived: field(input, "archived")? }).cast()))())
         }
@@ -2754,9 +3490,13 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
             })
             .cast())
         })()),
-        "event.subscribe" => {
-            Some((|| Ok(event_subscribe(&EventSubscribeInput { types: field(input, "types")? }).cast()))())
-        }
+        "event.subscribe" => Some((|| {
+            Ok(event_subscribe(&EventSubscribeInput {
+                types: field(input, "types")?,
+                last_event_id: field(input, "last-event-id")?,
+            })
+            .cast())
+        })()),
         "pty.list" => Some((|| Ok(pty_list(&PtyListInput { location: field(input, "location")? }).cast()))()),
         "pty.create" => Some((|| {
             Ok(pty_create(&PtyCreateInput {
@@ -3035,13 +3775,205 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
         "worktree.refresh" => {
             Some((|| Ok(worktree_refresh(&WorktreeRefreshInput { project_id: field(input, "projectID")? }).cast()))())
         }
+        "messaging.send" => Some((|| {
+            Ok(messaging_send(&MessagingSendInput {
+                r#as: field(input, "as")?,
+                topic: field(input, "topic")?,
+                to: field(input, "to")?,
+                text: field(input, "text")?,
+                r#type: field(input, "type")?,
+                meta: field(input, "meta")?,
+                reply: field(input, "reply")?,
+                force: field(input, "force")?,
+                deliver: field(input, "deliver")?,
+            })
+            .cast())
+        })()),
+        "messaging.user" => Some((|| {
+            Ok(messaging_user(&MessagingUserInput {
+                r#as: field(input, "as")?,
+                text: field(input, "text")?,
+                title: field(input, "title")?,
+                root: field(input, "root")?,
+            })
+            .cast())
+        })()),
+        "messaging.query" => Some((|| {
+            Ok(messaging_query(&MessagingQueryInput {
+                r#as: field(input, "as")?,
+                topics: field(input, "topics")?,
+                query: field(input, "query")?,
+                r#match: field(input, "match")?,
+                from: field(input, "from")?,
+                types: field(input, "types")?,
+                kinds: field(input, "kinds")?,
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+                after: field(input, "after")?,
+                before: field(input, "before")?,
+                hidden: field(input, "hidden")?,
+                hidden_by: field(input, "hiddenBy")?,
+                hidden_from: field(input, "hiddenFrom")?,
+                hidden_since: field(input, "hiddenSince")?,
+                hidden_until: field(input, "hiddenUntil")?,
+                unread: field(input, "unread")?,
+                inbox: field(input, "inbox")?,
+                limit: field(input, "limit")?,
+                order: field(input, "order")?,
+                mark_read: field(input, "markRead")?,
+                wait: field(input, "wait")?,
+            })
+            .cast())
+        })()),
+        "messaging.inspect" => Some((|| {
+            Ok(messaging_inspect(&MessagingInspectInput {
+                r#as: field(input, "as")?,
+                topic: field(input, "topic")?,
+                seq: field(input, "seq")?,
+            })
+            .cast())
+        })()),
+        "messaging.visibility" => Some((|| {
+            Ok(messaging_visibility(&MessagingVisibilityInput {
+                r#as: field(input, "as")?,
+                topic: field(input, "topic")?,
+                action: field(input, "action")?,
+                seqs: field(input, "seqs")?,
+                r#for: field(input, "for")?,
+                reason: field(input, "reason")?,
+            })
+            .cast())
+        })()),
+        "messaging.settings" => Some((|| {
+            Ok(messaging_settings(&MessagingSettingsInput {
+                r#as: field(input, "as")?,
+                topic: field(input, "topic")?,
+                mode: field(input, "mode")?,
+                writers: field(input, "writers")?,
+                description: field(input, "description")?,
+            })
+            .cast())
+        })()),
+        "messaging.subscribe" => Some((|| {
+            Ok(messaging_subscribe(&MessagingSubscribeInput {
+                r#as: field(input, "as")?,
+                topic: field(input, "topic")?,
+                delivery: field(input, "delivery")?,
+                remove: field(input, "remove")?,
+            })
+            .cast())
+        })()),
+        "messaging.topic" => Some((|| {
+            Ok(messaging_topic(&MessagingTopicInput {
+                r#as: field(input, "as")?,
+                topic: field(input, "topic")?,
+                expand: field(input, "expand")?,
+            })
+            .cast())
+        })()),
+        "messaging.topics" => Some((|| {
+            Ok(messaging_topics(&MessagingTopicsInput {
+                r#as: field(input, "as")?,
+                topics: field(input, "topics")?,
+                sessions: field(input, "sessions")?,
+                role: field(input, "role")?,
+                kinds: field(input, "kinds")?,
+                search: field(input, "search")?,
+                standard: field(input, "standard")?,
+                sort: field(input, "sort")?,
+                order: field(input, "order")?,
+                limit: field(input, "limit")?,
+                offset: field(input, "offset")?,
+                expand: field(input, "expand")?,
+            })
+            .cast())
+        })()),
+        "messaging.chain" => Some((|| {
+            Ok(messaging_chain(&MessagingChainInput {
+                session: field(input, "session")?,
+                depth: field(input, "depth")?,
+                detail: field(input, "detail")?,
+                expand: field(input, "expand")?,
+            })
+            .cast())
+        })()),
+        "messaging.sessions" => Some((|| {
+            Ok(messaging_sessions(&MessagingSessionsInput {
+                r#as: field(input, "as")?,
+                ids: field(input, "ids")?,
+                parent: field(input, "parent")?,
+                ancestor: field(input, "ancestor")?,
+                project: field(input, "project")?,
+                directory: field(input, "directory")?,
+                agent: field(input, "agent")?,
+                search: field(input, "search")?,
+                active: field(input, "active")?,
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+                sort: field(input, "sort")?,
+                order: field(input, "order")?,
+                limit: field(input, "limit")?,
+                offset: field(input, "offset")?,
+                detail: field(input, "detail")?,
+                expand: field(input, "expand")?,
+            })
+            .cast())
+        })()),
+        "messaging.log" => Some((|| {
+            Ok(messaging_log(&MessagingLogInput {
+                r#as: field(input, "as")?,
+                sessions: field(input, "sessions")?,
+                op: field(input, "op")?,
+                include: field(input, "include")?,
+                query: field(input, "query")?,
+                r#match: field(input, "match")?,
+                context: field(input, "context")?,
+                scope: field(input, "scope")?,
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+                limit: field(input, "limit")?,
+                offset: field(input, "offset")?,
+                chars: field(input, "chars")?,
+            })
+            .cast())
+        })()),
+        "messaging.vars" => Some((|| {
+            Ok(messaging_vars(&MessagingVarsInput {
+                r#as: field(input, "as")?,
+                values: field(input, "values")?,
+                render: field(input, "render")?,
+            })
+            .cast())
+        })()),
+        "messaging.setVar" => Some((|| {
+            Ok(messaging_set_var(&MessagingSetVarInput {
+                r#as: field(input, "as")?,
+                scope: field(input, "scope")?,
+                name: field(input, "name")?,
+                value: field(input, "value")?,
+            })
+            .cast())
+        })()),
+        "messaging.model.status" => Some((|| Ok(messaging_model_status().cast()))()),
+        "messaging.model.configure" => Some((|| {
+            Ok(messaging_model_configure(&MessagingModelConfigureInput {
+                tier: field(input, "tier")?,
+                url: field(input, "url")?,
+                path: field(input, "path")?,
+                start: field(input, "start")?,
+            })
+            .cast())
+        })()),
         "vcs.init" => Some((|| {
             Ok(vcs_init(&VcsInitInput { location: field(input, "location")?, provider: field(input, "provider")? })
                 .cast())
         })()),
         "vcs.get" => Some((|| Ok(vcs_get(&VcsGetInput { location: field(input, "location")? }).cast()))()),
         "vcs.base" => Some((|| Ok(vcs_base(&VcsBaseInput { location: field(input, "location")? }).cast()))()),
-        "vcs.status" => Some((|| Ok(vcs_status(&VcsStatusInput { location: field(input, "location")? }).cast()))()),
+        "vcs.status" => Some((|| {
+            Ok(vcs_status(&VcsStatusInput { location: field(input, "location")?, limit: field(input, "limit")? })
+                .cast())
+        })()),
         "vcs.branch.list" => Some((|| {
             Ok(vcs_branch_list(&VcsBranchListInput {
                 location: field(input, "location")?,

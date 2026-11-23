@@ -24,6 +24,9 @@ export type Key = Credential.Key
 export const External = Credential.External
 export type External = Credential.External
 
+export const SessionCookie = Credential.SessionCookie
+export type SessionCookie = Credential.SessionCookie
+
 export const Value = Credential.Value
 export type Value = Credential.Value
 
@@ -42,6 +45,25 @@ export const refreshManagedExternally = (value: OAuth) => value.metadata?.[exter
 /** Whether an access token is due for a refresh. `expires` 0 means the issuer gave no lifetime. */
 export const expiring = (value: OAuth, now: number, margin: Duration.Input = Duration.minutes(5)) =>
   value.expires !== 0 && value.expires <= now + Duration.toMillis(margin)
+
+/** True when the credential value is a provider session cookie; see SessionCookie. */
+export const isSessionCookie = (value: Value): value is SessionCookie => value.type === "session-cookie"
+
+/**
+ * The value as the generic credential read path may present it. A session cookie is a
+ * provider-only credential (code#5060): the server holds the cookie so it can perform
+ * the provider's calls itself, and generic readers receive metadata only — type,
+ * workspace, metadata — never the cookie itself. Every other kind passes through.
+ */
+export const redactedValue = (value: Value): Value =>
+  value.type === "session-cookie"
+    ? SessionCookie.make({
+        type: "session-cookie",
+        cookie: "",
+        workspaceID: value.workspaceID,
+        ...(value.metadata === undefined ? {} : { metadata: value.metadata }),
+      })
+    : value
 
 export class Info extends Schema.Class<Info>("Credential.Info")({
   id: ID,

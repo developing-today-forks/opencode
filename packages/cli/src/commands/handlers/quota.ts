@@ -98,6 +98,12 @@ const mapEntryValue = (value: SdkCredentialValue): QuotaCredentialRow["value"] =
       }
     case "external":
       return { type: "external", methodID: value.methodID, ...(value.metadata ? { metadata: value.metadata } : {}) }
+    case "session-cookie":
+      // A provider-only credential (#2490): the generic read path only ever receives it
+      // redacted, and no quota fetcher consumes a cookie from a credential row (the one
+      // cookie-fed quota provider, Open Design, reads its own managed store). Carry the
+      // kind and its metadata, never a cookie — QuotaCredentialValue has no field for one.
+      return { type: "session-cookie", ...(value.metadata ? { metadata: value.metadata } : {}) }
   }
 }
 

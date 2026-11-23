@@ -2500,8 +2500,22 @@
         ],
         "security": [],
         "responses": {
-          "204": {
-            "description": "<No Content>"
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Session.Inbox.Command"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
           },
           "400": {
             "description": "InvalidRequestError",
@@ -2543,18 +2557,18 @@
               }
             }
           },
-          "500": {
-            "description": "CommandExecutionError",
+          "409": {
+            "description": "ConflictError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CommandExecutionErrorEncoded"
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
                 }
               }
             }
           }
         },
-        "description": "Execute a slash command callback immediately.",
+        "description": "Durably admit one slash command and return on admission: an unknown command still fails the request, a known one executes in admission order, and its start, completion and failure arrive as session events and inbox records.",
         "summary": "Run command",
         "requestBody": {
           "content": {
@@ -2562,6 +2576,16 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.Message.ID"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -2851,8 +2875,22 @@
         ],
         "security": [],
         "responses": {
-          "204": {
-            "description": "<No Content>"
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Session.Inbox.Shell"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
           },
           "400": {
             "description": "InvalidRequestError",
@@ -2890,9 +2928,19 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "ConflictError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
+                }
+              }
+            }
           }
         },
-        "description": "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
+        "description": "Durably admit one shell command in the session's working directory and return on admission. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
         "summary": "Run shell command",
         "requestBody": {
           "content": {
@@ -2912,6 +2960,16 @@
                   },
                   "command": {
                     "type": "string"
+                  },
+                  "delivery": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.Inbox.Delivery"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": ["command"],
@@ -9150,7 +9208,7 @@
             }
           }
         },
-        "description": "List every stored integration credential, including its secret value.",
+        "description": "List every stored integration credential, including its secret value. Session-cookie credentials are provider-only: listings return their metadata with the cookie redacted.",
         "summary": "List credentials"
       },
       "post": {
@@ -9552,6 +9610,306 @@
         },
         "description": "Remove the route override with the given ID, if one is stored.",
         "summary": "Remove a route override"
+      }
+    },
+    "/api/route/attempts": {
+      "get": {
+        "tags": ["route"],
+        "operationId": "route.attempt.list",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Window start (ms epoch). Defaults to 24 hours ago."
+            },
+            "required": false
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Window end (ms epoch). Defaults to now."
+            },
+            "required": false
+          },
+          {
+            "name": "provider",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "model",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "session",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "route",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Maximum rows to return (default 100, capped at 1000)."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RouteAttempt.Attempt"
+                      }
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Recent route_attempt ledger rows in a time window, newest first, filtered by provider, model, session, or route (#2497). Read-only: this is the server-owned surface that replaces direct opencode.db reads by OpenChamber and the PM-stack aggregator. Rows never carry credentials, provider error bodies, or prompt/response content.",
+        "summary": "List route attempts"
+      }
+    },
+    "/api/route/attempts/stats": {
+      "get": {
+        "tags": ["route"],
+        "operationId": "route.attempt.stats",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Window start (ms epoch). Defaults to 24 hours ago."
+            },
+            "required": false
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Window end (ms epoch). Defaults to now."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/RouteAttempt.Stats"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "The aggregate view over the route_attempt ledger for a time window (#2497): per provider/model attempt and token totals, the error breakdown, and the window's coverage (distinct providers, models, sessions, and routes). Read-only; the same shapes the current direct database readers compute.",
+        "summary": "Route attempt aggregates"
+      }
+    },
+    "/api/route/decisions": {
+      "get": {
+        "tags": ["route"],
+        "operationId": "route.decision.list",
+        "parameters": [
+          {
+            "name": "since",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Window start (ms epoch). Defaults to 24 hours ago."
+            },
+            "required": false
+          },
+          {
+            "name": "until",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Window end (ms epoch). Defaults to now."
+            },
+            "required": false
+          },
+          {
+            "name": "route",
+            "in": "query",
+            "schema": {
+              "type": "string"
+            },
+            "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Maximum rows to return (default 100, capped at 1000)."
+            },
+            "required": false
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/RouteAttempt.Decision"
+                      }
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Recent route_decision ledger rows in a time window, newest first, optionally narrowed to one route (#2497). Read-only companion to the route attempts surface.",
+        "summary": "List route decisions"
       }
     },
     "/api/project": {
@@ -10632,6 +10990,32 @@
               "description": "An absolute path or a path relative to the requested location. Defaults to the location directory."
             },
             "required": false
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Maximum number of entries to return, at most 200. Defaults to 100."
+            },
+            "required": false
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Number of entries to skip in the directories-first sorted order before the page starts. Defaults to 0."
+            },
+            "required": false
           }
         ],
         "security": [],
@@ -10697,7 +11081,7 @@
             }
           }
         },
-        "description": "List direct children using an absolute path or a path relative to the requested location, including parents and siblings outside its directory. Entry paths remain relative to the requested location; listing does not switch locations.",
+        "description": "List direct children using an absolute path or a path relative to the requested location, including parents and siblings outside its directory. Entry paths remain relative to the requested location; listing does not switch locations. Results are paged in a deterministic directories-first sorted order: limit (default 100, at most 200) bounds the page and offset skips entries before it, so a page shorter than the limit marks the end of the listing and a full page may be followed by more entries at offset + limit.",
         "summary": "List directory"
       }
     },
@@ -10750,7 +11134,12 @@
             "name": "limit",
             "in": "query",
             "schema": {
-              "type": "string"
+              "anyOf": [
+                {
+                  "type": "string"
+                }
+              ],
+              "description": "Maximum number of entries to return, at most 200. Defaults to 50."
             },
             "required": false
           }
@@ -14960,9 +15349,19 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "JobNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobNotFoundErrorEncoded"
+                }
+              }
+            }
           }
         },
-        "description": "Cancel a running background job, interrupting the work it started. Cancelling a job that already finished does nothing. Experimental: may change without compatibility guarantees.",
+        "description": "Cancel a running background job, interrupting the work it started. Cancelling a job that already finished but is still tracked does nothing. An ID matching no live-tracked job — one that never existed, or a finished job that was already consumed — answers 404. Experimental: may change without compatibility guarantees.",
         "summary": "Cancel background job"
       }
     },
@@ -19478,23 +19877,6 @@
         "required": ["name"],
         "additionalProperties": false
       },
-      "CommandExecutionErrorEncoded": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["CommandExecutionError"]
-          },
-          "command": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": ["_tag", "command", "message"],
-        "additionalProperties": false
-      },
       "CommandNotFoundErrorEncoded": {
         "type": "object",
         "properties": {
@@ -22075,9 +22457,21 @@
                 "type": "null"
               }
             ]
+          },
+          "providers": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Config.ProviderPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
           }
         },
-        "required": ["shell"],
         "additionalProperties": false
       },
       "Config.Plugin.EntryEncoded": {
@@ -22199,6 +22593,60 @@
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/Config.ModelEncoded"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Config.ProviderPatch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "settings": {
+            "type": "object"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "body": {
+            "type": "object"
+          },
+          "models": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "modelID": {
+                  "type": "string"
+                },
+                "settings": {
+                  "type": "object"
+                },
+                "headers": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
             }
           }
         },
@@ -22518,6 +22966,26 @@
         "required": ["type", "methodID", "refresh", "access", "expires"],
         "additionalProperties": false
       },
+      "Credential.SessionCookie": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["session-cookie"]
+          },
+          "cookie": {
+            "type": "string"
+          },
+          "workspaceID": {
+            "type": "string"
+          },
+          "metadata": {
+            "type": "object"
+          }
+        },
+        "required": ["type", "cookie", "workspaceID"],
+        "additionalProperties": false
+      },
       "Credential.Value": {
         "anyOf": [
           {
@@ -22528,6 +22996,9 @@
           },
           {
             "$ref": "#/components/schemas/Credential.External"
+          },
+          {
+            "$ref": "#/components/schemas/Credential.SessionCookie"
           }
         ]
       },
@@ -25378,6 +25849,23 @@
           }
         },
         "required": ["kind", "id", "sessionID", "status", "time", "path"],
+        "additionalProperties": false
+      },
+      "JobNotFoundErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["JobNotFoundError"]
+          },
+          "jobID": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "jobID", "message"],
         "additionalProperties": false
       },
       "Location.PublicInfo": {
@@ -29301,6 +29789,647 @@
       "RelativePath": {
         "type": "string"
       },
+      "RouteAttempt.Attempt": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "timeStarted": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "timeEnded": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "sessionID": {
+            "type": "string"
+          },
+          "routeID": {
+            "type": "string"
+          },
+          "providerID": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "variant": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string"
+          },
+          "errorTag": {
+            "type": "string"
+          },
+          "errorCode": {
+            "type": "string"
+          },
+          "errorStatus": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "errorMessage": {
+            "type": "string"
+          },
+          "retryable": {
+            "type": "boolean"
+          },
+          "outputStarted": {
+            "type": "boolean"
+          },
+          "hedged": {
+            "type": "boolean"
+          },
+          "firstTokenMs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "responseMs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensPerSecond": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensInput": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensOutput": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensReasoning": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensCacheRead": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensCacheWrite": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "costUsd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "cacheSavingsUsd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          }
+        },
+        "required": ["id", "timeStarted", "timeEnded", "routeID", "providerID", "modelID", "outcome", "outputStarted"],
+        "additionalProperties": false
+      },
+      "RouteAttempt.Coverage": {
+        "type": "object",
+        "properties": {
+          "attempts": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "providers": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "models": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "routes": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "first": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["attempts", "providers", "models", "sessions", "routes", "first", "last"],
+        "additionalProperties": false
+      },
+      "RouteAttempt.Decision": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "time": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "sessionID": {
+            "type": "string"
+          },
+          "routeID": {
+            "type": "string"
+          },
+          "selection": {
+            "type": "string"
+          },
+          "candidates": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "chosen": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "detail": {}
+        },
+        "required": ["id", "time", "routeID", "selection", "candidates", "reason"],
+        "additionalProperties": false
+      },
+      "RouteAttempt.ErrorBreakdown": {
+        "type": "object",
+        "properties": {
+          "providerID": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "tag": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "count": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "lastTime": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "lastMessage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": ["providerID", "modelID", "tag", "code", "status", "count", "lastTime", "lastMessage"],
+        "additionalProperties": false
+      },
+      "RouteAttempt.Stats": {
+        "type": "object",
+        "properties": {
+          "targets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteAttempt.TargetTotal"
+            }
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteAttempt.ErrorBreakdown"
+            }
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/RouteAttempt.Coverage"
+          }
+        },
+        "required": ["targets", "errors", "coverage"],
+        "additionalProperties": false
+      },
+      "RouteAttempt.TargetTotal": {
+        "type": "object",
+        "properties": {
+          "providerID": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "attempts": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "successes": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "failures": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "policyRejections": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "timeouts": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensInput": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensOutput": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensReasoning": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensCacheRead": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "tokensCacheWrite": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "costUsd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "cacheSavingsUsd": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "first": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "providerID",
+          "modelID",
+          "attempts",
+          "successes",
+          "failures",
+          "policyRejections",
+          "timeouts",
+          "tokensInput",
+          "tokensOutput",
+          "tokensReasoning",
+          "tokensCacheRead",
+          "tokensCacheWrite",
+          "costUsd",
+          "cacheSavingsUsd",
+          "sessions",
+          "first",
+          "last"
+        ],
+        "additionalProperties": false
+      },
       "RouteOverride.Action": {
         "type": "string",
         "enum": ["avoid", "prefer", "allow-over-budget"]
@@ -29872,6 +31001,70 @@
         "type": "string",
         "pattern": "^ses"
       },
+      "Session.Inbox.Command": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Session.Message.ID"
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "number"
+              }
+            },
+            "required": ["created"],
+            "additionalProperties": false
+          },
+          "type": {
+            "type": "string",
+            "enum": ["command"]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/Session.Inbox.CommandPayload"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/Session.Inbox.Delivery"
+          }
+        },
+        "required": ["id", "sessionID", "time", "type", "payload", "delivery"],
+        "additionalProperties": false
+      },
+      "Session.Inbox.CommandPayload": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptInput.FileAttachment"
+            }
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Prompt.AgentAttachment"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptInput.SkillAttachment"
+            }
+          }
+        },
+        "required": ["command", "text"],
+        "additionalProperties": false
+      },
       "Session.Inbox.Compaction": {
         "type": "object",
         "properties": {
@@ -29927,6 +31120,12 @@
           },
           {
             "$ref": "#/components/schemas/Session.Inbox.Move"
+          },
+          {
+            "$ref": "#/components/schemas/Session.Inbox.Shell"
+          },
+          {
+            "$ref": "#/components/schemas/Session.Inbox.Command"
           }
         ]
       },
@@ -29992,6 +31191,40 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/Session.Inbox.MovePayload_1"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/Session.Inbox.Delivery"
+              }
+            },
+            "required": ["type", "payload", "delivery"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["shell"]
+              },
+              "payload": {
+                "$ref": "#/components/schemas/Session.Inbox.ShellPayload"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/Session.Inbox.Delivery"
+              }
+            },
+            "required": ["type", "payload", "delivery"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["command"]
+              },
+              "payload": {
+                "$ref": "#/components/schemas/Session.Inbox.CommandPayload"
               },
               "delivery": {
                 "$ref": "#/components/schemas/Session.Inbox.Delivery"
@@ -30065,6 +31298,49 @@
           }
         },
         "required": ["location", "projectID"],
+        "additionalProperties": false
+      },
+      "Session.Inbox.Shell": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Session.Message.ID"
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "number"
+              }
+            },
+            "required": ["created"],
+            "additionalProperties": false
+          },
+          "type": {
+            "type": "string",
+            "enum": ["shell"]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/Session.Inbox.ShellPayload"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/Session.Inbox.Delivery"
+          }
+        },
+        "required": ["id", "sessionID", "time", "type", "payload", "delivery"],
+        "additionalProperties": false
+      },
+      "Session.Inbox.ShellPayload": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": ["command"],
         "additionalProperties": false
       },
       "Session.Inbox.Synthetic": {
@@ -30216,6 +31492,9 @@
           },
           "costAuthoritative": {
             "$ref": "#/components/schemas/Session.AuthoritativeCost"
+          },
+          "route_usage": {
+            "$ref": "#/components/schemas/Session.RouteUsage"
           },
           "tokens": {
             "$ref": "#/components/schemas/TokenUsage.Info"
@@ -31217,6 +32496,79 @@
           }
         },
         "required": ["routeID", "target"],
+        "additionalProperties": false
+      },
+      "Session.RouteUsage": {
+        "type": "object",
+        "properties": {
+          "lastServing": {
+            "type": "object",
+            "properties": {
+              "leaf": {
+                "type": "string"
+              },
+              "providerID": {
+                "$ref": "#/components/schemas/Provider.ID"
+              },
+              "modelID": {
+                "type": "string"
+              },
+              "variant": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "routeID": {
+                "type": "string"
+              },
+              "outcome": {
+                "type": "string"
+              },
+              "attemptedLeaf": {
+                "type": "string"
+              },
+              "failedOver": {
+                "type": "boolean"
+              },
+              "failedOverTo": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "hedged": {
+                "type": "boolean"
+              },
+              "timeStarted": {
+                "type": "number"
+              }
+            },
+            "required": [
+              "leaf",
+              "providerID",
+              "modelID",
+              "variant",
+              "routeID",
+              "outcome",
+              "attemptedLeaf",
+              "failedOver",
+              "failedOverTo",
+              "hedged",
+              "timeStarted"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["lastServing"],
         "additionalProperties": false
       },
       "Session.StructuredError": {

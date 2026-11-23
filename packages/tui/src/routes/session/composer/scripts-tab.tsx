@@ -6,6 +6,7 @@ import { useClient } from "../../../context/client"
 import { useTheme } from "../../../context/theme"
 import { Keymap } from "../../../context/keymap"
 import { Locale } from "../../../util/locale"
+import { isJobNotFoundError } from "@opencode/client/promise"
 import { scriptLabel } from "../../../util/session"
 import { useComposerTab } from "./context"
 
@@ -112,7 +113,10 @@ export function ScriptsTab(props: { sessionID: string }) {
         group: "Composer",
         run() {
           const job = runningScripts()[store.selected]
-          if (job) void client.api.experimental.job.cancel({ id: job.id })
+          if (job)
+            void client.api.experimental.job.cancel({ id: job.id }).catch((error: unknown) => {
+              if (!isJobNotFoundError(error)) throw error
+            })
         },
       },
     ],

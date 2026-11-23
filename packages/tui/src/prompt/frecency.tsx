@@ -3,7 +3,8 @@ import { onMount } from "solid-js"
 import { createStore } from "solid-js/store"
 import { createSimpleContext } from "../context/helper"
 import { useTuiPaths } from "../context/runtime"
-import { appendText, readText, writeText } from "../util/persistence"
+import { appendText } from "../util/persistence"
+import { createJsonlFile } from "./jsonl"
 
 type FrecencyEntry = { path: string; frequency: number; lastOpen: number }
 
@@ -48,40 +49,82 @@ function calculateFrecency(entry?: { frequency: number; lastOpen: number }) {
   return entry.frequency / (1 + (Date.now() - entry.lastOpen) / 86400000)
 }
 
+/** Merge two frecency snapshots: the freshest entry per path wins. */
+export function mergeFrecency(...lists: FrecencyEntry[][]) {
+  const latest = new Map<string, FrecencyEntry>()
+  for (const entry of lists.flat()) {
+    const existing = latest.get(entry.path)
+    if (
+      !existing ||
+      entry.lastOpen > existing.lastOpen ||
+      (entry.lastOpen === existing.lastOpen && entry.frequency > existing.frequency)
+    ) {
+      latest.set(entry.path, entry)
+    }
+  }
+  return [...latest.values()].sort((a, b) => b.lastOpen - a.lastOpen).slice(0, MAX_FRECENCY_ENTRIES)
+}
+
 export const { use: useFrecency, provider: FrecencyProvider } = createSimpleContext({
   name: "Frecency",
   init: () => {
     const paths = useTuiPaths()
     const frecencyPath = path.join(paths.state, "frecency.jsonl")
-    onMount(async () => {
-      const lines = parseFrecency(await readText(frecencyPath).catch(() => ""))
-      setStore(
-        "data",
-        Object.fromEntries(
-          lines.map((entry) => [entry.path, { frequency: entry.frequency, lastOpen: entry.lastOpen }]),
-        ),
-      )
-      if (lines.length > 0)
-        writeText(frecencyPath, lines.map((entry) => JSON.stringify(entry)).join("\n") + "\n").catch(() => {})
+    const file = createJsonlFile<FrecencyEntry>({
+      file: frecencyPath,
+      locks: path.join(paths.state, "locks"),
+      parse: parseFrecency,
+      serialize: (entries) =>
+        entries.length > 0 ? entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n" : "",
     })
 
     const [store, setStore] = createStore({ data: {} as Record<string, { frequency: number; lastOpen: number }> })
+
+    const applyEntries = (entries: FrecencyEntry[]) =>
+      setStore(
+        "data",
+        Object.fromEntries(
+          entries.map((entry) => [entry.path, { frequency: entry.frequency, lastOpen: entry.lastOpen }]),
+        ),
+      )
+
+    onMount(async () => {
+      // Rewrite valid retained entries to self-heal corruption and enforce
+      // the limit, re-reading under the file lock so entries another TUI
+      // recorded after this instance started are preserved.
+      // A failed startup read leaves the disk untouched (update refuses the
+      // rewrite) and falls back to empty loaded state; entries recorded in
+      // memory while the load was in flight are preserved by the merge below.
+      const lines = await file
+        .update((current) => (current.length > 0 ? current : undefined))
+        .catch(() => file.read().catch(() => []))
+      // Merge rather than replace: updates recorded while the load was in
+      // flight are already in the store and must not be wiped by it.
+      const memory = Object.entries(store.data).map(([entryPath, entry]) => ({ path: entryPath, ...entry }))
+      applyEntries(mergeFrecency(lines, memory))
+    })
 
     function updateFrecency(filePath: string) {
       const absolutePath = path.resolve(paths.cwd, filePath)
       const newEntry = { frequency: (store.data[absolutePath]?.frequency || 0) + 1, lastOpen: Date.now() }
       setStore("data", absolutePath, newEntry)
-      appendText(frecencyPath, JSON.stringify({ path: absolutePath, ...newEntry }) + "\n").catch(() => {})
 
-      if (Object.keys(store.data).length <= MAX_FRECENCY_ENTRIES) return
-      const sorted = Object.entries(store.data)
-        .sort(([, a], [, b]) => b.lastOpen - a.lastOpen)
-        .slice(0, MAX_FRECENCY_ENTRIES)
-      setStore("data", Object.fromEntries(sorted))
-      writeText(
-        frecencyPath,
-        sorted.map(([entryPath, entry]) => JSON.stringify({ path: entryPath, ...entry })).join("\n") + "\n",
-      ).catch(() => {})
+      if (Object.keys(store.data).length <= MAX_FRECENCY_ENTRIES) {
+        // Appends are append-only and never clobber another writer; they are
+        // still queued so they cannot interleave with this instance's own
+        // compaction below.
+        file
+          .enqueue(() => appendText(frecencyPath, JSON.stringify({ path: absolutePath, ...newEntry }) + "\n"))
+          .catch(() => {})
+        return
+      }
+      // Compaction: merge this instance's snapshot with the fresh on-disk
+      // state under the file lock, so entries another TUI recorded are kept.
+      const memory = Object.entries(store.data).map(([entryPath, entry]) => ({ path: entryPath, ...entry }))
+      file
+        .update((current) => mergeFrecency(current, memory))
+        .then(applyEntries)
+        .catch(() => {})
     }
 
     return {

@@ -5,6 +5,7 @@ import { Base64Url } from "effect/encoding"
 import { Agent } from "./agent.js"
 import { Location } from "./location.js"
 import { Model } from "./model.js"
+import { Provider } from "./provider.js"
 import { Project } from "./project.js"
 import { AbsolutePath, DateTimeUtcFromMillis, optional, RelativePath, statics } from "./schema.js"
 import { SessionEvent } from "./session-event.js"
@@ -48,6 +49,30 @@ export const AuthoritativeCost = Schema.Struct({
   tokens: TokenUsage.Info,
 }).annotate({ identifier: "Session.AuthoritativeCost" })
 
+export interface RouteUsage extends Schema.Schema.Type<typeof RouteUsage> {}
+/**
+ * Serving-leaf readout: the route_attempt ledger's last serving leaf for this session, in the
+ * same shape the route_usage tool produces (#1891). Surfaced on the session record itself so
+ * consumers that read the record (the fleet-queue claim path) can name the leaf that actually
+ * served, instead of the declared route alias. Present only when the session has a recorded
+ * attempt; `Info.route_usage` stays absent — never null or partial — until then (#2696).
+ */
+export const RouteUsage = Schema.Struct({
+  lastServing: Schema.Struct({
+    leaf: Schema.String,
+    providerID: Provider.ID,
+    modelID: Model.ID,
+    variant: Schema.NullOr(Model.VariantID),
+    routeID: Schema.String,
+    outcome: Schema.String,
+    attemptedLeaf: Schema.String,
+    failedOver: Schema.Boolean,
+    failedOverTo: Schema.NullOr(Schema.String),
+    hedged: Schema.Boolean,
+    timeStarted: Schema.Finite,
+  }),
+}).annotate({ identifier: "Session.RouteUsage" })
+
 export interface Info extends Schema.Schema.Type<typeof Info> {}
 export const Info = Schema.Struct({
   id: ID,
@@ -62,6 +87,8 @@ export const Info = Schema.Struct({
   cost: Money.USD,
   /** Success-only route_attempt totals (#7); absent until the session has a successful attempt. */
   costAuthoritative: AuthoritativeCost.pipe(optional),
+  /** Serving-leaf readout (#2696); absent until the session has a recorded route attempt. */
+  route_usage: RouteUsage.pipe(optional),
   tokens: TokenUsage.Info,
   /** Outcome of the last completed execution, recorded at `time.idle`. Absent until a run reaches a terminal transition. */
   outcome: Schema.Literals(["succeeded", "failed", "interrupted"]).pipe(optional),

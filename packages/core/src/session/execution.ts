@@ -9,6 +9,7 @@ import { Instance } from "../instance/service.js"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { SessionEvent } from "./event.js"
 import { SessionInbox } from "./inbox.js"
+import { SessionOperation } from "./operation.js"
 import { SubagentReport } from "./execution/subagent-report.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { SessionRunner } from "./runner/index.js"
@@ -91,6 +92,42 @@ export const layer = Layer.effect(
     const wake = (sessionID: SessionSchema.ID) =>
       Effect.suspend(() => (holder.coordinator ? holder.coordinator.wake(sessionID) : Effect.void))
     const background = CodeModeJob.make(jobs, SessionSynthetic.make(store, inbox, wake), scope)
+    const synthetic = SessionSynthetic.make(store, inbox, wake)
+    // Recovery net for admitted shell/command operations: admission starts
+    // its own operation, so a row still pending at drain time belongs to a
+    // start this process lost (a crash between admission and start, or a
+    // starter that died). Starting it here keeps the operation's promise —
+    // it runs, in admission order relative to the Session's other work —
+    // without making drains responsible for operations in the common case.
+    // SessionOperation.run stands down for an operation already started.
+    const startOperations = Effect.fnUntraced(function* (session: SessionSchema.Info) {
+      const operations = yield* SessionInbox.pendingOperations(db, session.id)
+      if (operations.length === 0) return
+      yield* Effect.forEach(
+        operations,
+        (operation) =>
+          SessionOperation.run({
+            session,
+            operation,
+            bus,
+            notify: (note) =>
+              synthetic({ sessionID: session.id, ...note, resume: false }).pipe(
+                Effect.catchTag("Session.NotFoundError", () => Effect.void),
+                Effect.orDie,
+                Effect.asVoid,
+              ),
+            started: (id) =>
+              store.message(id).pipe(
+                Effect.map((found) => found?.sessionID === session.id && found.message.type === "shell"),
+                Effect.orElseSucceed(() => false),
+              ),
+          }).pipe(
+            Effect.provideService(Instance.Service, instances),
+            Effect.forkIn(scope, { startImmediately: true }),
+          ),
+        { discard: true },
+      )
+    })
     const subagentReport = SubagentReport.make({
       store,
       jobs,
@@ -111,6 +148,7 @@ export const layer = Layer.effect(
     ): Effect.fn.Return<void, SessionRunner.RunError> {
       const session = yield* store.get(sessionID)
       if (!session) return yield* Effect.die(new Error(`Session not found: ${sessionID}`))
+      yield* startOperations(session)
       const result = yield* SessionRunner.Service.use((runner) =>
         runner.drain({
           sessionID,

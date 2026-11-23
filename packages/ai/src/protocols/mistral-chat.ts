@@ -319,7 +319,7 @@ const lowerToolResults = Effect.fnUntraced(function* (message: ToolMessage, norm
 })
 
 const lowerMessages = Effect.fnUntraced(function* (request: LLMRequest) {
-  const normalizeID = MistralToolID.normalizer(request)
+  const normalizeID = MistralToolID.normalize
   const messages: MistralMessage[] =
     request.system.length === 0
       ? []

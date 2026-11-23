@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test"
 import { parseMistralBudget } from "../src/quota/providers/mistral.js"
 import { parseSubscriptionQuota } from "../src/quota/providers/meta.js"
 import { resolveTursoLimits, tursoWindows, TURSO_LIMITS } from "../src/quota/providers/turso.js"
@@ -21,7 +21,12 @@ import {
   parseOpenCodeGoUsage,
   fetchOpenCodeGoUsage,
 } from "../src/quota/providers/opencode-go.js"
-import { parseBucket, transformModels, transformSummary } from "../src/quota/providers/antigravity.js"
+import {
+  parseBucket,
+  provider as antigravityProvider,
+  transformModels,
+  transformSummary,
+} from "../src/quota/providers/antigravity.js"
 import { provider as codexProvider } from "../src/quota/providers/openai.js"
 import { provider as clinePassProvider } from "../src/quota/providers/cline-pass.js"
 import { provider as deepseekProvider } from "../src/quota/providers/deepseek.js"
@@ -42,6 +47,36 @@ import {
   withQuotaLegDeadline,
 } from "../src/quota/index.js"
 import { readFileSync } from "node:fs"
+
+// The antigravity provider resolves a keyring candidate through the OS
+// secret service (a dynamic import at call time). Quota tests must not
+// consult the developer's real secret service — CI has none, and a live
+// entry would make candidate resolution machine-dependent — so the
+// module is replaced with a controllable double: a keyring candidate
+// exists only when a test seeds one (#2693).
+let seededKeyringValue: string | undefined
+mock.module("../src/providers/secret-service.js", () => ({
+  lookupSecretService: async () => seededKeyringValue,
+}))
+
+// The antigravity refresh rides Effect's FetchHttpClient, whose fetch
+// implementation comes from a Context.Reference defaulting to
+// globalThis.fetch — and a Reference default is computed once, then
+// cached process-wide (effect's Context.js caches it on the Reference
+// itself). A stub assigned to globalThis.fetch inside one test therefore
+// arrives too late whenever any earlier test in this file already made
+// an Effect HTTP request: the frozen real fetch answers instead. This
+// delegating wrapper is installed before any test runs, so it is the
+// implementation the Reference freezes; tests steer it through
+// fetchStubHandler, and with no handler set it is the real fetch,
+// behaviour unchanged for every other test in the file.
+const realGlobalFetch = globalThis.fetch
+let fetchStubHandler: typeof fetch | undefined
+globalThis.fetch = Object.assign(
+  ((input: unknown, init?: unknown) =>
+    (fetchStubHandler ?? realGlobalFetch)(input as never, init as never)) as typeof fetch,
+  realGlobalFetch,
+)
 
 describe("bounded quota JSON reader", () => {
   test("parses a streamed response body", async () => {
@@ -3238,6 +3273,98 @@ describe("google quota leg — per-project no-quota-surface probe (R33)", () => 
     const ids = await listConfiguredQuotaProviders(baseCtx(okFetch))
     expect(ids).toContain("google.drew")
     expect(ids).not.toContain("google")
+  })
+})
+
+describe("antigravity wrong-client reclassification (#2693)", () => {
+  // ORACLE: issue #2693. A credential-store google login issued by
+  // another client refreshes to a confirmed wrong-client rejection
+  // (unauthorized_client at 400/401 from the token endpoint): when
+  // every candidate is store-origin and every refresh is such a
+  // rejection, the provider reports "Not configured" — the store login
+  // is not an Antigravity source. Any other refresh failure (a
+  // different OAuth code, or a non-store origin) keeps the
+  // refresh-failure state. The token endpoint is stubbed through
+  // the delegating fetch wrapper at the top of this file; candidate
+  // origins come from the
+  // ctx (store), the seeded secret-service double (keyring), and
+  // absent account files (file).
+  const originalClientSecret = process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET
+
+  const ctxWith = (credentials: unknown[]) =>
+    ({
+      credentials,
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      homeDir: "/nonexistent-antigravity-2693",
+      configDir: "/nonexistent-antigravity-2693",
+      env: {},
+    }) as never
+
+  const storeCtx = () =>
+    ctxWith([
+      {
+        id: "row-google-store",
+        integrationID: "google",
+        active: true,
+        value: { type: "oauth", access: "fixture-access", refresh: "store-refresh-fixture", expires: 0 },
+      },
+    ])
+
+  const stubTokenEndpoint = (status: number, body: unknown) => {
+    fetchStubHandler = (async (input: unknown) => {
+      const url = String(input instanceof Request ? input.url : input)
+      if (url === "https://oauth2.googleapis.com/token") {
+        return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } })
+      }
+      throw new Error(`unexpected fetch in #2693 test: ${url}`)
+    }) as typeof fetch
+  }
+
+  beforeEach(() => {
+    process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET = "fixture-client-secret"
+    seededKeyringValue = undefined
+  })
+
+  afterEach(() => {
+    fetchStubHandler = undefined
+    seededKeyringValue = undefined
+    if (originalClientSecret === undefined) delete process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET
+    else process.env.ANTIGRAVITY_OAUTH_CLIENT_SECRET = originalClientSecret
+  })
+
+  test("store-origin candidate + unauthorized_client at 400 reports Not configured", async () => {
+    stubTokenEndpoint(400, { error: "unauthorized_client", error_description: "fixture rejection" })
+    const result = await antigravityProvider.fetchQuota(storeCtx())
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(false)
+    expect(result.error).toBe("Not configured")
+  })
+
+  test("store-origin candidate + unauthorized_client at 401 reports Not configured", async () => {
+    stubTokenEndpoint(401, { error: "unauthorized_client" })
+    const result = await antigravityProvider.fetchQuota(storeCtx())
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(false)
+    expect(result.error).toBe("Not configured")
+  })
+
+  test("store-origin candidate + invalid_grant keeps the refresh-failure state", async () => {
+    stubTokenEndpoint(400, { error: "invalid_grant", error_description: "fixture rejection" })
+    const result = await antigravityProvider.fetchQuota(storeCtx())
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.error).toBe("Failed to refresh Antigravity token")
+  })
+
+  test("keyring-origin candidate + unauthorized_client keeps the refresh-failure state", async () => {
+    seededKeyringValue = JSON.stringify({ token: { refresh_token: "keyring-refresh-fixture" } })
+    stubTokenEndpoint(400, { error: "unauthorized_client" })
+    const result = await antigravityProvider.fetchQuota(ctxWith([]))
+    expect(result.ok).toBe(false)
+    expect(result.configured).toBe(true)
+    expect(result.error).toBe("Failed to refresh Antigravity token")
   })
 })
 

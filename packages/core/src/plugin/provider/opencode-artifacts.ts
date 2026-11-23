@@ -174,7 +174,7 @@ const sender = Effect.fnUntraced(function* (
   slug: string,
 ) {
   const credential = yield* ctx.integration.connection.resolve(connection)
-  if (!credential || credential.type === "external")
+  if (!credential || credential.type === "external" || credential.type === "session-cookie")
     return yield* Effect.fail(new Error("OpenCode Console is not connected"))
   return (method: "GET" | "POST" | "PUT" | "DELETE", path: string, body?: Uint8Array | object) => {
     const request = HttpClientRequest.make(method)(`${ConsoleAccess.server(credential)}${path}`).pipe(

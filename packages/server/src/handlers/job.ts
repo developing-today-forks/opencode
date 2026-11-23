@@ -1,6 +1,7 @@
 import { Job } from "@opencode/core/job"
 import { Session } from "@opencode/core/session"
 import { SessionBackground } from "@opencode/core/session/background"
+import { JobNotFoundError } from "@opencode/protocol/errors"
 import type { ListQuery } from "@opencode/protocol/groups/job"
 import { Effect, Option } from "effect"
 import { missingSession } from "./session-error"
@@ -23,7 +24,10 @@ export const makeJob = Effect.gen(function* () {
       }
     }),
     cancel: Effect.fn("JobHandler.cancel")(function* (id: string) {
-      yield* jobs.cancel(id)
+      const info = yield* jobs.cancel(id)
+      if (info === undefined) {
+        return yield* new JobNotFoundError({ jobID: id, message: `Job not found: ${id}` })
+      }
     }),
   }
 })

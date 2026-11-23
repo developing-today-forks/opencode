@@ -201,6 +201,12 @@ import type {
   RouteOverrideAddOutput,
   RouteOverrideRemoveInput,
   RouteOverrideRemoveOutput,
+  RouteAttemptListInput,
+  RouteAttemptListOutput,
+  RouteAttemptStatsInput,
+  RouteAttemptStatsOutput,
+  RouteDecisionListInput,
+  RouteDecisionListOutput,
   ProjectListInput,
   ProjectListOutput,
   ProjectUpdateInput,
@@ -910,11 +916,12 @@ export function make(options: ClientOptions) {
           requestOptions,
         ).then((value) => value.data),
       command: (input: SessionCommandInput, requestOptions?: RequestOptions) =>
-        request<SessionCommandOutput>(
+        request<{ readonly data: SessionCommandOutput }>(
           {
             method: "POST",
             path: `/api/session/${encodeURIComponent(input.sessionID)}/command`,
             body: {
+              id: input["id"],
               name: input["name"],
               text: input["text"],
               files: input["files"],
@@ -922,12 +929,12 @@ export function make(options: ClientOptions) {
               skills: input["skills"],
               delivery: input["delivery"],
             },
-            successStatus: 204,
-            declaredStatuses: [400, 401, 404, 500],
-            empty: true,
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 409],
+            empty: false,
           },
           requestOptions,
-        ),
+        ).then((value) => value.data),
       synthetic: (input: SessionSyntheticInput, requestOptions?: RequestOptions) =>
         request<{ readonly data: SessionSyntheticOutput }>(
           {
@@ -948,17 +955,17 @@ export function make(options: ClientOptions) {
           requestOptions,
         ).then((value) => value.data),
       shell: (input: SessionShellInput, requestOptions?: RequestOptions) =>
-        request<SessionShellOutput>(
+        request<{ readonly data: SessionShellOutput }>(
           {
             method: "POST",
             path: `/api/session/${encodeURIComponent(input.sessionID)}/shell`,
-            body: { id: input["id"], command: input["command"] },
-            successStatus: 204,
-            declaredStatuses: [400, 401, 404],
-            empty: true,
+            body: { id: input["id"], command: input["command"], delivery: input["delivery"] },
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 409],
+            empty: false,
           },
           requestOptions,
-        ),
+        ).then((value) => value.data),
       compact: (input: SessionCompactInput, requestOptions?: RequestOptions) =>
         request<{ readonly data: SessionCompactOutput }>(
           {
@@ -1902,7 +1909,7 @@ export function make(options: ClientOptions) {
               method: "POST",
               path: `/api/experimental/job/${encodeURIComponent(input.id)}/cancel`,
               successStatus: 204,
-              declaredStatuses: [400, 401],
+              declaredStatuses: [400, 401, 404],
               empty: true,
             },
             requestOptions,
@@ -1974,12 +1981,12 @@ export function make(options: ClientOptions) {
           ),
       },
       config: {
-        update: (input: ExperimentalConfigUpdateInput, requestOptions?: RequestOptions) =>
+        update: (input?: ExperimentalConfigUpdateInput, requestOptions?: RequestOptions) =>
           request<ExperimentalConfigUpdateOutput>(
             {
               method: "PATCH",
               path: `/api/experimental/config`,
-              body: { shell: input["shell"] },
+              body: { shell: input?.["shell"], providers: input?.["providers"] },
               successStatus: 204,
               declaredStatuses: [400, 401, 404],
               empty: true,
@@ -2444,6 +2451,59 @@ export function make(options: ClientOptions) {
             requestOptions,
           ),
       },
+      attempt: {
+        list: (input?: RouteAttemptListInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteAttemptListOutput }>(
+            {
+              method: "GET",
+              path: `/api/route/attempts`,
+              query: {
+                since: input?.["since"],
+                until: input?.["until"],
+                provider: input?.["provider"],
+                model: input?.["model"],
+                session: input?.["session"],
+                route: input?.["route"],
+                limit: input?.["limit"],
+              },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+        stats: (input?: RouteAttemptStatsInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteAttemptStatsOutput }>(
+            {
+              method: "GET",
+              path: `/api/route/attempts/stats`,
+              query: { since: input?.["since"], until: input?.["until"] },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+      },
+      decision: {
+        list: (input?: RouteDecisionListInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: RouteDecisionListOutput }>(
+            {
+              method: "GET",
+              path: `/api/route/decisions`,
+              query: {
+                since: input?.["since"],
+                until: input?.["until"],
+                route: input?.["route"],
+                limit: input?.["limit"],
+              },
+              successStatus: 200,
+              declaredStatuses: [400, 401],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
+      },
     },
     project: {
       list: (input?: ProjectListInput, requestOptions?: RequestOptions) =>
@@ -2616,7 +2676,12 @@ export function make(options: ClientOptions) {
           {
             method: "GET",
             path: `/api/fs/list`,
-            query: { location: input?.["location"], path: input?.["path"] },
+            query: {
+              location: input?.["location"],
+              path: input?.["path"],
+              limit: input?.["limit"],
+              offset: input?.["offset"],
+            },
             successStatus: 200,
             declaredStatuses: [400, 401, 404],
             empty: false,

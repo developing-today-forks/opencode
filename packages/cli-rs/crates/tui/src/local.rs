@@ -8,7 +8,7 @@ use std::sync::{Arc, mpsc};
 
 use opencode_api::client::Client;
 use opencode_api::generated::{
-    AgentInfo, AgentInfoMode, IntegrationInfo, LocationQueryInput, ModelInfo, ModelRef, ProviderInfo, SessionInfo,
+    AgentInfo, AgentInfoMode, IntegrationInfo, LocationQueryInput, ModelInfo, ModelRef, ProviderInfoWithModels, SessionInfo,
     UsageLimitsInfo,
 };
 use opencode_local::model_pref::{self, Model, ModelPreferences, Preference};
@@ -388,11 +388,11 @@ impl Local {
     }
 
     /// Runs `f` on the providers (empty until loaded).
-    pub fn providers<R>(&self, f: impl FnOnce(&[ProviderInfo]) -> R) -> R {
+    pub fn providers<R>(&self, f: impl FnOnce(&[ProviderInfoWithModels]) -> R) -> R {
         self.catalog(|data| f(data.and_then(|data| data.provider.as_deref()).unwrap_or_default()))
     }
 
-    pub fn provider(&self, id: &str) -> Option<ProviderInfo> {
+    pub fn provider(&self, id: &str) -> Option<ProviderInfoWithModels> {
         self.providers(|providers| providers.iter().find(|item| item.id.0 == id).cloned())
     }
 

@@ -2,11 +2,12 @@ export * as FileSystem from "./filesystem.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import path from "path"
-import { Context, Effect, Layer, type Option, type PlatformError, Schema, type Stream } from "effect"
+import { Context, Effect, Layer, Option, PlatformError, Schema, Stream } from "effect"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Location } from "./location.js"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema.js"
 import { FileSystemSearch } from "./filesystem/search.js"
+import { pageLimit, pageOffset } from "./util/number.js"
 import { Entry, FileSystem, FindInput, Write } from "@opencode/schema/filesystem"
 export { Entry, Match, Submatch } from "@opencode/schema/filesystem"
 
@@ -26,6 +27,17 @@ export interface WriteInput {
  * file is created, so a rejected write leaves no residue; the server maps it to 413.
  */
 export const MAX_WRITE_BYTES = 10 * 1024 * 1024
+
+/**
+ * List page bounds (#2508): one fs.list response never carries more than
+ * 200 entries — the page ceiling fs.find and session.list settled on
+ * (#2488) — and defaults to 100 when the caller does not page explicitly.
+ * The page is sliced from the sorted directory entries before `Entry`
+ * construction, so a huge directory costs a name sort, not a full
+ * materialisation of every entry.
+ */
+export const DEFAULT_LIST_LIMIT = 100
+export const MAX_LIST_LIMIT = 200
 
 export class WriteTooLargeError extends Schema.TaggedError<WriteTooLargeError>()("FileSystem.WriteTooLargeError", {
   path: Schema.String,
@@ -72,6 +84,10 @@ export type Content = typeof Content.Type
 
 export interface ListInput {
   readonly path?: string
+  /** Page size, clamped to the 200-entry ceiling; defaults to 100. */
+  readonly limit?: number
+  /** Entries to skip in the directories-first sorted order; defaults to 0. */
+  readonly offset?: number
 }
 
 export { FindInput, Write }
@@ -175,7 +191,56 @@ const baseLayer = Layer.effect(
           mime: FSUtil.mimeType(target.real),
           size: Number(info.size),
           mtime: info.mtime,
-          stream: (options) => fs.stream(target.real, options),
+          // The stream is lazy: it runs at response time, after this check.
+          // Opening by name then would serve whatever the path names at that
+          // moment, so a symlink swapped in after read() returns escapes the
+          // confinement resolve() just enforced. Bind the stream to the
+          // checked object instead: re-canonicalize when the stream opens,
+          // open the file, and compare the handle's identity with the object
+          // checked above, refusing before any bytes are served. The same
+          // binding BrowserFiles.read applies to uploads (#2647). fs.watch's
+          // confinement check calls read() and discards the result, so it
+          // shares the check and never opens a handle.
+          stream: (options) =>
+            Stream.unwrap(
+              Effect.gen(function* () {
+                const refuse = (description: string) =>
+                  Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "stream",
+                      pathOrDescriptor: target.real,
+                      description,
+                    }),
+                  )
+                const real = yield* fs.realPath(target.absolute)
+                if (real !== target.real || !FSUtil.contains(root, real))
+                  return yield* refuse("The path resolves somewhere other than the file read checked.")
+                const handle = yield* fs.open(real)
+                const opened = yield* handle.stat
+                if (
+                  opened.type !== "File" ||
+                  opened.dev !== info.dev ||
+                  Option.getOrNull(opened.ino) !== Option.getOrNull(info.ino)
+                )
+                  return yield* refuse("The file was replaced after read checked it.")
+                const offset = options?.offset ?? 0
+                if (offset > 0) yield* handle.seek(BigInt(offset), "start")
+                return Stream.unfold(options?.bytesToRead ?? Number.POSITIVE_INFINITY, (remaining) =>
+                  remaining <= 0
+                    ? Effect.succeed(undefined)
+                    : handle.readAlloc(Math.min(64 * 1024, remaining)).pipe(
+                        Effect.map(
+                          Option.match({
+                            onNone: () => undefined,
+                            onSome: (bytes) => [bytes, remaining - bytes.length] as const,
+                          }),
+                        ),
+                      ),
+                )
+              }),
+            ),
         }
       }),
       list: Effect.fn("FileSystem.list")(function* (input = {}) {
@@ -193,22 +258,23 @@ const baseLayer = Layer.effect(
         if (info.type !== "Directory") return yield* missing
         return yield* fs.readDirectoryEntries(directory).pipe(
           Effect.orDie,
-          Effect.map((items) =>
-            items
-              .flatMap((item) => {
-                if (item.type !== "File" && item.type !== "Directory") return []
-                const type = item.type === "Directory" ? "directory" : "file"
+          Effect.map((items) => {
+            const limit = pageLimit(input.limit, { default: DEFAULT_LIST_LIMIT, max: MAX_LIST_LIMIT })
+            const offset = pageOffset(input.offset)
+            return items
+              .filter((item) => item.type === "File" || item.type === "Directory")
+              .sort((a, b) => (a.type === b.type ? a.name.localeCompare(b.name) : a.type === "Directory" ? -1 : 1))
+              .slice(offset, offset + limit)
+              .map((item) => {
+                const type = item.type === "Directory" ? ("directory" as const) : ("file" as const)
                 const absolute = path.join(directory, item.name)
                 const relative = path.relative(location.directory, absolute) || "."
-                return [
-                  Entry.make({
-                    path: RelativePath.make(relative + (type === "directory" ? path.sep : "")),
-                    type,
-                  }),
-                ]
+                return Entry.make({
+                  path: RelativePath.make(relative + (type === "directory" ? path.sep : "")),
+                  type,
+                })
               })
-              .sort((a, b) => (a.type === b.type ? a.path.localeCompare(b.path) : a.type === "directory" ? -1 : 1)),
-          ),
+          }),
         )
       }),
       // Unlike read, write reaches outside the location so clients can stage files in the

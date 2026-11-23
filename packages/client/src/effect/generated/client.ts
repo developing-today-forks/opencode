@@ -207,6 +207,12 @@ import type {
   RouteOverrideAddOutput,
   RouteOverrideRemoveInput,
   RouteOverrideRemoveOutput,
+  RouteAttemptListInput,
+  RouteAttemptListOutput,
+  RouteAttemptStatsInput,
+  RouteAttemptStatsOutput,
+  RouteDecisionListInput,
+  RouteDecisionListOutput,
   ProjectListInput,
   ProjectListOutput,
   ProjectUpdateInput,
@@ -652,6 +658,7 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
     raw["session.command"]({
       params: { sessionID: input["sessionID"] },
       payload: {
+        id: input["id"],
         name: input["name"],
         text: input["text"],
         files: input["files"],
@@ -659,7 +666,10 @@ const EndpointSessionCommand = (raw: RawClient["server.session"]) => (input: Ses
         skills: input["skills"],
         delivery: input["delivery"],
       },
-    }).pipe(Effect.mapError(mapClientError)),
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
   )
 
 const EndpointSessionSynthetic = (raw: RawClient["server.session"]) => (input: SessionSyntheticInput) =>
@@ -684,8 +694,11 @@ const EndpointSessionShell = (raw: RawClient["server.session"]) => (input: Sessi
   preserveEffect<SessionShellOutput>()(
     raw["session.shell"]({
       params: { sessionID: input["sessionID"] },
-      payload: { id: input["id"], command: input["command"] },
-    }).pipe(Effect.mapError(mapClientError)),
+      payload: { id: input["id"], command: input["command"], delivery: input["delivery"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
   )
 
 const EndpointSessionCompact = (raw: RawClient["server.session"]) => (input: SessionCompactInput) =>
@@ -1498,12 +1511,50 @@ const EndpointRouteOverrideRemove = (raw: RawClient["server.route"]) => (input: 
     raw["route.override.remove"]({ params: { overrideID: input["overrideID"] } }).pipe(Effect.mapError(mapClientError)),
   )
 
+const EndpointRouteAttemptList = (raw: RawClient["server.route"]) => (input?: RouteAttemptListInput) =>
+  preserveEffect<RouteAttemptListOutput>()(
+    raw["route.attempt.list"]({
+      query: {
+        since: input?.["since"],
+        until: input?.["until"],
+        provider: input?.["provider"],
+        model: input?.["model"],
+        session: input?.["session"],
+        route: input?.["route"],
+        limit: input?.["limit"],
+      },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointRouteAttemptStats = (raw: RawClient["server.route"]) => (input?: RouteAttemptStatsInput) =>
+  preserveEffect<RouteAttemptStatsOutput>()(
+    raw["route.attempt.stats"]({ query: { since: input?.["since"], until: input?.["until"] } }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
+const EndpointRouteDecisionList = (raw: RawClient["server.route"]) => (input?: RouteDecisionListInput) =>
+  preserveEffect<RouteDecisionListOutput>()(
+    raw["route.decision.list"]({
+      query: { since: input?.["since"], until: input?.["until"], route: input?.["route"], limit: input?.["limit"] },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const adaptGroupRoute = (raw: RawClient["server.route"]) => ({
   override: {
     list: EndpointRouteOverrideList(raw),
     add: EndpointRouteOverrideAdd(raw),
     remove: EndpointRouteOverrideRemove(raw),
   },
+  attempt: { list: EndpointRouteAttemptList(raw), stats: EndpointRouteAttemptStats(raw) },
+  decision: { list: EndpointRouteDecisionList(raw) },
 })
 
 const EndpointProjectList = (raw: RawClient["server.project"]) => (input?: ProjectListInput) =>
@@ -1618,9 +1669,14 @@ const adaptGroupPermission = (raw: RawClient["server.permission"]) => ({
 
 const EndpointFileList = (raw: RawClient["server.fs"]) => (input?: FileListInput) =>
   preserveEffect<FileListOutput>()(
-    raw["fs.list"]({ query: { location: input?.["location"], path: input?.["path"] } }).pipe(
-      Effect.mapError(mapClientError),
-    ),
+    raw["fs.list"]({
+      query: {
+        location: input?.["location"],
+        path: input?.["path"],
+        limit: input?.["limit"],
+        offset: input?.["offset"],
+      },
+    }).pipe(Effect.mapError(mapClientError)),
   )
 
 const EndpointFileFind = (raw: RawClient["server.fs"]) => (input: FileFindInput) =>
@@ -2513,9 +2569,11 @@ const adaptGroupConfig = (raw: RawClient["server.config"]) => ({
   shells: EndpointConfigShells(raw),
 })
 
-const EndpointExperimentalConfigUpdate = (raw: RawClient["server.config"]) => (input: ExperimentalConfigUpdateInput) =>
+const EndpointExperimentalConfigUpdate = (raw: RawClient["server.config"]) => (input?: ExperimentalConfigUpdateInput) =>
   preserveEffect<ExperimentalConfigUpdateOutput>()(
-    raw["config.update"]({ payload: { shell: input["shell"] } }).pipe(Effect.mapError(mapClientError)),
+    raw["config.update"]({ payload: { shell: input?.["shell"], providers: input?.["providers"] } }).pipe(
+      Effect.mapError(mapClientError),
+    ),
   )
 
 const adaptGroupExperimentalConfig = (raw: RawClient["server.config"]) => ({

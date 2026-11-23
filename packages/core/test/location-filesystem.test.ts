@@ -65,6 +65,35 @@ describe("FileSystem", () => {
     ),
   )
 
+  it.live("bounds list pages at the ceiling and pages through with offset", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        // 250 files: more than the 200-entry page ceiling (#2508).
+        yield* Effect.promise(() =>
+          Promise.all(
+            Array.from({ length: 250 }, (_, i) =>
+              fs.writeFile(path.join(directory, `file-${String(i).padStart(3, "0")}.txt`), "x"),
+            ),
+          ),
+        )
+        const filesystem = yield* FileSystem.Service
+        const first = yield* filesystem.list()
+        expect(first).toHaveLength(100)
+        const capped = yield* filesystem.list({ limit: 500 })
+        expect(capped).toHaveLength(200)
+        const second = yield* filesystem.list({ limit: 100, offset: 100 })
+        const third = yield* filesystem.list({ limit: 100, offset: 200 })
+        expect(second).toHaveLength(100)
+        expect(third).toHaveLength(50)
+        // The pages are disjoint slices of one deterministic sorted order.
+        const paged = [...first, ...second, ...third].map((entry) => entry.path)
+        expect(new Set(paged).size).toBe(250)
+        expect(paged).toEqual([...paged].sort((a, b) => a.localeCompare(b)))
+        expect(capped.map((entry) => entry.path)).toEqual(paged.slice(0, 200))
+      }).pipe(provide(directory)),
+    ),
+  )
+
   it.live("skips host canonicalization for workspace locations at boot", () =>
     withTmp((directory) =>
       Effect.gen(function* () {
@@ -238,6 +267,44 @@ describe("FileSystem", () => {
           expect(Exit.isFailure(result)).toBe(true)
         }).pipe(provide(current))
       }),
+    ),
+  )
+
+  it.live("refuses to stream a file swapped for an outside symlink after read returns", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        const current = path.join(directory, "current")
+        yield* Effect.promise(() => fs.mkdir(current))
+        yield* Effect.promise(() => fs.writeFile(path.join(current, "doc.txt"), "inside"))
+        yield* Effect.promise(() => fs.writeFile(path.join(directory, "secret.txt"), "outside-secret"))
+        yield* Effect.gen(function* () {
+          const filesystem = yield* FileSystem.Service
+          const file = yield* filesystem.read({ path: RelativePath.make("doc.txt") })
+          // The swap sits squarely in the window the lazy stream used to
+          // leave open: read() has returned, the stream has not run yet.
+          yield* Effect.promise(() => fs.rm(path.join(current, "doc.txt")))
+          yield* Effect.promise(() => fs.symlink(path.join(directory, "secret.txt"), path.join(current, "doc.txt")))
+          const result = yield* Stream.mkUint8Array(file.stream()).pipe(Effect.exit)
+          expect(Exit.isFailure(result)).toBe(true)
+        }).pipe(provide(current))
+      }),
+    ),
+  )
+
+  it.live("refuses to stream a file replaced after read returns", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => fs.writeFile(path.join(directory, "doc.txt"), "original"))
+        const filesystem = yield* FileSystem.Service
+        const file = yield* filesystem.read({ path: RelativePath.make("doc.txt") })
+        // Rename-over is the atomic replacement shape editors use; the
+        // staging file is created while the original still exists, so the
+        // name afterwards points at a different object than read() checked.
+        yield* Effect.promise(() => fs.writeFile(path.join(directory, "staging.txt"), "replaced"))
+        yield* Effect.promise(() => fs.rename(path.join(directory, "staging.txt"), path.join(directory, "doc.txt")))
+        const result = yield* Stream.mkUint8Array(file.stream()).pipe(Effect.exit)
+        expect(Exit.isFailure(result)).toBe(true)
+      }).pipe(provide(directory)),
     ),
   )
 })

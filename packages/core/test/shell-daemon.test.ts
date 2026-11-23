@@ -105,6 +105,24 @@ describe("Shell on the process daemon", () => {
     }),
   )
 
+  it.live("a daemon capture deleted before a read reports the disappearance instead of an empty page", () =>
+    Effect.gen(function* () {
+      const env = yield* daemonShells()
+      yield* env.withShell(env.directory, (shell) =>
+        Effect.gen(function* () {
+          const info = yield* shell.create({ shell: "/bin/sh", command: "echo hi" })
+          env.daemon.output(1, "first\nsecond")
+          env.daemon.exit(1, 0)
+          yield* shell.wait(info.id)
+          yield* Effect.promise(() => rm(info.file))
+          const marker = `[output file ${info.file} is missing; the capture is no longer available]`
+          expect(yield* shell.output(info.id)).toEqual({ output: marker, cursor: 0, size: 0, truncated: false })
+          expect((yield* shell.result(info)).capture).toEqual({ output: marker, truncated: false })
+        }),
+      )
+    }),
+  )
+
   it.live("pages shell output at UTF-8 boundaries with byte cursors", () =>
     Effect.gen(function* () {
       const env = yield* daemonShells()
@@ -615,6 +633,35 @@ it.live("the spawner recreates the output directory removed while the Location i
     yield* run("first")
     yield* Effect.promise(() => rm(path.join(global.data, Shell.DIRECTORY), { recursive: true }))
     expect(yield* run("second")).toMatchObject({ info: { status: "exited", exit: 0 }, capture: { output: "second" } })
+  }).pipe(
+    Effect.provide(
+      AppNodeBuilder.build(LayerNode.group([Shell.node, Global.node]), [
+        Location.node.replace(tempLocationLayer),
+        Global.node.replace(tempGlobalLayer),
+        Config.node.replace(Config.testLayer()),
+        Environment.node.replace(hostEnvironmentLayer),
+        PersistentPty.node.replace(disabledPersistentPtyLayer),
+      ]),
+    ),
+  ),
+)
+
+it.live("a spawned capture deleted before a read reports the disappearance instead of an empty page", () =>
+  Effect.gen(function* () {
+    const shell = yield* Shell.Service
+    const program = windows ? (Bun.which("pwsh") ?? "powershell.exe") : "/bin/sh"
+    const info = yield* shell.create({
+      shell: program,
+      command: windows ? "[Console]::Out.Write('0123456789')" : "printf 0123456789",
+      timeout: 0,
+    })
+    yield* shell.wait(info.id)
+    expect(yield* shell.output(info.id)).toEqual({ output: "0123456789", cursor: 10, size: 10, truncated: false })
+    yield* Effect.promise(() => rm(info.file))
+    const marker = `[output file ${info.file} is missing; the capture is no longer available]`
+    // The spawner tracks the size in memory, so the marker page still reports the size the capture had.
+    expect(yield* shell.output(info.id)).toEqual({ output: marker, cursor: 10, size: 10, truncated: false })
+    expect((yield* shell.result(info)).capture).toEqual({ output: marker, truncated: false })
   }).pipe(
     Effect.provide(
       AppNodeBuilder.build(LayerNode.group([Shell.node, Global.node]), [

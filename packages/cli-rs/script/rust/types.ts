@@ -266,7 +266,16 @@ export class Types {
           : this.type({ ...(r as SchemaRepresentation.Union), types: rest }, hint)
     // JSON.stringify writes a whole number as `3`; serde writes an `f64` as `3.0`.
     const float = this.floats.has(inner)
-    if (float && optional && nullable) throw new Error(`An optional and nullable number is not supported: ${hint}`)
+    if (float && optional && nullable)
+      return {
+        type: `Option<Option<${inner}>>`,
+        attrs: [
+          "default",
+          'serialize_with = "crate::ser::double_option_number"',
+          'deserialize_with = "crate::de::double_option"',
+          'skip_serializing_if = "Option::is_none"',
+        ],
+      }
     if (float && (optional || nullable))
       return {
         type: `Option<${inner}>`,
@@ -881,8 +890,11 @@ function newtype(name: string, ref: string) {
 function uniqueVariants(names: Array<string>) {
   const seen = new Set<string>(["Unknown"])
   return names.map((name) => {
-    let unique = name
-    for (let index = 2; seen.has(unique); index++) unique = `${name}${index}`
+    // A variant named after a keyword (`Self`, from the literal "self") cannot be an identifier, not
+    // even a raw one; like `snake`, it takes a trailing underscore instead.
+    const base = keywords.has(name) ? `${name}_` : name
+    let unique = base
+    for (let index = 2; seen.has(unique); index++) unique = `${base}${index}`
     seen.add(unique)
     return unique
   })

@@ -133,26 +133,43 @@ test("hydration preserves submission order across optimistic admissions", async 
   }
 })
 
-test("a sequenced request leaves only once the prompt made before it has settled, and a failed one does not block the next", async () => {
+test("a command or shell admission leaves only once the prompt made before it has settled, and a failed one does not block the next", async () => {
   const prepared = Promise.withResolvers<void>()
   const paths: string[] = []
   const setup = fixture((request) => {
-    paths.push(new URL(request.url).pathname.split("/").at(-1) ?? "")
+    const path = new URL(request.url).pathname.split("/").at(-1) ?? ""
+    paths.push(path)
+    if (path === "command") throw new Error("command failed")
+    if (path === "shell")
+      return Promise.resolve(
+        Response.json({
+          data: {
+            id: "msg_shell",
+            sessionID: item.sessionID,
+            type: "shell",
+            delivery: "steer",
+            time: { created: 1 },
+            payload: { command: "ls" },
+          },
+        }),
+      )
     return Promise.resolve(Response.json({ data: { id: "msg_admitted" } }))
   })
   try {
     // The prompt still prepares, as it does while a plugin readies the session for it.
     const first = setup.data.session.prompt({ sessionID: item.sessionID, id: "msg_first", text: "First", prepare: () => prepared.promise })
-    const failing = setup.data.session.sequence(item.sessionID, () => Promise.reject(new Error("command failed")))
-    const last = setup.data.session.sequence(item.sessionID, async () => void paths.push("shell"))
+    const failing = setup.data.session.command({ sessionID: item.sessionID, id: "msg_cmd", name: "deploy", text: "prod" })
+    const last = setup.data.session.shell({ sessionID: item.sessionID, id: "msg_shell", command: "ls" })
     const failed = failing.catch((error: Error) => error.message)
     await Bun.sleep(0)
     expect(paths).toEqual([])
 
     prepared.resolve()
     await Promise.all([first, failed, last])
-    expect(paths).toEqual(["prompt", "shell"])
-    expect(await failed).toBe("command failed")
+    expect(paths).toEqual(["prompt", "command", "shell"])
+    expect(await failed).toBe("Transport: command failed")
+    // The admitted shell stands in the session's pending inputs under its own ID.
+    expect(setup.data.session.pending.list(item.sessionID).map((entry) => entry.id)).toContain("msg_shell")
   } finally {
     prepared.resolve()
     setup.dispose()
@@ -161,44 +178,40 @@ test("a sequenced request leaves only once the prompt made before it has settled
 
 afterEach(() => void jest.useRealTimers())
 
-test("a sequenced request that stays open holds the next send until it has reached the server, not until it ends", async () => {
-  jest.useFakeTimers()
-  const prepared = Promise.withResolvers<void>()
+test("a shell admission holds the next send only until it is admitted, not until the shell ends", async () => {
   const paths: string[] = []
+  const admitted = Promise.withResolvers<Response>()
   const setup = fixture((request) => {
-    paths.push(new URL(request.url).pathname.split("/").at(-1) ?? "")
+    const path = new URL(request.url).pathname.split("/").at(-1) ?? ""
+    paths.push(path)
+    // The admission request is still in flight; the shell it admits may run for a long time after it lands.
+    if (path === "shell") return admitted.promise
     return Promise.resolve(Response.json({ data: { id: "msg_admitted" } }))
   })
-  // A shell command's request: the server answers it when the command's process exits.
-  const exited = Promise.withResolvers<void>()
-  const flush = async () => {
-    for (const _ of Array.from({ length: 20 })) await Promise.resolve()
-  }
   try {
-    const shell = setup.data.session.sequence(
-      item.sessionID,
-      () => (paths.push("shell"), exited.promise),
-      () => prepared.promise,
-    )
+    const shell = setup.data.session.shell({ sessionID: item.sessionID, id: "msg_shell", command: "sleep 60" })
     const prompt = setup.data.session.prompt({ sessionID: item.sessionID, id: "msg_after", text: "After" })
-    // What the shell command waits for before it leaves does not let the prompt overtake it, however long it takes.
-    jest.advanceTimersByTime(60_000)
-    await flush()
-    expect(paths).toEqual([])
-
-    prepared.resolve()
-    await flush()
+    await Bun.sleep(0)
+    // The prompt cannot overtake an admission that has not landed yet.
     expect(paths).toEqual(["shell"])
-    // The command still runs. The prompt leaves once the command's request has had its moment to arrive.
-    jest.advanceTimersToNextTimer()
-    await prompt
-    expect(paths).toEqual(["shell", "prompt"])
 
-    exited.resolve()
-    await shell
+    admitted.resolve(
+      Response.json({
+        data: {
+          id: "msg_shell",
+          sessionID: item.sessionID,
+          type: "shell",
+          delivery: "steer",
+          time: { created: 1 },
+          payload: { command: "sleep 60" },
+        },
+      }),
+    )
+    // Admission settles the shell's link: the prompt leaves without waiting for the shell to run.
+    await Promise.all([shell, prompt])
+    expect(paths).toEqual(["shell", "prompt"])
   } finally {
-    prepared.resolve()
-    exited.resolve()
+    admitted.resolve(Response.json({ data: {} }))
     setup.dispose()
   }
 })

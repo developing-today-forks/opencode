@@ -9,7 +9,8 @@ import { getStore } from "../storage/store"
 import { WINDOW_IDS_KEY } from "../storage/keys"
 import { windowDataFile } from "../../shared/ipc-transport"
 import { isQuitting, type State } from "../lifecycle/machine"
-import { windowArguments } from "./bootstrap"
+import { windowArguments, windowBootstrap } from "./bootstrap"
+import { setWindowBootstrapResolver } from "./bootstrap-channel"
 import {
   getBackgroundColor,
   getPinchZoomEnabled,
@@ -50,6 +51,14 @@ const registry = createWindowRegistry<BrowserWindow>({
 })
 
 const opened = new Set<(win: BrowserWindow, id: string) => void>()
+
+// The bootstrap channel is registered by the entry module before this module loads; hand it the
+// registry lookup so a window whose preload lost its argv bootstrap can recover over IPC.
+setWindowBootstrapResolver((win) => {
+  const id = getWindowID(win)
+
+  return id ? windowBootstrap(id) : undefined
+})
 
 export {
   getBackgroundColor,

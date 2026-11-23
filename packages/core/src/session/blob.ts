@@ -5,6 +5,7 @@ import { and, eq, exists, gte, inArray, notExists, type SQL, sql } from "drizzle
 import { Cause, Context, Effect, Option, Schema } from "effect"
 import { map } from "effect/Array"
 import type { Attachment, FileAttachment } from "@opencode/schema/prompt"
+import type { MediaUserPayload, UserPayload } from "@opencode/schema/session-inbox"
 import type { Tool } from "@opencode/schema/tool"
 import { DatabaseBatch } from "../database/batch.js"
 import type { Database } from "../database/database.js"
@@ -23,6 +24,7 @@ type Part = Extract<MessageRow["data"], { readonly content: unknown }>["content"
 type Blobs = ReadonlyMap<string, string>
 
 const isFileRef = Schema.is(SessionStored.FileRef)
+const isStoredFile = Schema.is(SessionStored.File)
 const isToolFileRef = Schema.is(SessionStored.ToolFileRef)
 
 const toolItems = (part: Part): ReadonlyArray<Tool.Content> =>
@@ -98,8 +100,11 @@ function rewriteMessage(
 }
 
 function rewriteInbox(row: InboxRow, file: (file: SessionStored.File) => SessionStored.File): InboxRow {
-  const payload = row.payload
-  if (!("files" in payload) || !payload.files?.some(isFileRef)) return row
+  // Only user payloads carry stored files. A command payload's files are
+  // prompt-input attachments — never blob refs — so its rows pass through.
+  if (row.type !== "user") return row
+  const payload = row.payload as UserPayload | MediaUserPayload
+  if (!payload.files?.some(isFileRef)) return row
   return { ...row, payload: { ...payload, files: payload.files.map(file) } }
 }
 
@@ -382,7 +387,7 @@ export function split<T extends MessageRow["data"] | InboxRow["payload"] | Part>
   const pending: Pending = new Map()
   const stored = (
     "files" in data && data.files?.some((file) => !isFileRef(file))
-      ? { ...data, files: data.files.map((file) => fileRef(pending, file)) }
+      ? { ...data, files: data.files.map((file) => (isStoredFile(file) ? fileRef(pending, file) : file)) }
       : "content" in data
         ? { ...data, content: data.content.map((part) => storedPartRefs(pending, part)) }
         : "type" in data && data.type === "tool"

@@ -2,7 +2,7 @@ import { describe, expect } from "bun:test"
 import { $ } from "bun"
 import fs from "fs/promises"
 import path from "path"
-import { DateTime, Effect, Layer, Stream } from "effect"
+import { DateTime, Effect, Layer, Schedule, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { Money } from "@opencode/schema/money"
 import { Shell } from "@opencode/schema/shell"
@@ -1262,8 +1262,14 @@ describe("Session.create", () => {
             : 'printf %s "$OPENCODE_SESSION_ENV_TEST"'
         yield* session.shell({ sessionID: created.id, command })
 
-        const messages = yield* session.messages({ sessionID: created.id, order: "asc" })
-        const shell = messages.find((message): message is SessionMessage.Shell => message.type === "shell")
+        // Admission returns before the shell runs; wait for its projected message to complete.
+        const shell = yield* Effect.gen(function* () {
+          const messages = yield* session.messages({ sessionID: created.id, order: "asc" })
+          return messages.find((message): message is SessionMessage.Shell => message.type === "shell")
+        }).pipe(
+          Effect.repeat({ until: (found) => found?.status === "exited", schedule: Schedule.spaced("10 millis") }),
+          Effect.timeout("4 seconds"),
+        )
         expect(shell).toMatchObject({ type: "shell", command, status: "exited", exit: 0 })
         expect(shell?.output?.output).toContain("attached")
         expect(shell?.output?.truncated).toBe(false)
@@ -1282,8 +1288,14 @@ describe("Session.create", () => {
 
         yield* session.shell({ sessionID: created.id, command: "false" })
 
-        const messages = yield* session.messages({ sessionID: created.id, order: "asc" })
-        const shell = messages.find((message): message is SessionMessage.Shell => message.type === "shell")
+        // Admission returns before the shell runs; wait for its projected message to complete.
+        const shell = yield* Effect.gen(function* () {
+          const messages = yield* session.messages({ sessionID: created.id, order: "asc" })
+          return messages.find((message): message is SessionMessage.Shell => message.type === "shell")
+        }).pipe(
+          Effect.repeat({ until: (found) => found?.status === "exited", schedule: Schedule.spaced("10 millis") }),
+          Effect.timeout("4 seconds"),
+        )
         expect(shell).toMatchObject({ type: "shell", command: "false", status: "exited" })
         expect(shell?.exit).not.toBe(0)
         expect(shell?.time.completed).toBeDefined()
