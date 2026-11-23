@@ -6,6 +6,7 @@ import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
 import { Effect, Option, Schema } from "effect"
 import type { Permission } from "../../permission.js"
 import { ModelRoute } from "../../model-route.js"
+import { ModelRouteGranularity } from "../../model-route-granularity.js"
 import { ModelRouteLimits } from "../../model-route-limits.js"
 import { ModelRouteLog } from "../../model-route-log.js"
 import { ModelRouteMatch } from "../../model-route-match.js"
@@ -16,7 +17,7 @@ export const name = "route_stats"
 
 export const description = `Read how routed models (opencode-route/*) have actually performed, to explain a routing problem or tune it.
 
-Returns, for the last \`hours\` (default 24): attempts, failures, timeouts and average first-output latency and speed per provider/model; failures grouped by exact error tag, code and HTTP status with the latest provider message; current cooldowns; the active benches with which leaves are benched, until when, and why (including any known quota reset and probe state); request and token usage; and the adjustments in force.
+Returns, for the last \`hours\` (default 24): attempts, failures, timeouts and average first-output latency and speed per provider/model; failures grouped by exact error tag, code and HTTP status with the latest provider message; current cooldowns; the active benches with which leaves are benched, until when, and why (including any known quota reset and probe state); the learned bench granularity per key (level plus evidence count, including promotions and demotions); request and token usage; and the adjustments in force.
 It also returns each pool: its configuration, and per member how often it was offered and chosen, how often its new-session draws matched its weight, why it was left out (cooldown, provider limit, budget, user skip, context limit), and its latency, speed, errors and request sizes. Set \`route\` to one pool id to narrow that view. The tuner's notes come back too.
 It lists suggested adjustments derived from that history (a high failure rate, repeated quota errors, unusually slow first output). Set \`apply\` to true to put the suggestions in force; they only lower a target's share or skip it, expire in 30 minutes, and are replaced by the next run. Apply them only when asked to tune routing or when the data clearly shows a problem.`
 
@@ -31,6 +32,7 @@ export type Input = typeof Input.Type
 
 export const Output = Schema.Struct({
   benches: Schema.Array(Schema.Unknown),
+  granularity: Schema.Array(Schema.Unknown),
   targets: Schema.Array(Schema.Unknown),
   hedges: Schema.Array(Schema.Unknown),
   predictions: Schema.Array(Schema.Unknown),
@@ -117,6 +119,10 @@ export const collect = (input: Input, source: Source = NO_SOURCE) =>
       // balance holds, rate-limit windows, infra holds) with its class and resume rule.
       // Absence of a provider here means it is available.
       availability: ModelRoute.availability(now),
+      // The learned bench granularity (code#10367 points 3-4): per key, the level its
+      // failures are believed to generalize at, with the evidence count behind the
+      // belief and any demotions the first counterexample forced.
+      granularity: ModelRouteGranularity.snapshot(),
       targets,
       hedges,
       predictions,
@@ -210,6 +216,13 @@ const describe = (report: Effect.Success<ReturnType<typeof collect>>, applied: n
     lines.push(
       `benched: ${bench.providerID}/${bench.modelID}${bench.credentialID ? ` credential:${bench.credentialID}` : ""} until ${new Date(bench.until).toISOString()} (${bench.reason}, ${bench.consecutiveFailures} consecutive failures${bench.quotaResetAt !== undefined ? `, quota reset ${new Date(bench.quotaResetAt).toISOString()}` : ""}${bench.probeClaimed ? ", probe in flight" : bench.probeDue ? ", probe due" : ""})`,
     )
+  for (const state of report.granularity) {
+    const promoted = state.scope === "model" ? state.level === "model" : state.level === "provider"
+    if (!promoted && state.demotions === 0) continue
+    lines.push(
+      `granularity: ${state.key} (${state.scope}) level ${state.level}, ${state.evidence} attempts of evidence, ${state.concordantWindows} concordant windows${state.demotions > 0 ? `, ${state.demotions} demotion${state.demotions === 1 ? "" : "s"}` : ""}`,
+    )
+  }
   for (const error of report.errors)
     lines.push(
       `${error.providerID}/${error.modelID} x${error.count}: ${error.tag ?? "unknown"} ${error.code ?? ""} ${error.status ?? ""} ${error.lastMessage ?? ""}`
@@ -265,6 +278,7 @@ export const add = (editor: ToolEditor, permission: Permission.Interface, source
         return {
           output: {
             benches: report.benches,
+            granularity: report.granularity,
             targets: report.targets,
             hedges: report.hedges,
             predictions: report.predictions,

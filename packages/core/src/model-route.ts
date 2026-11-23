@@ -10,6 +10,7 @@ import { ModelRouteLimits } from "./model-route-limits.js"
 import { ownValue } from "./util/record.js"
 import { ModelRouteMembership } from "./model-route-membership.js"
 import { ModelRouteAutonomy } from "./model-route-autonomy.js"
+import { ModelRouteGranularity } from "./model-route-granularity.js"
 import { ModelRouteLog } from "./model-route-log.js"
 import { ModelRouteOverrides } from "./model-route-overrides.js"
 import { ModelRouteSchedule } from "./model-route-schedule.js"
@@ -691,7 +692,15 @@ const providerCooldownUntil = (providerID: string, now: number, location?: strin
     models.add(id.slice(0, id.lastIndexOf("@")))
     until = Math.max(until, state.cooldownUntil)
   }
-  return models.size >= currentConstants(location).network.providerModels ? until : 0
+  // The simultaneity threshold is per-provider evidence, not one global
+  // count, once the granularity learner has promoted the provider
+  // (code#10367 point 3): its failures have never been model-discordant over
+  // the evidence window, so one model cooling is the provider's own verdict
+  // until the first counterexample demotes it.
+  const needed = ModelRouteGranularity.providerPromoted(providerID)
+    ? 1
+    : currentConstants(location).network.providerModels
+  return models.size >= needed ? until : 0
 }
 
 export const coolingDown = (target: Model.Ref, now = Date.now(), location?: string, variant?: string) =>
@@ -706,9 +715,24 @@ export const cooldownUntil = (target: Model.Ref, now = Date.now(), location?: st
   // without a named variant planted their bench.
   const traffic = trafficHealth.get(trafficKey(target, variant))
   if (traffic) recover(target, traffic, now)
+  let trafficUntil = traffic?.cooldownUntil ?? 0
+  // Learned model granularity (code#10367 point 3): once the learner has
+  // promoted this model on perfect concordance, a standing traffic bench at
+  // any effort holds the model at every effort — the widening the seed
+  // granularity deliberately withholds until the evidence earns it. The
+  // credential traffic scopes are not widened (point 5: credentials stay
+  // separate).
+  if (ModelRouteGranularity.modelLevel(target.providerID, target.id) === "model") {
+    const prefix = `${key(target)}@`
+    for (const [id, sibling] of trafficHealth) {
+      if (!id.startsWith(prefix)) continue
+      recover(target, sibling, now)
+      trafficUntil = Math.max(trafficUntil, sibling.cooldownUntil)
+    }
+  }
   return Math.max(
     state?.cooldownUntil ?? 0,
-    traffic?.cooldownUntil ?? 0,
+    trafficUntil,
     providerCooldownUntil(target.providerID, now, location),
     infraHoldUntil(key(target), now),
   )
@@ -2227,6 +2251,18 @@ export const failed = (
     }
     return
   }
+  // The granularity learner hears every failure that seeds at traffic scope
+  // (code#10367 point 3): quota and plan-wall failures bench at model scope
+  // by class, so their concordance is by construction, not evidence; the
+  // network-forgiven and infra paths returned above never reached a door.
+  if (!wallScope)
+    ModelRouteGranularity.observe({
+      providerID: target.providerID,
+      modelID: target.id,
+      variant,
+      success: false,
+      at: now,
+    })
   // With a credential dimension the failure belongs to the credential that served the attempt:
   // benching the target as well would bench every other credential behind the provider too (#6).
   // The scope within that rule follows the signal: a quota failure benches the pool scope
@@ -3590,6 +3626,17 @@ export const completed = (
   probeClaim?: ProbeClaim,
   variant?: string,
 ) => {
+  // A success is the granularity learner's only source of counterexamples
+  // (code#10367 point 4): it hears every one, a probe's included — a success
+  // at a finer granularity while a coarser bench stands demotes that key on
+  // the spot.
+  ModelRouteGranularity.observe({
+    providerID: target.providerID,
+    modelID: target.id,
+    variant,
+    success: true,
+    at: now,
+  })
   // A success clears the serving credential's failure count and bench (#6); the target-level
   // accounting below is unchanged, since the target did serve the request.
   if (credentialID) {
@@ -3670,6 +3717,7 @@ export const completed = (
 /** Test seam; health is intentionally process-local and never persists prompts or request contents. */
 export const resetHealth = () => {
   limits.clear()
+  ModelRouteGranularity.reset()
   ModelRouteMembership.reset()
   usage.clear()
   adjustments = []
