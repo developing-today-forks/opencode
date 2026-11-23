@@ -1449,18 +1449,16 @@ describe("SessionRunnerLLM", () => {
   })
 
   // Oracle: with the default budget (`attempts` 2) a step has one granted retry. The first failure
-  // after output spends it: the route chooses again, and picks member-1 as it would with fake-model
-  // benched. The second failure must still reach member-2 instead of ending the turn.
+  // after output spends it on a continuation dealt by the attempt's own fallback chain, which
+  // picks member-1 — the member re-selection was expected to pick with fake-model benched, but
+  // dealt by construction instead of by health state (#2681 item 1). The second failure, its
+  // retry budget spent, must still reach member-2 instead of ending the turn.
   scenario("continues on the next member after the step's retry budget is spent", function* (s) {
     ModelRoute.resetHealth()
     const third = SessionRunnerModel.resolved(testModel("member-2"), poolMemberOptions)
     const secondRouting = poolRouting("member-1", third, 2)
-    s.routing = poolRouting("fake-model", SessionRunnerModel.resolved(testModel("member-1"), poolMemberOptions), 2)
-    s.modelResolveHook = Effect.sync(() => {
-      if (s.requests.length === 0) return
-      s.currentModel = testModel("member-1")
-      s.routing = secondRouting
-    })
+    const second = SessionRunnerModel.resolved(testModel("member-1"), { ...poolMemberOptions, routing: secondRouting })
+    s.routing = poolRouting("fake-model", second, 2)
     yield* s.admit("Say something")
     yield* s.llm.push(partialThenFail(incompleteStream(), "First part"))
     yield* s.llm.push(partialThenFail(incompleteStream(), "Second part"))
@@ -1468,14 +1466,48 @@ describe("SessionRunnerLLM", () => {
 
     const scheduled = yield* subscribeRetries(s)
     const run = yield* s.resume.pipe(Effect.forkChild)
-    yield* Queue.take(scheduled)
-    yield* TestClock.adjust("2400 millis")
+    // Before the chain dealt the granted continuation, it waited on the retry schedule and
+    // re-selection ran; release that wait if it is still scheduled.
+    yield* Effect.raceFirst(Queue.take(scheduled), Fiber.await(run))
+    yield* TestClock.adjust("10 seconds")
     yield* Fiber.join(run)
 
     expect(requestedModels(s)).toEqual(["fake-model", "member-1", "member-2"])
     const assistants = (yield* s.context).filter((message) => message.type === "assistant")
     expect(assistants).toHaveLength(3)
     expect(JSON.stringify(assistants.at(-1))).toContain(" from the third member")
+    // Neither continuation waits on the retry schedule: the chain deals both.
+    expect((yield* recordedEventTypes(sessionID)).filter((type) => type.startsWith("session.retry.scheduled"))).toEqual(
+      [],
+    )
+  })
+
+  // Oracle: #2681 item 1 — a granted retry after output must not deal the member that just
+  // failed again. On the #2679 branch the recovery-three pool (broken, broken2, okay) was
+  // dealt broken, broken, broken2, okay: the granted retry continued through re-selection,
+  // which picked the failed member a second time. The continuation goes through the attempt's
+  // fallback chain instead, so members are asked in order with no repeats.
+  scenario("a granted retry after output continues on the next member instead of re-asking the failed one", function* (s) {
+    ModelRoute.resetHealth()
+    const second = SessionRunnerModel.resolved(testModel("member-1"), poolMemberOptions)
+    s.routing = poolRouting("fake-model", second, 2)
+    yield* s.admit("Say something")
+    yield* s.llm.push(partialThenFail(incompleteStream(), "First part"))
+    yield* s.llm.push(TestLLM.text(" from the next member", "next-member"))
+
+    const scheduled = yield* subscribeRetries(s)
+    const run = yield* s.resume.pipe(Effect.forkChild)
+    yield* Effect.raceFirst(Queue.take(scheduled), Fiber.await(run))
+    yield* TestClock.adjust("10 seconds")
+    yield* Fiber.join(run)
+
+    expect(requestedModels(s)).toEqual(["fake-model", "member-1"])
+    const assistants = (yield* s.context).filter((message) => message.type === "assistant")
+    expect(assistants).toHaveLength(2)
+    expect(JSON.stringify(assistants.at(-1))).toContain(" from the next member")
+    expect((yield* recordedEventTypes(sessionID)).filter((type) => type.startsWith("session.retry.scheduled"))).toEqual(
+      [],
+    )
   })
 
   // Model: a pool's members are asked in order, each at most once. A failure before output moves to

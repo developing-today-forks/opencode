@@ -2170,7 +2170,7 @@ it.effect("records every failed attempt, including the ones that are retried", (
   }),
 )
 
-it.effect("does not fail over after routed output has started", () =>
+it.effect("a granted retry after routed output has started moves to the next member (#2681)", () =>
   Effect.gen(function* () {
     const db = (yield* Database.Service).db
     const llm = yield* TestLLM.Test
@@ -2261,8 +2261,13 @@ it.effect("does not fail over after routed output has started", () =>
       .pipe(Effect.exit)
 
     expect(Exit.isSuccess(result)).toBe(true)
-    if (Exit.isSuccess(result)) expect(result.value._tag).not.toBe("Failover")
-    expect(fallbackCalls).toBe(0)
+    // The granted retry is spent on the next member of the fallback chain, never on
+    // re-asking the member that just failed: blind re-selection dealt the failed member
+    // again in the recovery-three run (#2681). The step-level gate itself stays closed --
+    // the continuation is a fresh assistant message, not output appended to this one.
+    if (Exit.isSuccess(result))
+      expect(result.value).toEqual(SessionStep.Outcome.ContinueOn({ model: fallback, error: expect.anything() }))
+    expect(fallbackCalls).toBe(1)
     expect(ModelRoute.coolingDown(primary.ref)).toBe(true)
     expect(yield* llm.requests()).toHaveLength(1)
   }),
