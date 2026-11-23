@@ -62,7 +62,7 @@ pub use serde;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use types::{
-    IntegrationInfo, McpServer, ModelInfo, ModelRef, ProviderInfo, SessionInfo, SessionMessageInfo, UsageLimitsInfo,
+    IntegrationInfo, McpServer, ModelInfo, ModelRef, ProviderInfoWithModels, SessionInfo, SessionMessageInfo, UsageLimitsInfo,
     V2Event, VcsInfo,
 };
 
@@ -2655,7 +2655,7 @@ pub trait Read {
         None
     }
     /// The providers where the TUI works; `None` while they are not loaded.
-    fn providers(&self) -> Option<std::sync::Arc<[ProviderInfo]>> {
+    fn providers(&self) -> Option<std::sync::Arc<[ProviderInfoWithModels]>> {
         None
     }
     /// The value stored under one of the plugin's declared storage keys ([`Setup::storage_key`]). It shows a
@@ -3129,7 +3129,7 @@ impl Read for HostHandle {
         self.read(&HostRequest::Limits)
     }
 
-    fn providers(&self) -> Option<std::sync::Arc<[ProviderInfo]>> {
+    fn providers(&self) -> Option<std::sync::Arc<[ProviderInfoWithModels]>> {
         self.read::<Vec<_>>(&HostRequest::Providers).map(Into::into)
     }
 

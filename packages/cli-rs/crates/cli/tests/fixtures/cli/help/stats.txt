@@ -5,7 +5,7 @@
   [36mopencode stats [flags][0m
 
 [1mFLAGS[0m
-  [32m--days[0m [2minteger[0m      Show the last N days; 0 means today
+  [32m--days[0m [2minteger[0m      Show the last N days (maximum 3720); 0 means today
   [32m--year[0m [2minteger[0m      Show a calendar year
   [32m--all[0m               Show lifetime statistics
   [32m--project[0m [2mstring[0m    Filter by project ID, or use "." for the current project

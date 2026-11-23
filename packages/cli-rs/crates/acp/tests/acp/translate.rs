@@ -396,8 +396,8 @@ fn turn_translation() {
 
 #[test]
 fn reports_a_pending_retry_and_clears_it_when_the_next_step_starts() {
-    // `provider` stands for a field a newer server adds: the error passes through as it arrived.
-    let error = json!({ "type": "provider.transport", "message": "lost", "provider": { "id": "p" } });
+    // `upstream` stands for a field a newer server adds: the error passes through as it arrived.
+    let error = json!({ "type": "provider.transport", "message": "lost", "upstream": { "id": "p" } });
     let retry = durable_event(
         "session.retry.scheduled",
         json!({ "sessionID": ROOT, "assistantMessageID": "msg_1", "attempt": 2, "at": 1_000, "error": error }),

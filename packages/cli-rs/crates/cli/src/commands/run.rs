@@ -134,8 +134,8 @@ async fn execute(
         client
             .session_update(&SessionUpdateInput {
                 session_id: target.session.id.clone(),
-                title,
-                archived: archived.then_some(true),
+                title: title.map(Some),
+                archived: archived.then_some(Some(true)),
                 ..Default::default()
             })
             .await

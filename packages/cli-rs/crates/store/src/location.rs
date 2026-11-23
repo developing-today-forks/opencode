@@ -88,7 +88,7 @@ pub struct LocationData {
     pub mcp_server: Option<Arc<[McpServer]>>,
     pub mcp_resource: Option<Arc<[McpResource]>>,
     pub model: Option<Arc<[ModelInfo]>>,
-    pub provider: Option<Arc<[ProviderInfo]>>,
+    pub provider: Option<Arc<[ProviderInfoWithModels]>>,
     pub reference: Option<Arc<[ReferenceInfo]>>,
     pub websearch: Option<Vec<WebSearchProvider>>,
     /// The Go allowance and Console budgets of the signed-in OpenCode Console workspace; the
@@ -132,7 +132,7 @@ pub(crate) enum Loaded {
     McpServer(Arc<[McpServer]>),
     McpResource(Arc<[McpResource]>),
     Model(Arc<[ModelInfo]>),
-    Provider(Arc<[ProviderInfo]>),
+    Provider(Arc<[ProviderInfoWithModels]>),
     Reference(Arc<[ReferenceInfo]>),
     Skill(Arc<[SkillInfo]>),
 }

@@ -559,7 +559,7 @@ impl Workspaces {
     fn confirm_force(self: &Rc<Self>, directory: String, deleting_current: bool) {
         let Some(tui) = self.tui() else { return };
         let client = tui.data.client().clone();
-        let input = VcsStatusInput { location: Some(LocationQueryInput { directory: Some(directory.clone()) }) };
+        let input = VcsStatusInput { location: Some(LocationQueryInput { directory: Some(directory.clone()) }), limit: None };
         let workspaces = self.clone();
         tui.app.spawn(
             async move { client.vcs_status(&input).await.map(|status| status.data).unwrap_or_default() },

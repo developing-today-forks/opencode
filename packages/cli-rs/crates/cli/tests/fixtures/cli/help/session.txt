@@ -19,3 +19,5 @@
   [36mdelete[0m    Delete a session and its child sessions
   [36mexport[0m    Export session data as JSON
   [36mimport[0m    Import session data from a JSON file or URL
+  [36mchain[0m     Show a session and its parents up to the root session
+  [36mlog[0m       Read, grep, or search a session transcript

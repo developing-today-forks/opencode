@@ -187,7 +187,7 @@ impl Turns {
         }
         let Ok(id) = decode_session_id(session_id) else { return Ok(()) };
         let result =
-            self.client.session_interrupt(&SessionInterruptInput { session_id: SessionID(id), resume: None }).await;
+            self.client.session_interrupt(&SessionInterruptInput { session_id: SessionID(id), resume: None, force: None }).await;
         match result {
             Err(error) if crate::client::is_declared(&error, "SessionNotFoundError") => Ok(()),
             result => check(result).map(|_| ()),
@@ -441,6 +441,7 @@ impl Turns {
             .session_interrupt(&SessionInterruptInput {
                 session_id: SessionID(turn.ctx.session_id.clone()),
                 resume: None,
+                force: None,
             })
             .await
         {

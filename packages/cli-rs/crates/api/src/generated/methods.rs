@@ -22,6 +22,7 @@ macro_rules! endpoint {
 impl Client {
     endpoint!(" `GET /api/info` (`info`)", server_info, server_info_call, json, ServerInfoOutput);
     endpoint!(" `POST /api/pair` (`pair`)", server_pair, server_pair_call, json, ServerPairOutput);
+    endpoint!(" `POST /auth/connect/:code` (`redeem`)", server_redeem, server_redeem_call, json, ServerRedeemOutput, input: ServerRedeemInput);
     endpoint!(" `GET /auth/connect/:code` (`connect`)", server_connect, server_connect_call, json, ServerConnectOutput, input: ServerConnectInput);
     endpoint!(" `GET /api/location` (`get`)", location_get, location_get_call, json, LocationGetOutput, input: LocationGetInput);
     endpoint!(" `POST /api/location/reload` (`reload`)", location_reload, location_reload_call, empty, ());
@@ -39,6 +40,8 @@ impl Client {
     endpoint!(" `POST /api/session/:sessionID/fork` (`fork`)", session_fork, session_fork_call, data, SessionForkOutput, input: SessionForkInput);
     endpoint!(" `POST /api/session/:sessionID/agent` (`switchAgent`)", session_switch_agent, session_switch_agent_call, empty, (), input: SessionSwitchAgentInput);
     endpoint!(" `POST /api/session/:sessionID/model` (`switchModel`)", session_switch_model, session_switch_model_call, empty, (), input: SessionSwitchModelInput);
+    endpoint!(" `GET /api/session/:sessionID/route-target` (`routeTarget.list`)", session_route_target_list, session_route_target_list_call, data, SessionRouteTargetListOutput, input: SessionRouteTargetListInput);
+    endpoint!(" `POST /api/session/:sessionID/route-target` (`routeTarget.set`)", session_route_target_set, session_route_target_set_call, data, SessionRouteTargetSetOutput, input: SessionRouteTargetSetInput);
     endpoint!(" `PATCH /api/session/:sessionID` (`update`)", session_update, session_update_call, empty, (), input: SessionUpdateInput);
     endpoint!(" `POST /api/session/:sessionID/move` (`move`)", session_move, session_move_call, empty, (), input: SessionMoveInput);
     endpoint!(" `POST /api/session/:sessionID/prompt` (`prompt`)", session_prompt, session_prompt_call, data, SessionPromptOutput, input: SessionPromptInput);
@@ -82,6 +85,21 @@ impl Client {
     endpoint!(" `POST /api/experimental/generate/video` (`video.create`)", experimental_generate_video_create, experimental_generate_video_create_call, data, ExperimentalGenerateVideoCreateOutput, input: ExperimentalGenerateVideoCreateInput);
     endpoint!(" `GET /api/experimental/generate/video/:id` (`video.get`)", experimental_generate_video_get, experimental_generate_video_get_call, data, ExperimentalGenerateVideoGetOutput, input: ExperimentalGenerateVideoGetInput);
     endpoint!(" `POST /api/experimental/generate/decisions` (`decisions`)", experimental_generate_decisions, experimental_generate_decisions_call, data, ExperimentalGenerateDecisionsOutput, input: ExperimentalGenerateDecisionsInput);
+    endpoint!(" `POST /v1/chat/completions` (`chat`)", server_completions_chat, server_completions_chat_call, json, ServerCompletionsChatOutput, input: ServerCompletionsChatInput);
+    endpoint!(" `POST /v1/responses` (`responses`)", server_completions_responses, server_completions_responses_call, json, ServerCompletionsResponsesOutput, input: ServerCompletionsResponsesInput);
+    endpoint!(" `POST /v1/embeddings` (`embeddings`)", server_completions_embeddings, server_completions_embeddings_call, json, ServerCompletionsEmbeddingsOutput, input: ServerCompletionsEmbeddingsInput);
+    endpoint!(" `POST /v1/audio/transcriptions` (`transcriptions`)", server_completions_transcriptions, server_completions_transcriptions_call, json, ServerCompletionsTranscriptionsOutput, input: ServerCompletionsTranscriptionsInput);
+    endpoint!(" `POST /v1/messages` (`messages`)", server_completions_messages, server_completions_messages_call, json, ServerCompletionsMessagesOutput, input: ServerCompletionsMessagesInput);
+    endpoint!(" `POST /v1/systemone` (`systemone`)", server_completions_systemone, server_completions_systemone_call, json, ServerCompletionsSystemoneOutput, input: ServerCompletionsSystemoneInput);
+    endpoint!(
+        " `GET /v1/models` (`models`)",
+        server_completions_models,
+        server_completions_models_call,
+        json,
+        ServerCompletionsModelsOutput
+    );
+    endpoint!(" `GET /v1/models/:id` (`model`)", server_completions_model, server_completions_model_call, json, ServerCompletionsModelOutput, input: ServerCompletionsModelInput);
+    endpoint!(" `GET /v1/models/:provider/:model` (`modelRef`)", server_completions_model_ref, server_completions_model_ref_call, json, ServerCompletionsModelRefOutput, input: ServerCompletionsModelRefInput);
     endpoint!(
         " `GET /api/experimental/voice/models` (`models`)",
         experimental_voice_models,
@@ -116,6 +134,18 @@ impl Client {
     endpoint!(" `PATCH /api/credential/:credentialID` (`update`)", credential_update, credential_update_call, empty, (), input: CredentialUpdateInput);
     endpoint!(" `POST /api/credential/:credentialID/activate` (`activate`)", credential_activate, credential_activate_call, empty, (), input: CredentialActivateInput);
     endpoint!(" `DELETE /api/credential/:credentialID` (`remove`)", credential_remove, credential_remove_call, empty, (), input: CredentialRemoveInput);
+    endpoint!(
+        " `GET /api/route/overrides` (`override.list`)",
+        route_override_list,
+        route_override_list_call,
+        data,
+        RouteOverrideListOutput
+    );
+    endpoint!(" `POST /api/route/overrides` (`override.add`)", route_override_add, route_override_add_call, data, RouteOverrideAddOutput, input: RouteOverrideAddInput);
+    endpoint!(" `DELETE /api/route/overrides/:overrideID` (`override.remove`)", route_override_remove, route_override_remove_call, empty, (), input: RouteOverrideRemoveInput);
+    endpoint!(" `GET /api/route/attempts` (`attempt.list`)", route_attempt_list, route_attempt_list_call, data, RouteAttemptListOutput, input: RouteAttemptListInput);
+    endpoint!(" `GET /api/route/attempts/stats` (`attempt.stats`)", route_attempt_stats, route_attempt_stats_call, data, RouteAttemptStatsOutput, input: RouteAttemptStatsInput);
+    endpoint!(" `GET /api/route/decisions` (`decision.list`)", route_decision_list, route_decision_list_call, data, RouteDecisionListOutput, input: RouteDecisionListInput);
     endpoint!(" `GET /api/project` (`list`)", project_list, project_list_call, json, ProjectListOutput, input: ProjectListInput);
     endpoint!(" `PATCH /api/project/:projectID` (`update`)", project_update, project_update_call, json, ProjectUpdateOutput, input: ProjectUpdateInput);
     endpoint!(" `GET /api/form` (`list`)", form_list, form_list_call, json, FormListOutput, input: FormListInput);
@@ -201,6 +231,28 @@ impl Client {
     endpoint!(" `POST /api/worktree` (`create`)", worktree_create, worktree_create_call, json, WorktreeCreateOutput, input: WorktreeCreateInput);
     endpoint!(" `DELETE /api/worktree` (`remove`)", worktree_remove, worktree_remove_call, empty, (), input: WorktreeRemoveInput);
     endpoint!(" `POST /api/worktree/refresh` (`refresh`)", worktree_refresh, worktree_refresh_call, empty, (), input: WorktreeRefreshInput);
+    endpoint!(" `POST /api/messaging/message` (`send`)", messaging_send, messaging_send_call, data, MessagingSendOutput, input: MessagingSendInput);
+    endpoint!(" `POST /api/messaging/user` (`user`)", messaging_user, messaging_user_call, data, MessagingUserOutput, input: MessagingUserInput);
+    endpoint!(" `POST /api/messaging/query` (`query`)", messaging_query, messaging_query_call, data, MessagingQueryOutput, input: MessagingQueryInput);
+    endpoint!(" `POST /api/messaging/inspect` (`inspect`)", messaging_inspect, messaging_inspect_call, data, MessagingInspectOutput, input: MessagingInspectInput);
+    endpoint!(" `POST /api/messaging/visibility` (`visibility`)", messaging_visibility, messaging_visibility_call, data, MessagingVisibilityOutput, input: MessagingVisibilityInput);
+    endpoint!(" `POST /api/messaging/settings` (`settings`)", messaging_settings, messaging_settings_call, data, MessagingSettingsOutput, input: MessagingSettingsInput);
+    endpoint!(" `POST /api/messaging/subscribe` (`subscribe`)", messaging_subscribe, messaging_subscribe_call, data, MessagingSubscribeOutput, input: MessagingSubscribeInput);
+    endpoint!(" `POST /api/messaging/topic` (`topic`)", messaging_topic, messaging_topic_call, data, MessagingTopicOutput, input: MessagingTopicInput);
+    endpoint!(" `POST /api/messaging/topics` (`topics`)", messaging_topics, messaging_topics_call, data, MessagingTopicsOutput, input: MessagingTopicsInput);
+    endpoint!(" `POST /api/messaging/chain` (`chain`)", messaging_chain, messaging_chain_call, data, MessagingChainOutput, input: MessagingChainInput);
+    endpoint!(" `POST /api/messaging/sessions` (`sessions`)", messaging_sessions, messaging_sessions_call, data, MessagingSessionsOutput, input: MessagingSessionsInput);
+    endpoint!(" `POST /api/messaging/log` (`log`)", messaging_log, messaging_log_call, data, MessagingLogOutput, input: MessagingLogInput);
+    endpoint!(" `POST /api/messaging/vars` (`vars`)", messaging_vars, messaging_vars_call, data, MessagingVarsOutput, input: MessagingVarsInput);
+    endpoint!(" `PUT /api/messaging/vars` (`setVar`)", messaging_set_var, messaging_set_var_call, empty, (), input: MessagingSetVarInput);
+    endpoint!(
+        " `GET /api/messaging/model` (`model.status`)",
+        messaging_model_status,
+        messaging_model_status_call,
+        data,
+        MessagingModelStatusOutput
+    );
+    endpoint!(" `POST /api/messaging/model` (`model.configure`)", messaging_model_configure, messaging_model_configure_call, data, MessagingModelConfigureOutput, input: MessagingModelConfigureInput);
     endpoint!(" `POST /api/vcs/init` (`init`)", vcs_init, vcs_init_call, empty, (), input: VcsInitInput);
     endpoint!(" `GET /api/vcs` (`get`)", vcs_get, vcs_get_call, json, VcsGetOutput, input: VcsGetInput);
     endpoint!(" `GET /api/vcs/base` (`base`)", vcs_base, vcs_base_call, json, VcsBaseOutput, input: VcsBaseInput);
