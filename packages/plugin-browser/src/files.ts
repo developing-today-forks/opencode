@@ -8,7 +8,7 @@ import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { workspaceTarget } from "./workspace.js"
 import { previewPath } from "./preview-path.js"
-import { open, realpath, stat } from "node:fs/promises"
+import { open, realpath, stat, type FileHandle } from "node:fs/promises"
 import { basename, dirname, extname, join, parse, relative, resolve } from "node:path"
 import { createHash } from "node:crypto"
 import { fileURLToPath } from "node:url"
@@ -35,15 +35,24 @@ export function uploadPath(directory: string, input: string) {
 export const physical = (paths: readonly string[]) => Effect.tryPromise({ try: () => Promise.all(paths.map((path) => realpath(path))), catch: (error) => failure("read", error) })
 
 // Files cross machines as bytes. Only this endpoint interprets its local paths.
-export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], names: readonly string[]) =>
+export const read = Effect.fn("BrowserFiles.read")((paths: readonly string[], names: readonly string[], openFile: (path: string) => Promise<FileHandle> = (path) => open(path, "r")) =>
   Effect.tryPromise({
     try: async () => {
       const files: Browser.File[] = []
       let remaining = Browser.MAX_FILE_BYTES
       for (const [index, input] of paths.entries()) {
-          const file = await open(input, "r")
+          // The caller authorized the object the canonical path named when it was checked. Re-canonicalize
+          // here and compare the opened handle's identity with the checked object, so a path swapped for a
+          // symlink between the check and the open is refused before any bytes are read. openFile is a seam
+          // so tests can place the swap exactly in that window.
+          const canonical = await realpath(input)
+          if (canonical !== input) throw new Error("The upload path changed before it could be read.")
+          const checked = await stat(canonical)
+          const file = await openFile(canonical)
           try {
             const info = await file.stat()
+            if (info.dev !== checked.dev || info.ino !== checked.ino)
+              throw new Error("The upload path was replaced before it could be read.")
             if (!info.isFile()) throw new Error("Upload paths must name regular files.")
             if (info.size > remaining) throw new Error("The selected upload files exceed 5 MiB in total.")
             const data = Buffer.alloc(info.size)
