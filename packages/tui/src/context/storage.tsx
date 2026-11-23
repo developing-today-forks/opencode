@@ -66,6 +66,34 @@ export function createStorage(root: string, channel: string) {
           return clone(options.initial)
         }
       }
+      /** The stored value as a write must see it. `load()` tolerates a broken file so the TUI
+       * never stops, but a write built on that tolerance starts from `options.initial` and
+       * replaces a present-but-unreadable store with only the new state — one bad byte erases
+       * everything the key held, silently (#2778). So the write path reads strictly, the way the
+       * route-overrides store's `readForWrite` does (#2771): a missing file is the initial value,
+       * while a file that is not valid JSON, does not hold an object, or cannot be read refuses
+       * the write with an error, and nothing is overwritten until the file is fixed or moved
+       * aside. */
+      const readForWrite = (): Value => {
+        let raw: string
+        try {
+          raw = readFileSync(file, "utf8")
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return clone(options.initial)
+          throw error
+        }
+        let value: unknown
+        try {
+          value = JSON.parse(raw)
+        } catch {
+          throw new Error(`${file} is not valid JSON. Fix or move it aside before changing this setting.`)
+        }
+        try {
+          return clone(value as Value)
+        } catch {
+          throw new Error(`${file} does not hold a ${key} object. Fix or move it aside before changing this setting.`)
+        }
+      }
       const [store, setStore] = createStore(load())
       const merge = (next: Value) => reconcile(next, { key: options.key })
       const reload = () => batch(() => setStore(merge(load())))
@@ -73,7 +101,7 @@ export function createStorage(root: string, channel: string) {
         const operation = Flock.withLock(
           file,
           async () => {
-            const draft = load()
+            const draft = readForWrite()
             mutation(draft)
             const next = clone(draft)
             await writeJsonAtomic(file, next)
