@@ -256,6 +256,57 @@ describe("Gemini route", () => {
     }),
   )
 
+  it.effect("distinguishes failed tool results from successful ones with the same text", () =>
+    Effect.gen(function* () {
+      const prepared = yield* compileRequest(
+        ai.request({
+          model,
+          messages: [
+            Message.assistant([
+              ToolCallPart.make({ id: "call_1", name: "lookup", input: { query: "weather" } }),
+              ToolCallPart.make({ id: "call_2", name: "lookup", input: { query: "time" } }),
+            ]),
+            Message.tool({ id: "call_1", name: "lookup", result: "boom", resultType: "text" }),
+            Message.tool({ id: "call_2", name: "lookup", result: "boom", resultType: "error" }),
+          ],
+        }),
+      )
+
+      expect(prepared.body.contents).toEqual([
+        {
+          role: "model",
+          parts: [
+            {
+              functionCall: { name: "lookup", args: { query: "weather" } },
+              thoughtSignature: "skip_thought_signature_validator",
+            },
+            {
+              functionCall: { name: "lookup", args: { query: "time" } },
+              thoughtSignature: "skip_thought_signature_validator",
+            },
+          ],
+        },
+        {
+          role: "user",
+          parts: [
+            {
+              functionResponse: {
+                name: "lookup",
+                response: { name: "lookup", content: "boom" },
+              },
+            },
+            {
+              functionResponse: {
+                name: "lookup",
+                response: { name: "lookup", error: "boom" },
+              },
+            },
+          ],
+        },
+      ])
+    }),
+  )
+
   it.effect("lowers function call ids for gemini 3 models", () =>
     Effect.gen(function* () {
       const prepared = yield* compileRequest(
