@@ -28,6 +28,7 @@ import { it } from "./lib/effect"
 
 interface ModelOptions {
   readonly providerID?: Provider.ID
+  readonly canonical?: Provider.ID
   readonly modelID?: string
   readonly settings?: Info["settings"]
   readonly headers?: Info["headers"]
@@ -39,6 +40,7 @@ function model(packageName: string | undefined, options: ModelOptions = {}) {
     id: ID.make(options.modelID ?? "api-test-model"),
     modelID: ID.make(options.modelID ?? "api-test-model"),
     providerID: options.providerID ?? Provider.ID.make("test-provider"),
+    canonical: options.canonical,
     name: "Test model",
     package: packageName,
     settings: options.settings ?? {},
@@ -53,8 +55,10 @@ function model(packageName: string | undefined, options: ModelOptions = {}) {
     limit: { context: 100, output: 20 },
   }
   AISDKNative.rewrite(info, {
+    builtins: Provider.builtinPackages,
     specifier: packageName,
     providerID: info.providerID,
+    canonical: info.canonical,
     modelID: info.modelID,
   })
   return Info.make(info)
