@@ -1792,6 +1792,30 @@
                       }
                     ],
                     "description": "Archive the session with true or restore it with false. Repeating the current state is a no-op."
+                  },
+                  "experimental": {
+                    "anyOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "archivedAt": {
+                            "anyOf": [
+                              {
+                                "type": "number"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ],
+                            "description": "Experimental: may change without compatibility guarantees. Epoch-millisecond archive time for archived: true, for a session a client archived before carrying it over; ignored otherwise. Omitted means now."
+                          }
+                        },
+                        "additionalProperties": false
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "additionalProperties": false
@@ -5806,16 +5830,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "ProviderNotFoundError | ModelNotFoundError | LocationNotFoundError",
             "content": {
@@ -5867,7 +5881,7 @@
             }
           }
         },
-        "description": "Submit a video job to a video model using the server's base configuration and return its ID once the provider accepted it. The server polls the job and stores the finished videos as blobs; read the job with GET /api/experimental/generate/video/:id and the video with GET /api/experimental/blob/:id. Behind the video_generate flag. Experimental: may change without compatibility guarantees.",
+        "description": "Submit a video job to a video model using the server's base configuration and return its ID once the provider accepted it. The server polls the job and stores the finished videos as blobs; read the job with GET /api/experimental/generate/video/:id and the video with GET /api/experimental/blob/:id. Experimental: may change without compatibility guarantees.",
         "summary": "Create a video generation",
         "requestBody": {
           "content": {
@@ -5927,16 +5941,6 @@
               }
             }
           },
-          "403": {
-            "description": "ForbiddenError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ForbiddenErrorEncoded"
-                }
-              }
-            }
-          },
           "404": {
             "description": "VideoNotFoundError | LocationNotFoundError",
             "content": {
@@ -5955,7 +5959,7 @@
             }
           }
         },
-        "description": "Read a video job: running, completed with its videos' blobs, or error with a reason. Jobs survive a server restart, which resumes polling running ones. A job is not found 24 hours after it finished, or once none of its blobs remain. Behind the video_generate flag. Experimental: may change without compatibility guarantees.",
+        "description": "Read a video job: running, completed with its videos' blobs, or error with a reason. Jobs survive a server restart, which resumes polling running ones. A job is not found 24 hours after it finished, or once none of its blobs remain. Experimental: may change without compatibility guarantees.",
         "summary": "Read a video generation"
       }
     },
@@ -20240,6 +20244,27 @@
               "artifacts": {
                 "type": "boolean"
               },
+              "console_watches": {
+                "type": "boolean"
+              },
+              "recommended_api": {
+                "type": "boolean"
+              },
+              "full_codemode": {
+                "type": "boolean"
+              },
+              "machines": {
+                "type": "boolean"
+              },
+              "home_memory": {
+                "type": "boolean"
+              },
+              "project_overlay": {
+                "type": "boolean"
+              },
+              "sqlite_fts": {
+                "type": "boolean"
+              },
               "video_generate": {
                 "anyOf": [
                   {
@@ -20279,27 +20304,6 @@
                     "additionalProperties": false
                   }
                 ]
-              },
-              "console_watches": {
-                "type": "boolean"
-              },
-              "recommended_api": {
-                "type": "boolean"
-              },
-              "full_codemode": {
-                "type": "boolean"
-              },
-              "machines": {
-                "type": "boolean"
-              },
-              "home_memory": {
-                "type": "boolean"
-              },
-              "project_overlay": {
-                "type": "boolean"
-              },
-              "sqlite_fts": {
-                "type": "boolean"
               },
               "part_rows": {
                 "type": "boolean"
@@ -34472,6 +34476,16 @@
             "properties": {
               "sessionID": {
                 "$ref": "#/components/schemas/Session.ID"
+              },
+              "time": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
               }
             },
             "required": ["sessionID"],
