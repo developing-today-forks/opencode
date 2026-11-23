@@ -78,7 +78,7 @@ export function createPluginBridge(): Bridge {
   if (getOwner()) onCleanup(() => dispatch({ type: "disposed" }))
 
   return {
-    packaged: api.getWindowBootstrap().packaged ?? false,
+    packaged: api.getWindowBootstrap()?.packaged ?? false,
     call: (input, signal) =>
       cancellable("PluginCall", input, signal).catch((cause: unknown) => {
         throw failure(cause)
