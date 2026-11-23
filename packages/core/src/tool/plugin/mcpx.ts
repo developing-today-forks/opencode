@@ -309,10 +309,12 @@ export const callDaemon = async (
 }
 
 let daemonEnsured = false
+let lastDaemonRecoveryAt = 0
 
 /** Test-only: forget that the daemon was already ensured in this process. */
 export const resetDaemonEnsured = (): void => {
   daemonEnsured = false
+  lastDaemonRecoveryAt = 0
 }
 
 /**
@@ -384,6 +386,44 @@ export const ensureDaemon = async (): Promise<void> => {
     }
   } catch {}
   daemonEnsured = true
+}
+
+/** Minimum spacing between mid-session daemon recovery attempts (see callDaemonWithRecovery). */
+export const daemonRecoveryMinIntervalMs = 5_000
+
+/**
+ * callDaemon for the projected-tool paths, with one bounded recovery attempt
+ * when the daemon dies mid-session (#2642). ensureDaemon latches at plugin
+ * init, but a daemon opencode spawns exits after an idle hour by design
+ * (#14), so a long-lived process can hold a standing latch for a daemon that
+ * no longer exists — and projected tools, unlike mcpx_exec, have no CLI
+ * fallback. DaemonUnreachableError is the one failure that proves the daemon
+ * never received the request, so re-ensuring and retrying once cannot replay
+ * work; every other failure — DaemonTimeoutError above all, where the
+ * request may already be executing — surfaces untouched. Attempts are
+ * throttled so a genuinely missing mcpx is not re-probed and re-spawned on
+ * every call, and the re-ensure runs through the same autostart gates as
+ * plugin init, so tests, opt-outs, and supervised daemons never gain a
+ * competing spawn from a tool call.
+ */
+export const callDaemonWithRecovery = async (
+  path: string,
+  method = "GET",
+  body?: any,
+  headers?: Record<string, string>,
+  timeoutMs = daemonRequestTimeoutMs,
+): Promise<any> => {
+  try {
+    return await callDaemon(path, method, body, headers, timeoutMs)
+  } catch (error) {
+    if (!(error instanceof DaemonUnreachableError)) throw error
+    const now = Date.now()
+    if (now - lastDaemonRecoveryAt < daemonRecoveryMinIntervalMs) throw error
+    lastDaemonRecoveryAt = now
+    daemonEnsured = false
+    await ensureDaemon()
+    return callDaemon(path, method, body, headers, timeoutMs)
+  }
 }
 
 export const ExecInput = Schema.Struct({
@@ -531,7 +571,7 @@ export const Plugin = {
             }
             // Auto-project tools used in script with a 3-turn TTL for subsequent review
             const projected = yield* Effect.tryPromise(() =>
-              autoProjectFromScript({ source: input.source, callDaemon, defaultTtl: 3 }),
+              autoProjectFromScript({ source: input.source, callDaemon: callDaemonWithRecovery, defaultTtl: 3 }),
             ).pipe(Effect.orElseSucceed(() => [] as string[]))
             if (projected.length > 0) yield* ctx.tool.reload()
             return { output: { output } }
@@ -647,7 +687,7 @@ export const Plugin = {
                 namespaces: input.namespaces,
                 tools: input.tools,
                 ttl: input.ttl,
-                callDaemon,
+                callDaemon: callDaemonWithRecovery,
               }),
             ).pipe(Effect.mapError((err: any) => new ToolFailure({ message: err?.message || String(err), error: err })))
             if (result.added.length > 0) yield* ctx.tool.reload()
