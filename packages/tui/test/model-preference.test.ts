@@ -19,6 +19,38 @@ test("repairs known model preferences and preserves unrelated fields", () => {
   })
 })
 
+test("refuses to overwrite an unparseable model.json", async () => {
+  await using tmp = await tmpdir()
+  const file = path.join(tmp.path, "model.json")
+  const corrupt = `{"recent":[{"providerID":"openai","modelID":"gpt-4"}],"favorite":[{"providerID":"openai","modelID":"gpt-4o"}]`
+  await Bun.write(file, corrupt)
+  const repository = createModelPreferenceRepository(file)
+  // The tolerant read keeps the TUI running on the empty default ...
+  expect((await repository.load()).recent).toEqual([])
+  // ... but no write may build on it: both entry points refuse with an error ...
+  await expect(repository.addRecent({ providerID: "anthropic", modelID: "claude" })).rejects.toThrow(
+    /is not valid JSON/,
+  )
+  await expect(repository.saveVariant({ providerID: "anthropic", modelID: "claude" }, "high")).rejects.toThrow(
+    /is not valid JSON/,
+  )
+  // ... and the original bytes are preserved, not silently overwritten.
+  expect(await Bun.file(file).text()).toBe(corrupt)
+})
+
+test("starts from the default with no warning when model.json is missing", async () => {
+  await using tmp = await tmpdir()
+  const file = path.join(tmp.path, "model.json")
+  const repository = createModelPreferenceRepository(file)
+  expect(await repository.load()).toEqual({ recent: [], favorite: [], variant: {} })
+  await repository.addRecent({ providerID: "anthropic", modelID: "claude" })
+  expect(await Bun.file(file).json()).toEqual({
+    recent: [{ providerID: "anthropic", modelID: "claude" }],
+    favorite: [],
+    variant: {},
+  })
+})
+
 test("atomically serializes model preference updates", async () => {
   await using tmp = await tmpdir()
   const file = path.join(tmp.path, "model.json")

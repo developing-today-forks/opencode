@@ -111,12 +111,28 @@ export function createModelPreferenceRepository(filePath: string) {
       .then(decodeModelPreference)
       .catch(() => decodeModelPreference(undefined))
 
+  /** The stored preference as a write must see it. `read()` tolerates a broken file so the TUI
+   * never stops, but a write built on that tolerance starts from the empty default and replaces a
+   * present-but-unreadable store with only the new state — one bad byte erases every favorite,
+   * variant and recent model the user had, silently (#2778). So the write path reads strictly, the
+   * way the route-overrides store's `readForWrite` does (#2771): a missing file is the empty
+   * default, while a file that is not valid JSON or cannot be read refuses the write with an
+   * error, and nothing is overwritten until the file is fixed or moved aside. */
+  const readForWrite = () =>
+    readJson<unknown>(filePath).then(decodeModelPreference, (error: unknown) => {
+      if (typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT")
+        return decodeModelPreference(undefined)
+      if (error instanceof SyntaxError)
+        throw new Error(`${filePath} is not valid JSON. Fix or move it aside before changing model preferences.`)
+      throw error
+    })
+
   function update(change: (current: ModelPreference) => Partial<ModelPreference>) {
     const result = pending.then(() =>
       Flock.withLock(
         filePath,
         async () => {
-          const current = await read()
+          const current = await readForWrite()
           await writeJsonAtomic(filePath, { ...current, ...patch(change(preference(current))) })
         },
         { dir: path.join(path.dirname(filePath), "locks") },
