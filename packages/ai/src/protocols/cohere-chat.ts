@@ -168,7 +168,7 @@ const fromRequest = Effect.fn("CohereChat.fromRequest")(function* (request: LLMR
           return yield* ProviderShared.unsupportedContent("Cohere Chat", "tool", ["tool-result"])
         if (part.result.type === "content" && part.result.value.some((item) => item.type === "file"))
           return yield* ProviderShared.invalidRequest("Cohere Chat does not support file content in tool results")
-        messages.push({ role: "tool", tool_call_id: part.id, content: ProviderShared.toolResultText(part) })
+        messages.push({ role: "tool", tool_call_id: part.id, content: ProviderShared.markedToolResultText(part) })
       }
       continue
     }
