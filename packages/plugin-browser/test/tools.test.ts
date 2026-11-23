@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises"
+import { mkdir, mkdtemp, open, rm, symlink } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { basename, dirname, join } from "node:path"
 import { pathToFileURL } from "node:url"
@@ -192,6 +192,51 @@ test("uploads read the authorized regular file and preserve its display name", a
     expect(new TextDecoder().decode(file?.data)).toBe("sample")
   } finally {
     await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test("uploads refuse a checked path that has been replaced by an outside symlink", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "browser-upload-"))
+  const outside = await mkdtemp(join(tmpdir(), "browser-outside-"))
+  try {
+    const path = join(dir, "sample.txt")
+    await Bun.write(path, "sample")
+    const secret = join(outside, "secret.txt")
+    await Bun.write(secret, "outside-secret")
+    const paths = await Effect.runPromise(BrowserFiles.physical([path]))
+    await rm(path)
+    await symlink(secret, path)
+    await expect(Effect.runPromise(BrowserFiles.read(paths, [path]))).rejects.toThrow(
+      "The upload path changed before it could be read.",
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
+  }
+})
+
+test("uploads refuse a path swapped for an outside symlink between the check and the open", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "browser-upload-"))
+  const outside = await mkdtemp(join(tmpdir(), "browser-outside-"))
+  try {
+    const path = join(dir, "sample.txt")
+    await Bun.write(path, "sample")
+    const secret = join(outside, "secret.txt")
+    await Bun.write(secret, "outside-secret")
+    const paths = await Effect.runPromise(BrowserFiles.physical([path]))
+    // The deterministic race: the seam replaces the checked entry in the window between the
+    // canonicalization inside read and the open, so the open lands on the outside file.
+    const swapped = async (candidate: string) => {
+      await rm(candidate)
+      await symlink(secret, candidate)
+      return open(candidate, "r")
+    }
+    await expect(Effect.runPromise(BrowserFiles.read(paths, [path], swapped))).rejects.toThrow(
+      "The upload path was replaced before it could be read.",
+    )
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+    await rm(outside, { recursive: true, force: true })
   }
 })
 
