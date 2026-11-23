@@ -28,6 +28,7 @@ import { Mcp } from "@opencode/core/mcp/index"
 import { Messaging } from "@opencode/core/messaging"
 import { MessagingEmbedding } from "@opencode/core/messaging/embedding"
 import { Model } from "@opencode/core/model"
+import { ModelsDev } from "@opencode/core/models-dev"
 import { Npm } from "@opencode/util/npm"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
@@ -135,6 +136,7 @@ export const makePluginTestLayer = (
       BlobStore.node,
       Provider.node,
       Model.node,
+      ModelsDev.node,
       Command.node,
       InstructionDiscovery.node,
       Integration.node,
