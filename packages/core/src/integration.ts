@@ -249,7 +249,10 @@ export interface Interface extends State.Transformable<Editor> {
       readonly code?: string
     }) => Effect.Effect<void, CodeRequiredError | AuthorizationError | AttemptNotFoundError>
     /** Cancels an attempt and releases its resources. */
-    readonly cancel: (input: { readonly integrationID: ID; readonly attemptID: AttemptID }) => Effect.Effect<void>
+    readonly cancel: (input: {
+      readonly integrationID: ID
+      readonly attemptID: AttemptID
+    }) => Effect.Effect<void, AttemptNotFoundError>
   }
   readonly command: {
     readonly connect: (input: {
@@ -261,7 +264,10 @@ export interface Interface extends State.Transformable<Editor> {
       readonly integrationID: ID
       readonly attemptID: AttemptID
     }) => Effect.Effect<CommandAttemptStatus, AttemptNotFoundError>
-    readonly cancel: (input: { readonly integrationID: ID; readonly attemptID: AttemptID }) => Effect.Effect<void>
+    readonly cancel: (input: {
+      readonly integrationID: ID
+      readonly attemptID: AttemptID
+    }) => Effect.Effect<void, AttemptNotFoundError>
   }
 }
 
@@ -563,15 +569,19 @@ const layer = Layer.effect(
       input: { readonly integrationID: ID; readonly attemptID: AttemptID },
       before: Effect.Effect<void> = Effect.void,
     ) {
-      const attempt = yield* SynchronizedRef.modify(ref, (current) => {
-        const match = current.get(input.attemptID)
-        if (!match || match.integrationID !== input.integrationID || match.status !== "pending" || match.persisting)
-          return [undefined, current]
-        const next = new Map(current)
-        next.delete(input.attemptID)
-        return [match, next]
-      })
-      if (!attempt) return
+      const attempt = yield* SynchronizedRef.modify(
+        ref,
+        (current): readonly [Pending | "missing" | "settled", Map<AttemptID, Pending | TerminalAttempt>] => {
+          const match = current.get(input.attemptID)
+          if (!match || match.integrationID !== input.integrationID) return ["missing", current]
+          if (match.status !== "pending" || match.persisting) return ["settled", current]
+          const next = new Map(current)
+          next.delete(input.attemptID)
+          return [match, next]
+        },
+      )
+      if (attempt === "missing") return yield* new AttemptNotFoundError(input)
+      if (attempt === "settled") return
       yield* before
       yield* Scope.close(attempt.scope, Exit.void)
     })

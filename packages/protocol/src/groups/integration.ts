@@ -164,6 +164,7 @@ export const IntegrationGroup = HttpApiGroup.make("server.integration")
       params: { integrationID: Integration.ID, attemptID: Integration.AttemptID },
       query: LocationQuery,
       success: HttpApiSchema.NoContent,
+      error: [IntegrationNotFoundError, IntegrationAttemptNotFoundError],
     })
       .annotateMerge(locationQueryOpenApi)
       .annotateMerge(
@@ -215,6 +216,7 @@ export const IntegrationGroup = HttpApiGroup.make("server.integration")
       params: { integrationID: Integration.ID, attemptID: Integration.AttemptID },
       query: LocationQuery,
       success: HttpApiSchema.NoContent,
+      error: [IntegrationNotFoundError, IntegrationAttemptNotFoundError],
     })
       .annotateMerge(locationQueryOpenApi)
       .annotateMerge(
