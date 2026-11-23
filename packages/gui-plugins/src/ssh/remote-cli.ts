@@ -29,9 +29,13 @@ if [ -z "$cli" ] && [ -x "$HOME/.opencode/bin/opencode" ]; then cli="$HOME/.open
 ${
   options.cache
     ? `if [ -z "$cli" ]; then
-  for binary in "$HOME"/${quote(options.cache.directory)}/${quote(options.cache.prefix)}*/opencode; do
-    if [ -x "$binary" ]; then cli="$binary"; fi
-  done
+  cached=$(for binary in "$HOME"/${quote(options.cache.directory)}/${quote(options.cache.prefix)}*/opencode; do
+    if [ -x "$binary" ]; then printf '%s\\n' "$binary"; fi
+  done)
+  if [ -n "$cached" ]; then
+    cli=$(printf '%s\\n' "$cached" | LC_ALL=C sort -V 2>/dev/null | tail -n 1)
+    if [ -z "$cli" ]; then cli=$(printf '%s\\n' "$cached" | LC_ALL=C sort | tail -n 1); fi
+  fi
 fi
 `
     : ""
