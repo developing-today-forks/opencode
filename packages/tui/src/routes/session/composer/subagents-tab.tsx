@@ -11,6 +11,7 @@ import { useStorage } from "../../../context/storage"
 import { Locale } from "../../../util/locale"
 import { Keymap } from "../../../context/keymap"
 import { useComposerTab } from "./context"
+import { isJobNotFoundError } from "@opencode/client/promise"
 import { withTimestampedFallback } from "@opencode/util/session-title-fallback"
 import { ownedJobs, sessionFamily } from "../../../util/session"
 
@@ -198,7 +199,12 @@ export function SubagentsTab(props: { sessionID: string }) {
           const entry = selectedEntry()
           if (!entry) return
           if (entry.status === "running") void client.api.session.interrupt({ sessionID: entry.sessionID })
-          entry.jobs.forEach((id) => void client.api.experimental.job.cancel({ id }))
+          entry.jobs.forEach(
+            (id) =>
+              void client.api.experimental.job.cancel({ id }).catch((error: unknown) => {
+                if (!isJobNotFoundError(error)) throw error
+              }),
+          )
         },
       },
     ],

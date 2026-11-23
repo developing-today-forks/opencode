@@ -1,5 +1,6 @@
 import { createEffect, createMemo, createSignal, on, onCleanup, untrack } from "solid-js"
 import {
+  isJobNotFoundError,
   isPermissionNotFoundError,
   type FormInfo,
   type JobInfo,
@@ -301,7 +302,12 @@ export function createSessionRequestModel() {
   const subagents = createMemo(() => running.tasks().filter((task) => task.type === "subagent"))
   const scripts = createMemo(() => (primary() ? running.scripts() : []))
 
-  const cancelJob = (id: string) => serverSDK.api.experimental.job.cancel({ id })
+  const cancelJob = (id: string) =>
+    serverSDK.api.experimental.job.cancel({ id }).catch((error: unknown) => {
+      // The job is already gone (finished and consumed, or never existed): nothing to cancel.
+      if (isJobNotFoundError(error)) return
+      throw error
+    })
 
   const moveToBackground = async () => {
     if (!primary()) return

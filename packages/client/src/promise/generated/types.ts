@@ -678,6 +678,22 @@ export type LocationPublicInfo = {
 
 export type ModelRef = { id: string; providerID: ProviderID; variant?: string }
 
+export type SessionRouteUsage = {
+  lastServing: {
+    leaf: string
+    providerID: ProviderID
+    modelID: string
+    variant: string | null
+    routeID: string
+    outcome: string
+    attemptedLeaf: string
+    failedOver: boolean
+    failedOverTo: string | null
+    hedged: boolean
+    timeStarted: number
+  }
+}
+
 export type ProviderCache = { ttl?: ProviderCacheTTL; warming?: ProviderCacheWarming }
 
 export type ModelVariantSettings = { compaction?: ProviderCompaction; encoding?: ProviderEncoding } & {
@@ -3555,6 +3571,7 @@ export type SessionInfo = {
   model?: ModelRef
   cost: MoneyUSD
   costAuthoritative?: SessionAuthoritativeCost
+  route_usage?: SessionRouteUsage
   tokens: TokenUsageInfo
   outcome?: "succeeded" | "failed" | "interrupted"
   time: { created: number; updated: number; busy?: number; idle?: number; viewed?: number; archived?: number }
@@ -4264,6 +4281,10 @@ export type ArtifactNotFoundError = {
 export const isArtifactNotFoundError = (value: unknown): value is ArtifactNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ArtifactNotFoundError"
 
+export type JobNotFoundError = { readonly _tag: "JobNotFoundError"; readonly jobID: string; readonly message: string }
+export const isJobNotFoundError = (value: unknown): value is JobNotFoundError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "JobNotFoundError"
+
 export type MachineNotFoundError = {
   readonly _tag: "MachineNotFoundError"
   readonly machine: string
@@ -4914,6 +4935,21 @@ export type ExperimentalSessionImportInput = {
         readonly output: number
         readonly reasoning: number
         readonly cache: { readonly read: number; readonly write: number }
+      }
+    }
+    readonly route_usage?: {
+      readonly lastServing: {
+        readonly leaf: string
+        readonly providerID: string
+        readonly modelID: string
+        readonly variant: string | null
+        readonly routeID: string
+        readonly outcome: string
+        readonly attemptedLeaf: string
+        readonly failedOver: boolean
+        readonly failedOverTo: string | null
+        readonly hedged: boolean
+        readonly timeStarted: number
       }
     }
     readonly tokens: {
