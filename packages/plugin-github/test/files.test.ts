@@ -167,8 +167,18 @@ describe("GitHubFiles canonical classification", () => {
       fs.symlinkSync(real, path.join(app, "alias.txt"))
       const { files, asserted } = makeAt(app, project)
       const target = yield* files.authorizeRead("alias.txt", context)
-      expect(target).toEqual({ absolute: path.join(app, "alias.txt"), resource: "alias.txt" })
+      expect(target).toEqual({ absolute: real, resource: "alias.txt" })
       expect(asserted).toEqual([{ action: "read", resources: ["alias.txt"] }])
+    }).pipe(Effect.ensuring(cleanup(base)))
+  })
+
+  it.live("authorizeRead returns a not-yet-existing target unchanged", () => {
+    const { base, app, project } = fixture()
+    return Effect.gen(function* () {
+      const { files, asserted } = makeAt(app, project)
+      const target = yield* files.authorizeRead("new.txt", context)
+      expect(target).toEqual({ absolute: path.join(app, "new.txt"), resource: "new.txt" })
+      expect(asserted).toEqual([{ action: "read", resources: ["new.txt"] }])
     }).pipe(Effect.ensuring(cleanup(base)))
   })
 
