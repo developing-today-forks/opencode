@@ -25,11 +25,17 @@ const WatchPayload = Schema.Struct({
   path: Schema.String.annotate({ description: "A file path relative to the requested location." }),
 })
 
+// The page ceiling for file finds, mirroring the session-list cap of 200:
+// one request must not be able to materialise the whole file index.
+const FindLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(200))
+
 const FindQuery = Schema.Struct({
   ...LocationQuery.fields,
   query: FileSystem.FindInput.fields.query,
   type: FileSystem.FindInput.fields.type,
-  limit: Schema.NumberFromString.pipe(Schema.decodeTo(PositiveInt), Schema.optional),
+  limit: Schema.NumberFromString.pipe(Schema.decodeTo(FindLimit), Schema.optional).annotate({
+    description: "Maximum number of entries to return, at most 200. Defaults to 50.",
+  }),
 })
 
 export const FileSystemGroup = HttpApiGroup.make("server.fs")

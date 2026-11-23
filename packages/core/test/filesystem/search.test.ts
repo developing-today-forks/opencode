@@ -382,4 +382,78 @@ describe("FileSystemSearch", () => {
       }).pipe(Effect.provide(layer))
     }),
   )
+  it.live("caps a find page at 200 entries instead of returning the whole index", () =>
+    Effect.gen(function* () {
+      const directory = AbsolutePath.make(path.join(os.tmpdir(), "opencode-search-cap"))
+      const layer = AppNodeBuilder.build(FileSystemSearch.node, [
+        Location.node.replace(Layer.succeed(Location.Service, Location.Service.of(location({ directory })))),
+        Ripgrep.node.replace(
+          Layer.succeed(
+            Ripgrep.Service,
+            Ripgrep.Service.of({
+              find: (input) =>
+                Effect.gen(function* () {
+                  for (let index = 0; index < 250; index++) {
+                    const entry = FileSystem.Entry.make({
+                      path: RelativePath.make(`file-${String(index).padStart(3, "0")}.ts`),
+                      type: "file",
+                    })
+                    if (input.onEntry) yield* input.onEntry(entry)
+                  }
+                  return []
+                }),
+              glob: () => Effect.succeed([]),
+              grep: () => Effect.succeed([]),
+            }),
+          ),
+        ),
+      ])
+
+      yield* Effect.gen(function* () {
+        const search = yield* FileSystemSearch.Service
+        // An oversized limit used to pass straight through to fuzzysort.
+        expect(yield* search.find({ query: "file", type: "file", limit: 1_000_000 })).toHaveLength(200)
+        expect(yield* search.find({ query: "file", type: "file", limit: 5 })).toHaveLength(5)
+        // An omitted limit keeps the default page of 50.
+        expect(yield* search.find({ query: "file", type: "file" })).toHaveLength(50)
+      }).pipe(Effect.provide(layer))
+    }),
+  )
+
+  it.live("caps the fff page size at 200", () =>
+    Effect.gen(function* () {
+      const files = Array.from({ length: 250 }, (_, index) => `file-${String(index).padStart(3, "0")}.ts`)
+      const pageSizes: number[] = []
+      let destroyed = 0
+      const create: Parameters<typeof FileSystemSearch.makeFffLayer>[0] = () => ({
+        ok: true,
+        value: {
+          destroy: () => void destroyed++,
+          isScanning: () => false,
+          fileSearch: (_query: string, options: { pageSize: number }) => {
+            pageSizes.push(options.pageSize)
+            const items = files.slice(0, options.pageSize).map((relativePath) => ({ relativePath }))
+            return { ok: true as const, value: { items, scores: items.map(() => ({ total: 1 })) } }
+          },
+          directorySearch: () => ({ ok: true, value: { items: [], scores: [] } }),
+          mixedSearch: () => ({ ok: true, value: { items: [], scores: [] } }),
+        },
+      })
+      const layer = FileSystemSearch.makeFffLayer(create).pipe(
+        Layer.provide(
+          Layer.succeed(
+            Location.Service,
+            Location.Service.of(location({ directory: AbsolutePath.make(path.join(os.tmpdir(), "opencode-fff-cap")) })),
+          ),
+        ),
+      )
+      const { scope, search } = yield* buildSearch(layer)
+      // The fff picker receives the clamped page size, not the raw request.
+      expect(yield* search.find({ query: "file", type: "file", limit: 1_000_000 })).toHaveLength(200)
+      expect(yield* search.find({ query: "file", type: "file" })).toHaveLength(50)
+      expect(pageSizes).toEqual([200, 50])
+      yield* Scope.close(scope, Exit.void)
+      expect(destroyed).toBe(1)
+    }),
+  )
 })
