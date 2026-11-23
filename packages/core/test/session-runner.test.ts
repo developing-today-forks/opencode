@@ -5753,6 +5753,122 @@ describe("SessionRunnerLLM", () => {
     ])
   })
 
+  scenario("settles a file mutation left running by a prior process as possibly already applied", function* (s) {
+    yield* s.admit("Recover interrupted write")
+    yield* SessionInbox.promote(s.db, s.bus, sessionID, "steer")
+    const assistantMessageID = SessionMessage.ID.create()
+    yield* s.bus.publish(SessionEvent.Step.Started, {
+      sessionID,
+      assistantMessageID,
+      agent: Agent.ID.make("build"),
+      model: { id: ID.make("fake-model"), providerID: Provider.ID.make("fake") },
+      started: 0,
+    })
+    yield* s.bus.publish(SessionEvent.Tool.Input.Started, {
+      sessionID,
+      assistantMessageID,
+      id: "call-interrupted-write",
+      name: "write",
+    })
+    yield* s.bus.publish(SessionEvent.Tool.Input.Ended, {
+      sessionID,
+      assistantMessageID,
+      id: "call-interrupted-write",
+      text: '{"filePath":"notes.txt","content":"hello"}',
+    })
+    yield* s.bus.publish(SessionEvent.Tool.Called, {
+      sessionID,
+      assistantMessageID,
+      id: "call-interrupted-write",
+      input: { filePath: "notes.txt", content: "hello" },
+      executed: false,
+    })
+    s.requests.length = 0
+    yield* s.llm.push([])
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Recover interrupted write"),
+      Expected.assistant({}, [
+        Expected.failedTool(
+          { id: "call-interrupted-write" },
+          {
+            error: {
+              type: "tool.interrupted",
+              message:
+                "File mutation interrupted, the server was restarted: write (notes.txt). The change may already have been applied to the file; check its current contents before repeating this call.",
+            },
+          },
+        ),
+      ]),
+    ])
+  })
+
+  scenario("settles an interrupted patch as possibly applied and an unstarted write as a plain abort", function* (s) {
+    yield* s.admit("Recover interrupted patch")
+    yield* SessionInbox.promote(s.db, s.bus, sessionID, "steer")
+    const assistantMessageID = SessionMessage.ID.create()
+    yield* s.bus.publish(SessionEvent.Step.Started, {
+      sessionID,
+      assistantMessageID,
+      agent: Agent.ID.make("build"),
+      model: { id: ID.make("fake-model"), providerID: Provider.ID.make("fake") },
+      started: 0,
+    })
+    yield* s.bus.publish(SessionEvent.Tool.Input.Started, {
+      sessionID,
+      assistantMessageID,
+      id: "call-interrupted-patch",
+      name: "patch",
+    })
+    yield* s.bus.publish(SessionEvent.Tool.Input.Ended, {
+      sessionID,
+      assistantMessageID,
+      id: "call-interrupted-patch",
+      text: '{"patchText":"*** Begin Patch"}',
+    })
+    yield* s.bus.publish(SessionEvent.Tool.Called, {
+      sessionID,
+      assistantMessageID,
+      id: "call-interrupted-patch",
+      input: { patchText: "*** Begin Patch" },
+      executed: false,
+    })
+    // Input started but the call was never published, so this write never ran
+    // and cannot have changed the file: it keeps the generic outcome.
+    yield* s.bus.publish(SessionEvent.Tool.Input.Started, {
+      sessionID,
+      assistantMessageID,
+      id: "call-unstarted-write",
+      name: "write",
+    })
+    s.requests.length = 0
+    yield* s.llm.push([])
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(1)
+    expect(yield* s.context).toMatchObject([
+      Expected.user("Recover interrupted patch"),
+      Expected.assistant({}, [
+        Expected.failedTool(
+          { id: "call-interrupted-patch" },
+          {
+            error: {
+              type: "tool.interrupted",
+              message:
+                "File mutation interrupted, the server was restarted: patch. The changes may already have been applied; check the current state of the affected files before repeating this call.",
+            },
+          },
+        ),
+        Expected.failedTool(
+          { id: "call-unstarted-write" },
+          { error: { type: "aborted", message: "Tool execution interrupted, the server was restarted: write" } },
+        ),
+      ]),
+    ])
+  })
+
   scenario("fails a pending question left by a prior process as interrupted by the restart", function* (s) {
     yield* s.admit("Ask before restart")
     yield* SessionInbox.promote(s.db, s.bus, sessionID, "steer")
