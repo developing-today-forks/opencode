@@ -53,7 +53,9 @@ const offline = { url: "http://127.0.0.1:0" }
 const MigrationStatus = lazy(() => import("./migration-status").then((module) => ({ default: module.MigrationStatus })))
 
 export function DesktopApp(props: { api: ElectronAPI; version: string }) {
-  const windowState = { id: props.api.getWindowID(), version: props.version }
+  // A window started without a bootstrap argument has no persisted identity; it runs under an
+  // empty id (no restored route, no window snapshot) and asks over IPC for the rest.
+  const windowState = { id: props.api.getWindowID() ?? "", version: props.version }
   const initialUrl = getLastActiveUrl(windowState.id)
   const url = new URL(initialUrl, "http://localhost")
   const platform = createDesktopPlatform(props.api, windowState)
@@ -65,7 +67,7 @@ export function DesktopApp(props: { api: ElectronAPI; version: string }) {
     route: currentRoute(url.pathname, url.search),
     // The window was created with the answers the shell gate needs; only a fresh install, which has no
     // onboarding decision yet, asks over IPC and waits for the port.
-    firstLaunch: props.api.getWindowBootstrap().firstLaunchPending,
+    firstLaunch: props.api.getWindowBootstrap()?.firstLaunchPending,
   })
 
   const router = (routerProps: BaseRouterProps) => <DesktopMemoryRouter {...routerProps} windowID={windowState.id} />

@@ -38,8 +38,8 @@ export type ElectronAPI = {
   draftDelete(key: string): Promise<void>
   draftBlobPut(data: ArrayBuffer): Promise<string>
   draftBlobGet(id: string): Promise<ArrayBuffer | null>
-  getWindowID(): string
-  getWindowBootstrap(): WindowBootstrap
+  getWindowID(): string | undefined
+  getWindowBootstrap(): WindowBootstrap | undefined
   themeReady(): Promise<void>
   onMenuCommand(cb: (id: string, accelerator: boolean) => void): () => void
   onDeepLink(cb: (delivery: { attempt: number; urls: string[] }) => void): () => void
