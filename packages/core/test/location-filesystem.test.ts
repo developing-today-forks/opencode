@@ -240,6 +240,44 @@ describe("FileSystem", () => {
       }),
     ),
   )
+
+  it.live("refuses to stream a file swapped for an outside symlink after read returns", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        const current = path.join(directory, "current")
+        yield* Effect.promise(() => fs.mkdir(current))
+        yield* Effect.promise(() => fs.writeFile(path.join(current, "doc.txt"), "inside"))
+        yield* Effect.promise(() => fs.writeFile(path.join(directory, "secret.txt"), "outside-secret"))
+        yield* Effect.gen(function* () {
+          const filesystem = yield* FileSystem.Service
+          const file = yield* filesystem.read({ path: RelativePath.make("doc.txt") })
+          // The swap sits squarely in the window the lazy stream used to
+          // leave open: read() has returned, the stream has not run yet.
+          yield* Effect.promise(() => fs.rm(path.join(current, "doc.txt")))
+          yield* Effect.promise(() => fs.symlink(path.join(directory, "secret.txt"), path.join(current, "doc.txt")))
+          const result = yield* Stream.mkUint8Array(file.stream()).pipe(Effect.exit)
+          expect(Exit.isFailure(result)).toBe(true)
+        }).pipe(provide(current))
+      }),
+    ),
+  )
+
+  it.live("refuses to stream a file replaced after read returns", () =>
+    withTmp((directory) =>
+      Effect.gen(function* () {
+        yield* Effect.promise(() => fs.writeFile(path.join(directory, "doc.txt"), "original"))
+        const filesystem = yield* FileSystem.Service
+        const file = yield* filesystem.read({ path: RelativePath.make("doc.txt") })
+        // Rename-over is the atomic replacement shape editors use; the
+        // staging file is created while the original still exists, so the
+        // name afterwards points at a different object than read() checked.
+        yield* Effect.promise(() => fs.writeFile(path.join(directory, "staging.txt"), "replaced"))
+        yield* Effect.promise(() => fs.rename(path.join(directory, "staging.txt"), path.join(directory, "doc.txt")))
+        const result = yield* Stream.mkUint8Array(file.stream()).pipe(Effect.exit)
+        expect(Exit.isFailure(result)).toBe(true)
+      }).pipe(provide(directory)),
+    ),
+  )
 })
 
 describe("FileSystem.write size cap (#2502)", () => {

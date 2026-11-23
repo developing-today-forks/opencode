@@ -2,7 +2,7 @@ export * as FileSystem from "./filesystem.js"
 
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import path from "path"
-import { Context, Effect, Layer, type Option, type PlatformError, Schema, type Stream } from "effect"
+import { Context, Effect, Layer, Option, PlatformError, Schema, Stream } from "effect"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Location } from "./location.js"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema.js"
@@ -175,7 +175,56 @@ const baseLayer = Layer.effect(
           mime: FSUtil.mimeType(target.real),
           size: Number(info.size),
           mtime: info.mtime,
-          stream: (options) => fs.stream(target.real, options),
+          // The stream is lazy: it runs at response time, after this check.
+          // Opening by name then would serve whatever the path names at that
+          // moment, so a symlink swapped in after read() returns escapes the
+          // confinement resolve() just enforced. Bind the stream to the
+          // checked object instead: re-canonicalize when the stream opens,
+          // open the file, and compare the handle's identity with the object
+          // checked above, refusing before any bytes are served. The same
+          // binding BrowserFiles.read applies to uploads (#2647). fs.watch's
+          // confinement check calls read() and discards the result, so it
+          // shares the check and never opens a handle.
+          stream: (options) =>
+            Stream.unwrap(
+              Effect.gen(function* () {
+                const refuse = (description: string) =>
+                  Effect.fail(
+                    PlatformError.systemError({
+                      _tag: "PermissionDenied",
+                      module: "FileSystem",
+                      method: "stream",
+                      pathOrDescriptor: target.real,
+                      description,
+                    }),
+                  )
+                const real = yield* fs.realPath(target.absolute)
+                if (real !== target.real || !FSUtil.contains(root, real))
+                  return yield* refuse("The path resolves somewhere other than the file read checked.")
+                const handle = yield* fs.open(real)
+                const opened = yield* handle.stat
+                if (
+                  opened.type !== "File" ||
+                  opened.dev !== info.dev ||
+                  Option.getOrNull(opened.ino) !== Option.getOrNull(info.ino)
+                )
+                  return yield* refuse("The file was replaced after read checked it.")
+                const offset = options?.offset ?? 0
+                if (offset > 0) yield* handle.seek(BigInt(offset), "start")
+                return Stream.unfold(options?.bytesToRead ?? Number.POSITIVE_INFINITY, (remaining) =>
+                  remaining <= 0
+                    ? Effect.succeed(undefined)
+                    : handle.readAlloc(Math.min(64 * 1024, remaining)).pipe(
+                        Effect.map(
+                          Option.match({
+                            onNone: () => undefined,
+                            onSome: (bytes) => [bytes, remaining - bytes.length] as const,
+                          }),
+                        ),
+                      ),
+                )
+              }),
+            ),
         }
       }),
       list: Effect.fn("FileSystem.list")(function* (input = {}) {
