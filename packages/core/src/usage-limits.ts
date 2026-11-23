@@ -38,7 +38,7 @@ export const layer = Layer.effect(
       const credential = yield* integrations.connection
         .resolve(connection)
         .pipe(Effect.mapError((error) => new UnavailableError({ message: error.message })))
-      if (!credential || credential.type === "external") return undefined
+      if (!credential || credential.type === "external" || credential.type === "session-cookie") return undefined
       const workspaceID = credential.metadata?.orgID
       if (typeof workspaceID !== "string") return undefined
       const server = ConsoleAccess.server(credential)

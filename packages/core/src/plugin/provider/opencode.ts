@@ -370,7 +370,8 @@ export const OpencodePlugin = define<
     const syncWatches = Effect.fnUntraced(
       function* (connection: ActiveConnection) {
         const credential = connection && (yield* ctx.integration.connection.resolve(connection))
-        if (!connection || !credential || credential.type === "external") return yield* watches.sync(undefined)
+        if (!connection || !credential || credential.type === "external" || credential.type === "session-cookie")
+          return yield* watches.sync(undefined)
         yield* watches.sync({
           key: workspaceKey(connection, credential),
           server: yield* normalizeServer(ConsoleAccess.server(credential)),
@@ -378,7 +379,7 @@ export const OpencodePlugin = define<
             .resolve(connection)
             .pipe(
               Effect.flatMap((current) =>
-                current && current.type !== "external"
+                current && current.type !== "external" && current.type !== "session-cookie"
                   ? Effect.succeed(ConsoleAccess.headers(current))
                   : Effect.fail(new Error("OpenCode Console is not connected")),
               ),
@@ -415,7 +416,7 @@ export const OpencodePlugin = define<
       ) {
         if (listed.length === 0 || !connection) return []
         const credential = yield* ctx.integration.connection.resolve(connection)
-        if (!credential || credential.type === "external") return []
+        if (!credential || credential.type === "external" || credential.type === "session-cookie") return []
         const server = yield* normalizeServer(ConsoleAccess.server(credential))
         const workspace = workspaceKey(connection, credential)
         const loaded = yield* Effect.forEach(
@@ -625,7 +626,7 @@ export const OpencodePlugin = define<
           ctx.integration.connection.status({ integrationID: ids.integrationID, connection, status })
         return yield* ctx.integration.connection.resolve(connection).pipe(
           Effect.flatMap((credential) =>
-            !credential || credential.type === "external"
+            !credential || credential.type === "external" || credential.type === "session-cookie"
               ? Effect.succeed<InstanceSnapshot>({ remote: undefined, connection, organization: undefined })
               : fetchConfig(http, credential).pipe(
                   Effect.map((remote): InstanceSnapshot => ({
