@@ -1,4 +1,5 @@
 import electron, { type BrowserWindow } from "electron"
+import log from "electron-log/main.js"
 import { schemes } from "@opencode/gui-plugins/schemes"
 
 export const rendererProtocol = "oc"
@@ -8,13 +9,16 @@ export const rendererHost = "renderer"
 export function loadWindow(win: BrowserWindow, html: string) {
   const devUrl = process.env.ELECTRON_RENDERER_URL
 
-  if (devUrl) {
-    void win.loadURL(new URL(html, devUrl).toString())
+  const url = devUrl ? new URL(html, devUrl).toString() : `${rendererProtocol}://${rendererHost}/${html}`
 
-    return
-  }
-
-  void win.loadURL(`${rendererProtocol}://${rendererHost}/${html}`)
+  // The desktop main process has no unhandledRejection handler, so a rejected loadURL promise
+  // would terminate it under the runtime default. Handle the rejection here, at the one boundary
+  // every window passes through: windows with recovery wired still get their did-fail-load
+  // recovery UX, and for the early window — loaded before any recovery wiring exists — this log
+  // line is the only record of the failure.
+  win.loadURL(url).catch((error) => {
+    log.error("renderer load failed", { url, error })
+  })
 }
 
 export function isRendererUrl(value?: string, html = false) {
