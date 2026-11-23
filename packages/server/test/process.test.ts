@@ -10,6 +10,10 @@ import { OpenCode } from "../../client/src/promise/index"
 import { trackedPtySocketCount } from "../src/handlers/pty-socket"
 import { ServerProcess } from "../src/process"
 
+// The PTY drain case below drives a real /bin/sh through the terminal handler, which no Windows
+// runner can spawn; pty-transport.test.ts skips its live PTY case on win32 for the same reason.
+const livePty = process.platform === "win32" ? it.live.skip : it.live
+
 it.live("authenticates API requests behind the frontend transform while allowing browser preflight", () =>
   Effect.gen(function* () {
     const fallback = "fallback".repeat(256)
@@ -443,7 +447,7 @@ const startingServer = Effect.fnUntraced(function* (
   return { base: new URL(yield* Deferred.await(listening)), starting }
 })
 
-it.live("closes an open PTY websocket deliberately during shutdown instead of waiting out the grace", () =>
+livePty("closes an open PTY websocket deliberately during shutdown instead of waiting out the grace", () =>
   Effect.gen(function* () {
     const directory = yield* Effect.acquireRelease(
       Effect.promise(() => fs.mkdtemp(path.join(os.tmpdir(), "opencode-process-pty-drain-"))),
