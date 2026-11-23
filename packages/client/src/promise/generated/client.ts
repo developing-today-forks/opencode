@@ -1909,7 +1909,7 @@ export function make(options: ClientOptions) {
               method: "POST",
               path: `/api/experimental/job/${encodeURIComponent(input.id)}/cancel`,
               successStatus: 204,
-              declaredStatuses: [400, 401],
+              declaredStatuses: [400, 401, 404],
               empty: true,
             },
             requestOptions,

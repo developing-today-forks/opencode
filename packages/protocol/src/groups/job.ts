@@ -2,7 +2,7 @@ import { Job } from "@opencode/schema/job"
 import { Session } from "@opencode/schema/session"
 import { Schema, SchemaGetter } from "effect"
 import { HttpApiEndpoint, HttpApiSchema, OpenApi } from "effect/http-api"
-import { InvalidRequestError, SessionNotFoundError } from "../errors.js"
+import { InvalidRequestError, JobNotFoundError, SessionNotFoundError } from "../errors.js"
 
 const BooleanFromString = Schema.Literals(["true", "false"]).pipe(
   Schema.decodeTo(Schema.Boolean, {
@@ -45,12 +45,13 @@ export const JobEndpoints = [
   HttpApiEndpoint.post("job.cancel", "/api/experimental/job/:id/cancel", {
     params: { id: Schema.String },
     success: HttpApiSchema.NoContent,
+    error: [JobNotFoundError],
   }).annotateMerge(
     OpenApi.annotations({
       identifier: "experimental.job.cancel",
       summary: "Cancel background job",
       description:
-        "Cancel a running background job, interrupting the work it started. Cancelling a job that already finished does nothing. Experimental: may change without compatibility guarantees.",
+        "Cancel a running background job, interrupting the work it started. Cancelling a job that already finished but is still tracked does nothing. An ID matching no live-tracked job — one that never existed, or a finished job that was already consumed — answers 404. Experimental: may change without compatibility guarantees.",
       transform: (operation) => ({ ...operation, tags: ["experimental"] }),
     }),
   ),

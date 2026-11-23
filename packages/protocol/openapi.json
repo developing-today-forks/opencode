@@ -2500,8 +2500,22 @@
         ],
         "security": [],
         "responses": {
-          "204": {
-            "description": "<No Content>"
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Session.Inbox.Command"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
           },
           "400": {
             "description": "InvalidRequestError",
@@ -2543,18 +2557,18 @@
               }
             }
           },
-          "500": {
-            "description": "CommandExecutionError",
+          "409": {
+            "description": "ConflictError",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/CommandExecutionErrorEncoded"
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
                 }
               }
             }
           }
         },
-        "description": "Execute a slash command callback immediately.",
+        "description": "Durably admit one slash command and return on admission: an unknown command still fails the request, a known one executes in admission order, and its start, completion and failure arrive as session events and inbox records.",
         "summary": "Run command",
         "requestBody": {
           "content": {
@@ -2562,6 +2576,16 @@
               "schema": {
                 "type": "object",
                 "properties": {
+                  "id": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.Message.ID"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
                   "name": {
                     "type": "string"
                   },
@@ -2851,8 +2875,22 @@
         ],
         "security": [],
         "responses": {
-          "204": {
-            "description": "<No Content>"
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "$ref": "#/components/schemas/Session.Inbox.Shell"
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
           },
           "400": {
             "description": "InvalidRequestError",
@@ -2890,9 +2928,19 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "ConflictError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
+                }
+              }
+            }
           }
         },
-        "description": "Execute one shell command in the session's working directory. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
+        "description": "Durably admit one shell command in the session's working directory and return on admission. Emits a shell.started event before execution and a shell.ended event with the merged output after.",
         "summary": "Run shell command",
         "requestBody": {
           "content": {
@@ -2912,6 +2960,16 @@
                   },
                   "command": {
                     "type": "string"
+                  },
+                  "delivery": {
+                    "anyOf": [
+                      {
+                        "$ref": "#/components/schemas/Session.Inbox.Delivery"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
                   }
                 },
                 "required": ["command"],
@@ -15265,9 +15323,19 @@
                 }
               }
             }
+          },
+          "404": {
+            "description": "JobNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/JobNotFoundErrorEncoded"
+                }
+              }
+            }
           }
         },
-        "description": "Cancel a running background job, interrupting the work it started. Cancelling a job that already finished does nothing. Experimental: may change without compatibility guarantees.",
+        "description": "Cancel a running background job, interrupting the work it started. Cancelling a job that already finished but is still tracked does nothing. An ID matching no live-tracked job — one that never existed, or a finished job that was already consumed — answers 404. Experimental: may change without compatibility guarantees.",
         "summary": "Cancel background job"
       }
     },
@@ -19781,23 +19849,6 @@
           }
         },
         "required": ["name"],
-        "additionalProperties": false
-      },
-      "CommandExecutionErrorEncoded": {
-        "type": "object",
-        "properties": {
-          "_tag": {
-            "type": "string",
-            "enum": ["CommandExecutionError"]
-          },
-          "command": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          }
-        },
-        "required": ["_tag", "command", "message"],
         "additionalProperties": false
       },
       "CommandNotFoundErrorEncoded": {
@@ -25708,6 +25759,23 @@
         "required": ["kind", "id", "sessionID", "status", "time", "path"],
         "additionalProperties": false
       },
+      "JobNotFoundErrorEncoded": {
+        "type": "object",
+        "properties": {
+          "_tag": {
+            "type": "string",
+            "enum": ["JobNotFoundError"]
+          },
+          "jobID": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          }
+        },
+        "required": ["_tag", "jobID", "message"],
+        "additionalProperties": false
+      },
       "Location.PublicInfo": {
         "type": "object",
         "properties": {
@@ -30841,6 +30909,70 @@
         "type": "string",
         "pattern": "^ses"
       },
+      "Session.Inbox.Command": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Session.Message.ID"
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "number"
+              }
+            },
+            "required": ["created"],
+            "additionalProperties": false
+          },
+          "type": {
+            "type": "string",
+            "enum": ["command"]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/Session.Inbox.CommandPayload"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/Session.Inbox.Delivery"
+          }
+        },
+        "required": ["id", "sessionID", "time", "type", "payload", "delivery"],
+        "additionalProperties": false
+      },
+      "Session.Inbox.CommandPayload": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptInput.FileAttachment"
+            }
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Prompt.AgentAttachment"
+            }
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PromptInput.SkillAttachment"
+            }
+          }
+        },
+        "required": ["command", "text"],
+        "additionalProperties": false
+      },
       "Session.Inbox.Compaction": {
         "type": "object",
         "properties": {
@@ -30896,6 +31028,12 @@
           },
           {
             "$ref": "#/components/schemas/Session.Inbox.Move"
+          },
+          {
+            "$ref": "#/components/schemas/Session.Inbox.Shell"
+          },
+          {
+            "$ref": "#/components/schemas/Session.Inbox.Command"
           }
         ]
       },
@@ -30961,6 +31099,40 @@
               },
               "payload": {
                 "$ref": "#/components/schemas/Session.Inbox.MovePayload_1"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/Session.Inbox.Delivery"
+              }
+            },
+            "required": ["type", "payload", "delivery"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["shell"]
+              },
+              "payload": {
+                "$ref": "#/components/schemas/Session.Inbox.ShellPayload"
+              },
+              "delivery": {
+                "$ref": "#/components/schemas/Session.Inbox.Delivery"
+              }
+            },
+            "required": ["type", "payload", "delivery"],
+            "additionalProperties": false
+          },
+          {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string",
+                "enum": ["command"]
+              },
+              "payload": {
+                "$ref": "#/components/schemas/Session.Inbox.CommandPayload"
               },
               "delivery": {
                 "$ref": "#/components/schemas/Session.Inbox.Delivery"
@@ -31034,6 +31206,49 @@
           }
         },
         "required": ["location", "projectID"],
+        "additionalProperties": false
+      },
+      "Session.Inbox.Shell": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/Session.Message.ID"
+          },
+          "sessionID": {
+            "$ref": "#/components/schemas/Session.ID"
+          },
+          "time": {
+            "type": "object",
+            "properties": {
+              "created": {
+                "type": "number"
+              }
+            },
+            "required": ["created"],
+            "additionalProperties": false
+          },
+          "type": {
+            "type": "string",
+            "enum": ["shell"]
+          },
+          "payload": {
+            "$ref": "#/components/schemas/Session.Inbox.ShellPayload"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/Session.Inbox.Delivery"
+          }
+        },
+        "required": ["id", "sessionID", "time", "type", "payload", "delivery"],
+        "additionalProperties": false
+      },
+      "Session.Inbox.ShellPayload": {
+        "type": "object",
+        "properties": {
+          "command": {
+            "type": "string"
+          }
+        },
+        "required": ["command"],
         "additionalProperties": false
       },
       "Session.Inbox.Synthetic": {
