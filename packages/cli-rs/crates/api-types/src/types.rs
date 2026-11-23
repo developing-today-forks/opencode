@@ -40,15 +40,24 @@ pub struct PairingCode {
 /// Output of `Client::server_pair`.
 pub type ServerPairOutput = PairingCode;
 
-/// Input of `Client::server_connect`.
+/// Input of `Client::server_redeem`.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct ServerConnectInput {
+pub struct ServerRedeemInput {
     pub code: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct PairingSession {
     pub token: String,
+}
+
+/// Output of `Client::server_redeem`.
+pub type ServerRedeemOutput = PairingSession;
+
+/// Input of `Client::server_connect`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerConnectInput {
+    pub code: String,
 }
 
 /// Output of `Client::server_connect`.
@@ -319,6 +328,16 @@ pub struct AgentInfo {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    #[serde(rename = "excludedModels", default, skip_serializing_if = "Option::is_none")]
+    pub excluded_models: Option<Vec<String>>,
+    #[serde(rename = "subagentModels", default, skip_serializing_if = "Option::is_none")]
+    pub subagent_models: Option<Vec<String>>,
+    #[serde(rename = "subagentExcludedModels", default, skip_serializing_if = "Option::is_none")]
+    pub subagent_excluded_models: Option<Vec<String>>,
+    #[serde(rename = "maxDepth", default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<i64>,
     pub request: ProviderRequest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -666,6 +685,15 @@ pub struct TokenUsageInfo {
     pub cache: TokenUsageInfoCache,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionAuthoritativeCost {
+    #[serde(serialize_with = "crate::ser::number")]
+    pub cost: MoneyUSD,
+    #[serde(rename = "cacheSavings", serialize_with = "crate::ser::number")]
+    pub cache_savings: MoneyUSD,
+    pub tokens: TokenUsageInfo,
+}
+
 literal_enum! {
 SessionInfoOutcome {
     Succeeded => "succeeded",
@@ -692,6 +720,32 @@ pub struct SessionInfoTime {
 
 /// `Session.Metadata`
 pub type SessionMetadata = IndexMap<String, serde_json::Value>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionAgentOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    #[serde(rename = "excludedModels", default, skip_serializing_if = "Option::is_none")]
+    pub excluded_models: Option<Vec<String>>,
+    #[serde(rename = "subagentModels", default, skip_serializing_if = "Option::is_none")]
+    pub subagent_models: Option<Vec<String>>,
+    #[serde(rename = "subagentExcludedModels", default, skip_serializing_if = "Option::is_none")]
+    pub subagent_excluded_models: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub force: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionSubagentPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    #[serde(rename = "excludedModels", default, skip_serializing_if = "Option::is_none")]
+    pub excluded_models: Option<Vec<String>>,
+    #[serde(rename = "agentOverrides", default, skip_serializing_if = "Option::is_none")]
+    pub agent_overrides: Option<IndexMap<String, SessionAgentOverride>>,
+}
 
 string_type!(SnapshotID, "`Snapshot.ID`");
 
@@ -741,6 +795,8 @@ pub struct SessionInfo {
     pub model: Option<ModelRef>,
     #[serde(serialize_with = "crate::ser::number")]
     pub cost: MoneyUSD,
+    #[serde(rename = "costAuthoritative", default, skip_serializing_if = "Option::is_none")]
+    pub cost_authoritative: Option<SessionAuthoritativeCost>,
     pub tokens: TokenUsageInfo,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub outcome: Option<SessionInfoOutcome>,
@@ -751,8 +807,12 @@ pub struct SessionInfo {
     pub subpath: Option<RelativePath>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<SessionMetadata>,
+    #[serde(rename = "subagentPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub subagent_policy: Option<SessionSubagentPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRuleset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert: Option<SessionRevert>,
     pub location: LocationPublicRef,
@@ -778,6 +838,7 @@ pub type SessionListOutput = SessionsResponse;
 /// Input of `Client::session_create`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SessionCreateInput {
+    pub directory: Option<AbsolutePath>,
     pub id: Option<Option<SessionID>>,
     pub parent_id: Option<Option<SessionID>>,
     pub title: Option<Option<String>>,
@@ -786,6 +847,8 @@ pub struct SessionCreateInput {
     pub location: Option<Option<LocationPublicRef>>,
     pub metadata: Option<Option<SessionMetadata>>,
     pub permissions: Option<Option<PermissionRuleset>>,
+    pub subagent_policy: Option<Option<SessionSubagentPolicy>>,
+    pub detached: Option<Option<bool>>,
 }
 
 /// Output of `Client::session_create`.
@@ -838,14 +901,55 @@ pub struct SessionSwitchModelInput {
     pub model: ModelRef,
 }
 
+/// Input of `Client::session_route_target_list`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SessionRouteTargetListInput {
+    pub session_id: SessionID,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionRouteTarget {
+    #[serde(rename = "routeID")]
+    pub route_id: String,
+    pub target: ModelRef,
+}
+
+/// Output of `Client::session_route_target_list`.
+pub type SessionRouteTargetListOutput = Vec<SessionRouteTarget>;
+
+/// Input of `Client::session_route_target_set`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SessionRouteTargetSetInput {
+    pub session_id: SessionID,
+    pub route_id: String,
+    pub target: Option<ModelRef>,
+}
+
+/// Output of `Client::session_route_target_set`.
+pub type SessionRouteTargetSetOutput = Vec<SessionRouteTarget>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionUpdateInputExperimental {
+    #[serde(
+        rename = "archivedAt",
+        default,
+        serialize_with = "crate::ser::double_option_number",
+        deserialize_with = "crate::de::double_option",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub archived_at: Option<Option<f64>>,
+}
+
 /// Input of `Client::session_update`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct SessionUpdateInput {
     pub session_id: SessionID,
-    pub title: Option<String>,
-    pub metadata: Option<SessionMetadata>,
-    pub permissions: Option<PermissionRuleset>,
-    pub archived: Option<bool>,
+    pub title: Option<Option<String>>,
+    pub metadata: Option<Option<SessionMetadata>>,
+    pub permissions: Option<Option<PermissionRuleset>>,
+    pub subagent_policy: Option<Option<SessionSubagentPolicy>>,
+    pub archived: Option<Option<bool>>,
+    pub experimental: Option<Option<SessionUpdateInputExperimental>>,
 }
 
 literal_enum! {
@@ -1182,12 +1286,21 @@ pub struct SessionMessageLocationSwitched {
     pub previous: Option<Option<SessionMessageLocationSwitchedPrevious>>,
 }
 
+literal_enum! {
+SessionMessageUserDelivery {
+    Steer => "steer",
+    Queue => "queue",
+}
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SessionMessageUser {
     pub id: SessionMessageID,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<IndexMap<String, serde_json::Value>>,
     pub time: SessionInboxUserTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<SessionMessageUserDelivery>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<PromptFileAttachment>>,
@@ -1204,6 +1317,8 @@ pub struct SessionMessageSynthetic {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<IndexMap<String, serde_json::Value>>,
     pub time: SessionInboxUserTime,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<SessionMessageUserDelivery>,
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
@@ -1428,6 +1543,10 @@ pub struct SessionStructuredError {
     pub message: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response: Option<SessionStructuredErrorResponse>,
     #[serde(rename = "retryAfterMs", default, skip_serializing_if = "Option::is_none")]
@@ -2030,6 +2149,24 @@ impl SessionMessageInfo {
         }
     }
 
+    /// The `delivery` field, of the members that have it.
+    pub fn delivery(&self) -> Option<&SessionMessageUserDelivery> {
+        match self {
+            Self::User(value) => value.delivery.as_ref(),
+            Self::Synthetic(value) => value.delivery.as_ref(),
+            Self::AgentSwitched(_)
+            | Self::ModelSwitched(_)
+            | Self::LocationSwitched(_)
+            | Self::System(_)
+            | Self::Skill(_)
+            | Self::Shell(_)
+            | Self::Assistant(_)
+            | Self::Compaction(_)
+            | Self::Idle(_)
+            | Self::Unknown(_) => None,
+        }
+    }
+
     /// The `text` field, of the members that have it.
     pub fn text(&self) -> Option<&str> {
         match self {
@@ -2300,6 +2437,7 @@ pub struct SessionGenerateOutput {
 pub struct SessionInterruptInput {
     pub session_id: SessionID,
     pub resume: Option<bool>,
+    pub force: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -3171,8 +3309,12 @@ pub struct SessionCreatedData {
     pub model: Option<ModelRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<SessionMetadata>,
+    #[serde(rename = "subagentPolicy", default, skip_serializing_if = "Option::is_none")]
+    pub subagent_policy: Option<SessionSubagentPolicy>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<PermissionRuleset>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detached: Option<bool>,
     pub version: String,
 }
 
@@ -3325,6 +3467,28 @@ pub struct SessionPermissions {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionSubagentPolicyUpdatedData {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionID,
+    #[serde(rename = "subagentPolicy")]
+    pub subagent_policy: SessionSubagentPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionSubagentPolicyUpdated {
+    pub id: EventID,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub created: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<IndexMap<String, serde_json::Value>>,
+    pub r#type: tag::SessionSubagentPolicyUpdated,
+    pub durable: SessionCreatedDurable,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationRef>,
+    pub data: SessionSubagentPolicyUpdatedData,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SessionViewedData {
     #[serde(rename = "sessionID")]
     pub session_id: SessionID,
@@ -3350,6 +3514,8 @@ pub struct SessionViewed {
 pub struct SessionArchivedData {
     #[serde(rename = "sessionID")]
     pub session_id: SessionID,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub time: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -3367,6 +3533,12 @@ pub struct SessionArchived {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionUnarchivedData {
+    #[serde(rename = "sessionID")]
+    pub session_id: SessionID,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SessionUnarchived {
     pub id: EventID,
     #[serde(serialize_with = "crate::ser::number")]
@@ -3377,7 +3549,7 @@ pub struct SessionUnarchived {
     pub durable: SessionCreatedDurable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
-    pub data: SessionArchivedData,
+    pub data: SessionUnarchivedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -3399,7 +3571,7 @@ pub struct SessionDeleted {
     pub durable: SessionDeletedDurable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
-    pub data: SessionArchivedData,
+    pub data: SessionUnarchivedData,
 }
 
 string_type!(InstructionHash, "`Instruction.Hash`");
@@ -3625,7 +3797,7 @@ pub struct SessionExecutionStarted {
     pub durable: SessionCreatedDurable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
-    pub data: SessionArchivedData,
+    pub data: SessionUnarchivedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -3639,7 +3811,7 @@ pub struct SessionExecutionSucceeded {
     pub durable: SessionCreatedDurable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
-    pub data: SessionArchivedData,
+    pub data: SessionUnarchivedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -3914,6 +4086,8 @@ pub struct SessionStepEndedData {
     pub snapshot: Option<SnapshotID>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<Vec<RelativePath>>,
+    #[serde(rename = "planNotices", default, skip_serializing_if = "Option::is_none")]
+    pub plan_notices: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -4328,7 +4502,7 @@ pub struct SessionRevertCleared {
     pub durable: SessionCreatedDurable,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
-    pub data: SessionArchivedData,
+    pub data: SessionUnarchivedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -4477,6 +4651,7 @@ pub enum SessionEventDurable {
     SessionRenamed(SessionRenamed),
     SessionMetadataUpdated(SessionMetadataUpdated),
     SessionPermissions(SessionPermissions),
+    SessionSubagentPolicyUpdated(SessionSubagentPolicyUpdated),
     SessionViewed(SessionViewed),
     SessionArchived(SessionArchived),
     SessionUnarchived(SessionUnarchived),
@@ -4538,6 +4713,7 @@ impl SessionEventDurable {
             Some("session.renamed") => raw.variant().map(Self::SessionRenamed),
             Some("session.metadata.updated") => raw.variant().map(Self::SessionMetadataUpdated),
             Some("session.permissions") => raw.variant().map(Self::SessionPermissions),
+            Some("session.subagent-policy.updated") => raw.variant().map(Self::SessionSubagentPolicyUpdated),
             Some("session.viewed") => raw.variant().map(Self::SessionViewed),
             Some("session.archived") => raw.variant().map(Self::SessionArchived),
             Some("session.unarchived") => raw.variant().map(Self::SessionUnarchived),
@@ -4595,6 +4771,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.r#type.as_str(),
             Self::SessionMetadataUpdated(value) => value.r#type.as_str(),
             Self::SessionPermissions(value) => value.r#type.as_str(),
+            Self::SessionSubagentPolicyUpdated(value) => value.r#type.as_str(),
             Self::SessionViewed(value) => value.r#type.as_str(),
             Self::SessionArchived(value) => value.r#type.as_str(),
             Self::SessionUnarchived(value) => value.r#type.as_str(),
@@ -4650,6 +4827,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.id.as_str(),
             Self::SessionMetadataUpdated(value) => value.id.as_str(),
             Self::SessionPermissions(value) => value.id.as_str(),
+            Self::SessionSubagentPolicyUpdated(value) => value.id.as_str(),
             Self::SessionViewed(value) => value.id.as_str(),
             Self::SessionArchived(value) => value.id.as_str(),
             Self::SessionUnarchived(value) => value.id.as_str(),
@@ -4705,6 +4883,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.created,
             Self::SessionMetadataUpdated(value) => value.created,
             Self::SessionPermissions(value) => value.created,
+            Self::SessionSubagentPolicyUpdated(value) => value.created,
             Self::SessionViewed(value) => value.created,
             Self::SessionArchived(value) => value.created,
             Self::SessionUnarchived(value) => value.created,
@@ -4760,6 +4939,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.metadata.as_ref(),
             Self::SessionMetadataUpdated(value) => value.metadata.as_ref(),
             Self::SessionPermissions(value) => value.metadata.as_ref(),
+            Self::SessionSubagentPolicyUpdated(value) => value.metadata.as_ref(),
             Self::SessionViewed(value) => value.metadata.as_ref(),
             Self::SessionArchived(value) => value.metadata.as_ref(),
             Self::SessionUnarchived(value) => value.metadata.as_ref(),
@@ -4815,6 +4995,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.durable.aggregate_id.as_str(),
             Self::SessionMetadataUpdated(value) => value.durable.aggregate_id.as_str(),
             Self::SessionPermissions(value) => value.durable.aggregate_id.as_str(),
+            Self::SessionSubagentPolicyUpdated(value) => value.durable.aggregate_id.as_str(),
             Self::SessionViewed(value) => value.durable.aggregate_id.as_str(),
             Self::SessionArchived(value) => value.durable.aggregate_id.as_str(),
             Self::SessionUnarchived(value) => value.durable.aggregate_id.as_str(),
@@ -4872,6 +5053,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.durable.seq,
             Self::SessionMetadataUpdated(value) => value.durable.seq,
             Self::SessionPermissions(value) => value.durable.seq,
+            Self::SessionSubagentPolicyUpdated(value) => value.durable.seq,
             Self::SessionViewed(value) => value.durable.seq,
             Self::SessionArchived(value) => value.durable.seq,
             Self::SessionUnarchived(value) => value.durable.seq,
@@ -4929,6 +5111,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.durable.version,
             Self::SessionMetadataUpdated(value) => value.durable.version,
             Self::SessionPermissions(value) => value.durable.version,
+            Self::SessionSubagentPolicyUpdated(value) => value.durable.version,
             Self::SessionViewed(value) => value.durable.version,
             Self::SessionArchived(value) => value.durable.version,
             Self::SessionUnarchived(value) => value.durable.version,
@@ -4986,6 +5169,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.location.as_ref(),
             Self::SessionMetadataUpdated(value) => value.location.as_ref(),
             Self::SessionPermissions(value) => value.location.as_ref(),
+            Self::SessionSubagentPolicyUpdated(value) => value.location.as_ref(),
             Self::SessionViewed(value) => value.location.as_ref(),
             Self::SessionArchived(value) => value.location.as_ref(),
             Self::SessionUnarchived(value) => value.location.as_ref(),
@@ -5041,6 +5225,7 @@ impl SessionEventDurable {
             Self::SessionRenamed(value) => value.data.session_id.as_str(),
             Self::SessionMetadataUpdated(value) => value.data.session_id.as_str(),
             Self::SessionPermissions(value) => value.data.session_id.as_str(),
+            Self::SessionSubagentPolicyUpdated(value) => value.data.session_id.as_str(),
             Self::SessionViewed(value) => value.data.session_id.as_str(),
             Self::SessionArchived(value) => value.data.session_id.as_str(),
             Self::SessionUnarchived(value) => value.data.session_id.as_str(),
@@ -5124,6 +5309,7 @@ impl SessionLogItem {
             | Some("session.renamed")
             | Some("session.metadata.updated")
             | Some("session.permissions")
+            | Some("session.subagent-policy.updated")
             | Some("session.viewed")
             | Some("session.archived")
             | Some("session.unarchived")
@@ -5275,6 +5461,12 @@ pub struct ModelCompatibility {
     pub require_reasoning: Option<bool>,
     #[serde(rename = "maxTokensField", default, skip_serializing_if = "Option::is_none")]
     pub max_tokens_field: Option<ModelMaxTokensField>,
+    #[serde(rename = "supportsStore", default, skip_serializing_if = "Option::is_none")]
+    pub supports_store: Option<bool>,
+    #[serde(rename = "supportsStrictMode", default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_mode: Option<bool>,
+    #[serde(rename = "zaiToolStream", default, skip_serializing_if = "Option::is_none")]
+    pub zai_tool_stream: Option<bool>,
     #[serde(rename = "requireFinishReason", default, skip_serializing_if = "Option::is_none")]
     pub require_finish_reason: Option<bool>,
     #[serde(rename = "requireAssistantAfterTool", default, skip_serializing_if = "Option::is_none")]
@@ -5427,6 +5619,12 @@ pub struct ModelInfo {
     pub cost: Vec<ModelCost>,
     pub status: ModelInfoStatus,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(rename = "defaultVariant", default, skip_serializing_if = "Option::is_none")]
+    pub default_variant: Option<String>,
+    #[serde(rename = "lockVariant", default, skip_serializing_if = "Option::is_none")]
+    pub lock_variant: Option<bool>,
     pub limit: ModelInfoLimit,
 }
 
@@ -5977,6 +6175,82 @@ pub struct GenerateDecisionResult {
 /// Output of `Client::experimental_generate_decisions`.
 pub type ExperimentalGenerateDecisionsOutput = GenerateDecisionResult;
 
+/// Input of `Client::server_completions_chat`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsChatInput {
+    pub payload: IndexMap<String, serde_json::Value>,
+}
+
+/// Output of `Client::server_completions_chat`.
+pub type ServerCompletionsChatOutput = serde_json::Value;
+
+/// Input of `Client::server_completions_responses`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsResponsesInput {
+    pub payload: IndexMap<String, serde_json::Value>,
+}
+
+/// Output of `Client::server_completions_responses`.
+pub type ServerCompletionsResponsesOutput = serde_json::Value;
+
+/// Input of `Client::server_completions_embeddings`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsEmbeddingsInput {
+    pub payload: IndexMap<String, serde_json::Value>,
+}
+
+/// Output of `Client::server_completions_embeddings`.
+pub type ServerCompletionsEmbeddingsOutput = serde_json::Value;
+
+/// Input of `Client::server_completions_transcriptions`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsTranscriptionsInput {
+    pub payload: IndexMap<String, serde_json::Value>,
+}
+
+/// Output of `Client::server_completions_transcriptions`.
+pub type ServerCompletionsTranscriptionsOutput = serde_json::Value;
+
+/// Input of `Client::server_completions_messages`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsMessagesInput {
+    pub payload: IndexMap<String, serde_json::Value>,
+}
+
+/// Output of `Client::server_completions_messages`.
+pub type ServerCompletionsMessagesOutput = serde_json::Value;
+
+/// Input of `Client::server_completions_systemone`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsSystemoneInput {
+    pub payload: IndexMap<String, serde_json::Value>,
+}
+
+/// Output of `Client::server_completions_systemone`.
+pub type ServerCompletionsSystemoneOutput = serde_json::Value;
+
+/// Output of `Client::server_completions_models`.
+pub type ServerCompletionsModelsOutput = serde_json::Value;
+
+/// Input of `Client::server_completions_model`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsModelInput {
+    pub id: String,
+}
+
+/// Output of `Client::server_completions_model`.
+pub type ServerCompletionsModelOutput = serde_json::Value;
+
+/// Input of `Client::server_completions_model_ref`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ServerCompletionsModelRefInput {
+    pub provider: String,
+    pub model: String,
+}
+
+/// Output of `Client::server_completions_model_ref`.
+pub type ServerCompletionsModelRefOutput = serde_json::Value;
+
 literal_enum! {
 /// `VoiceTransportType`
 VoiceTransportType {
@@ -6126,7 +6400,7 @@ pub struct ProviderListInput {
 string_type!(IntegrationID, "`Integration.ID`");
 
 literal_enum! {
-ProviderInfoActivation {
+ProviderInfoWithModelsActivation {
     Auto => "auto",
     Enabled => "enabled",
     Disabled => "disabled",
@@ -6141,6 +6415,12 @@ pub struct ProviderCompatibility {
     pub require_reasoning: Option<bool>,
     #[serde(rename = "maxTokensField", default, skip_serializing_if = "Option::is_none")]
     pub max_tokens_field: Option<ModelMaxTokensField>,
+    #[serde(rename = "supportsStore", default, skip_serializing_if = "Option::is_none")]
+    pub supports_store: Option<bool>,
+    #[serde(rename = "supportsStrictMode", default, skip_serializing_if = "Option::is_none")]
+    pub supports_strict_mode: Option<bool>,
+    #[serde(rename = "zaiToolStream", default, skip_serializing_if = "Option::is_none")]
+    pub zai_tool_stream: Option<bool>,
     #[serde(rename = "requireFinishReason", default, skip_serializing_if = "Option::is_none")]
     pub require_finish_reason: Option<bool>,
     #[serde(rename = "requireAssistantAfterTool", default, skip_serializing_if = "Option::is_none")]
@@ -6156,14 +6436,16 @@ pub struct ProviderCompatibility {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ProviderInfo {
+pub struct ProviderInfoWithModels {
     pub id: ProviderID,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical: Option<ProviderID>,
     #[serde(rename = "integrationID", default, skip_serializing_if = "Option::is_none")]
     pub integration_id: Option<IntegrationID>,
+    #[serde(rename = "instanceOf", default, skip_serializing_if = "Option::is_none")]
+    pub instance_of: Option<ProviderID>,
     pub name: String,
-    pub activation: ProviderInfoActivation,
+    pub activation: ProviderInfoWithModelsActivation,
     pub package: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatibility: Option<ProviderCompatibility>,
@@ -6173,12 +6455,13 @@ pub struct ProviderInfo {
     pub headers: Option<IndexMap<String, String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body: Option<IndexMap<String, serde_json::Value>>,
+    pub models: Vec<ModelInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProviderListOutput {
     pub location: LocationPublicRef,
-    pub data: Vec<ProviderInfo>,
+    pub data: Vec<ProviderInfoWithModels>,
 }
 
 /// Input of `Client::provider_get`.
@@ -6191,7 +6474,7 @@ pub struct ProviderGetInput {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProviderGetOutput {
     pub location: LocationPublicRef,
-    pub data: ProviderInfo,
+    pub data: ProviderInfoWithModels,
 }
 
 /// Input of `Client::integration_list`.
@@ -6333,6 +6616,8 @@ pub struct ConnectionCredentialInfo {
     pub id: CredentialID,
     pub label: String,
     pub method: ConnectionCredentialInfoMethod,
+    #[serde(rename = "methodID", default, skip_serializing_if = "Option::is_none")]
+    pub method_id: Option<IntegrationMethodID>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ConnectionStatus>,
 }
@@ -7290,6 +7575,125 @@ pub struct CredentialRemoveInput {
     pub credential_id: CredentialID,
 }
 
+literal_enum! {
+/// `RouteOverride.Action`
+RouteOverrideAction {
+    Avoid => "avoid",
+    Prefer => "prefer",
+    AllowOverBudget => "allow-over-budget",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum RouteOverrideWindowDaysOfWeekItem {
+    Number(#[serde(serialize_with = "crate::ser::number")] f64),
+    String(String),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for RouteOverrideWindowDaysOfWeekItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl RouteOverrideWindowDaysOfWeekItem {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Number(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RouteOverrideWindow {
+    #[serde(rename = "daysOfWeek", default, skip_serializing_if = "Option::is_none")]
+    pub days_of_week: Option<Vec<RouteOverrideWindowDaysOfWeekItem>>,
+    #[serde(rename = "daysOfMonth", default, skip_serializing_if = "Option::is_none")]
+    pub days_of_month: Option<Vec<RouteOverrideWindowDaysOfWeekItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dates: Option<Vec<String>>,
+    #[serde(rename = "excludeDates", default, skip_serializing_if = "Option::is_none")]
+    pub exclude_dates: Option<Vec<String>>,
+    #[serde(rename = "excludeWindows", default, skip_serializing_if = "Option::is_none")]
+    pub exclude_windows: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<SessionMessageShellExit>,
+}
+
+literal_enum! {
+RouteOverrideInfoSource {
+    User => "user",
+    Interpreter => "interpreter",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteOverrideInfo {
+    pub id: String,
+    pub action: RouteOverrideAction,
+    pub providers: Vec<String>,
+    pub models: Vec<String>,
+    pub routes: Vec<String>,
+    pub fixed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub factor: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<RouteOverrideWindow>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<SessionMessageShellExit>,
+    pub text: String,
+    pub source: RouteOverrideInfoSource,
+    #[serde(rename = "createdAt")]
+    pub created_at: SessionMessageShellExit,
+}
+
+/// Output of `Client::route_override_list`.
+pub type RouteOverrideListOutput = Vec<RouteOverrideInfo>;
+
+/// Input of `Client::route_override_add`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RouteOverrideAddInput {
+    pub id: String,
+    pub action: RouteOverrideAction,
+    pub providers: Vec<String>,
+    pub models: Vec<String>,
+    pub routes: Vec<String>,
+    pub fixed: bool,
+    pub factor: Option<SessionMessageShellExit>,
+    pub weight: Option<SessionMessageShellExit>,
+    pub schedule: Option<RouteOverrideWindow>,
+    pub until: Option<SessionMessageShellExit>,
+    pub text: String,
+    pub source: RouteOverrideInfoSource,
+    pub created_at: SessionMessageShellExit,
+}
+
+/// Output of `Client::route_override_add`.
+pub type RouteOverrideAddOutput = Vec<RouteOverrideInfo>;
+
+/// Input of `Client::route_override_remove`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RouteOverrideRemoveInput {
+    pub override_id: String,
+}
+
 /// Input of `Client::project_list`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ProjectListInput {
@@ -7622,6 +8026,8 @@ pub struct SkillInfo {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub autoinvoke: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vars: Option<bool>,
     pub path: AbsolutePath,
     pub content: String,
 }
@@ -7654,6 +8060,7 @@ pub type RpcCallOutput = RpcOutput;
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EventSubscribeInput {
     pub types: Option<Vec<String>>,
+    pub last_event_id: Option<String>,
 }
 
 /// Any value but `null`.
@@ -7795,12 +8202,23 @@ pub struct AgentUpdated {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct SessionUsageUpdatedDataCostAuthoritative {
+    #[serde(serialize_with = "crate::ser::number")]
+    pub cost: MoneyUSD,
+    #[serde(rename = "cacheSavings", serialize_with = "crate::ser::number")]
+    pub cache_savings: MoneyUSD,
+    pub tokens: TokenUsageInfo,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct SessionUsageUpdatedData {
     #[serde(rename = "sessionID")]
     pub session_id: SessionID,
     #[serde(serialize_with = "crate::ser::number")]
     pub cost: MoneyUSD,
     pub tokens: TokenUsageInfo,
+    #[serde(rename = "costAuthoritative", default, skip_serializing_if = "Option::is_none")]
+    pub cost_authoritative: Option<SessionUsageUpdatedDataCostAuthoritative>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -7943,6 +8361,34 @@ pub struct FilesystemChanged {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
     pub data: FilesystemChangedData,
+}
+
+literal_enum! {
+FilesystemWatcherDegradedDataCause {
+    Timeout => "timeout",
+    InotifyLimit => "inotify-limit",
+    Unsupported => "unsupported",
+    Error => "error",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilesystemWatcherDegradedData {
+    pub directory: String,
+    pub cause: FilesystemWatcherDegradedDataCause,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FilesystemWatcherDegraded {
+    pub id: EventID,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub created: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<IndexMap<String, serde_json::Value>>,
+    pub r#type: tag::FilesystemWatcherDegraded,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationRef>,
+    pub data: FilesystemWatcherDegradedData,
 }
 
 /// Any value but `null`.
@@ -8117,8 +8563,10 @@ pub struct CommandUpdated {
     pub data: CommandUpdatedData,
 }
 
-/// Any value but `null`.
-pub type ConfigUpdatedData = crate::de::NotNull;
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigUpdatedData {
+    pub sections: Vec<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ConfigUpdated {
@@ -8706,6 +9154,33 @@ pub struct WebsearchUpdated {
     pub data: WebsearchUpdatedData,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingMessageCreatedData {
+    pub topic: String,
+    pub seq: i64,
+    pub kind: String,
+    pub r#type: String,
+    pub writer: String,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub time: f64,
+    pub preview: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inbox: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingMessageCreated {
+    pub id: EventID,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub created: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<IndexMap<String, serde_json::Value>>,
+    pub r#type: tag::MessagingMessageCreated,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationRef>,
+    pub data: MessagingMessageCreatedData,
+}
+
 /// Any value but `null`.
 pub type ArtifactUpdatedData = crate::de::NotNull;
 
@@ -8823,7 +9298,7 @@ pub struct SessionIdle {
     pub r#type: tag::SessionIdle,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
-    pub data: SessionArchivedData,
+    pub data: SessionUnarchivedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -8904,7 +9379,7 @@ pub struct TuiSessionSelect {
     pub r#type: tag::TuiSessionSelect,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<LocationRef>,
-    pub data: SessionArchivedData,
+    pub data: SessionUnarchivedData,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -9042,6 +9517,20 @@ pub struct V2EventServerConnected {
     pub data: V2EventServerConnectedData,
 }
 
+/// Any value but `null`.
+pub type V2EventServerResyncData = crate::de::NotNull;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct V2EventServerResync {
+    pub id: EventID,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<IndexMap<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<LocationPublicRef>,
+    pub r#type: tag::ServerResync,
+    pub data: V2EventServerResyncData,
+}
+
 /// `V2Event`, tagged by `type`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -9061,6 +9550,7 @@ pub enum V2Event {
     SessionRenamed(SessionRenamed),
     SessionMetadataUpdated(SessionMetadataUpdated),
     SessionPermissions(SessionPermissions),
+    SessionSubagentPolicyUpdated(SessionSubagentPolicyUpdated),
     SessionViewed(SessionViewed),
     SessionArchived(SessionArchived),
     SessionUnarchived(SessionUnarchived),
@@ -9107,6 +9597,7 @@ pub enum V2Event {
     SessionRevertCleared(SessionRevertCleared),
     SessionRevertCommitted(SessionRevertCommitted),
     FilesystemChanged(FilesystemChanged),
+    FilesystemWatcherDegraded(FilesystemWatcherDegraded),
     ReferenceUpdated(ReferenceUpdated),
     PermissionAsked(PermissionAsked),
     PermissionReplied(PermissionReplied),
@@ -9132,6 +9623,7 @@ pub enum V2Event {
     FormReplied(FormReplied),
     FormCancelled(FormCancelled),
     WebsearchUpdated(WebsearchUpdated),
+    MessagingMessageCreated(MessagingMessageCreated),
     ArtifactUpdated(ArtifactUpdated),
     SessionStatus(SessionStatusUpdated),
     SessionIdle(SessionIdle),
@@ -9147,6 +9639,7 @@ pub enum V2Event {
     ExperimentalMcpEvent(ExperimentalMcpEvent),
     Rpc(V2EventRpc),
     ServerConnected(V2EventServerConnected),
+    ServerResync(V2EventServerResync),
     /// A member this client does not know, kept as it arrived.
     Unknown(serde_json::Value),
 }
@@ -9175,6 +9668,7 @@ impl V2Event {
             Some("session.renamed") => raw.variant().map(Self::SessionRenamed),
             Some("session.metadata.updated") => raw.variant().map(Self::SessionMetadataUpdated),
             Some("session.permissions") => raw.variant().map(Self::SessionPermissions),
+            Some("session.subagent-policy.updated") => raw.variant().map(Self::SessionSubagentPolicyUpdated),
             Some("session.viewed") => raw.variant().map(Self::SessionViewed),
             Some("session.archived") => raw.variant().map(Self::SessionArchived),
             Some("session.unarchived") => raw.variant().map(Self::SessionUnarchived),
@@ -9221,6 +9715,7 @@ impl V2Event {
             Some("session.revert.cleared") => raw.variant().map(Self::SessionRevertCleared),
             Some("session.revert.committed") => raw.variant().map(Self::SessionRevertCommitted),
             Some("filesystem.changed") => raw.variant().map(Self::FilesystemChanged),
+            Some("filesystem.watcher-degraded") => raw.variant().map(Self::FilesystemWatcherDegraded),
             Some("reference.updated") => raw.variant().map(Self::ReferenceUpdated),
             Some("permission.asked") => raw.variant().map(Self::PermissionAsked),
             Some("permission.replied") => raw.variant().map(Self::PermissionReplied),
@@ -9246,6 +9741,7 @@ impl V2Event {
             Some("form.replied") => raw.variant().map(Self::FormReplied),
             Some("form.cancelled") => raw.variant().map(Self::FormCancelled),
             Some("websearch.updated") => raw.variant().map(Self::WebsearchUpdated),
+            Some("messaging.message.created") => raw.variant().map(Self::MessagingMessageCreated),
             Some("artifact.updated") => raw.variant().map(Self::ArtifactUpdated),
             Some("session.status") => raw.variant().map(Self::SessionStatus),
             Some("session.idle") => raw.variant().map(Self::SessionIdle),
@@ -9260,6 +9756,7 @@ impl V2Event {
             Some("mcp.resources.changed") => raw.variant().map(Self::McpResourcesChanged),
             Some("experimental.mcp.event") => raw.variant().map(Self::ExperimentalMcpEvent),
             Some("server.connected") => raw.variant().map(Self::ServerConnected),
+            Some("server.resync") => raw.variant().map(Self::ServerResync),
             Some(tag) if tag.starts_with("rpc.") => raw.variant().map(Self::Rpc),
             _ => raw.unknown().map(Self::Unknown),
         }
@@ -9285,6 +9782,7 @@ impl V2Event {
             Self::SessionRenamed(value) => value.r#type.as_str(),
             Self::SessionMetadataUpdated(value) => value.r#type.as_str(),
             Self::SessionPermissions(value) => value.r#type.as_str(),
+            Self::SessionSubagentPolicyUpdated(value) => value.r#type.as_str(),
             Self::SessionViewed(value) => value.r#type.as_str(),
             Self::SessionArchived(value) => value.r#type.as_str(),
             Self::SessionUnarchived(value) => value.r#type.as_str(),
@@ -9331,6 +9829,7 @@ impl V2Event {
             Self::SessionRevertCleared(value) => value.r#type.as_str(),
             Self::SessionRevertCommitted(value) => value.r#type.as_str(),
             Self::FilesystemChanged(value) => value.r#type.as_str(),
+            Self::FilesystemWatcherDegraded(value) => value.r#type.as_str(),
             Self::ReferenceUpdated(value) => value.r#type.as_str(),
             Self::PermissionAsked(value) => value.r#type.as_str(),
             Self::PermissionReplied(value) => value.r#type.as_str(),
@@ -9356,6 +9855,7 @@ impl V2Event {
             Self::FormReplied(value) => value.r#type.as_str(),
             Self::FormCancelled(value) => value.r#type.as_str(),
             Self::WebsearchUpdated(value) => value.r#type.as_str(),
+            Self::MessagingMessageCreated(value) => value.r#type.as_str(),
             Self::ArtifactUpdated(value) => value.r#type.as_str(),
             Self::SessionStatus(value) => value.r#type.as_str(),
             Self::SessionIdle(value) => value.r#type.as_str(),
@@ -9371,6 +9871,7 @@ impl V2Event {
             Self::ExperimentalMcpEvent(value) => value.r#type.as_str(),
             Self::Rpc(value) => value.r#type.as_str(),
             Self::ServerConnected(value) => value.r#type.as_str(),
+            Self::ServerResync(value) => value.r#type.as_str(),
             Self::Unknown(value) => value.get("type").and_then(serde_json::Value::as_str).unwrap_or_default(),
         }
     }
@@ -9393,6 +9894,7 @@ impl V2Event {
             Self::SessionRenamed(value) => value.id.as_str(),
             Self::SessionMetadataUpdated(value) => value.id.as_str(),
             Self::SessionPermissions(value) => value.id.as_str(),
+            Self::SessionSubagentPolicyUpdated(value) => value.id.as_str(),
             Self::SessionViewed(value) => value.id.as_str(),
             Self::SessionArchived(value) => value.id.as_str(),
             Self::SessionUnarchived(value) => value.id.as_str(),
@@ -9439,6 +9941,7 @@ impl V2Event {
             Self::SessionRevertCleared(value) => value.id.as_str(),
             Self::SessionRevertCommitted(value) => value.id.as_str(),
             Self::FilesystemChanged(value) => value.id.as_str(),
+            Self::FilesystemWatcherDegraded(value) => value.id.as_str(),
             Self::ReferenceUpdated(value) => value.id.as_str(),
             Self::PermissionAsked(value) => value.id.as_str(),
             Self::PermissionReplied(value) => value.id.as_str(),
@@ -9464,6 +9967,7 @@ impl V2Event {
             Self::FormReplied(value) => value.id.as_str(),
             Self::FormCancelled(value) => value.id.as_str(),
             Self::WebsearchUpdated(value) => value.id.as_str(),
+            Self::MessagingMessageCreated(value) => value.id.as_str(),
             Self::ArtifactUpdated(value) => value.id.as_str(),
             Self::SessionStatus(value) => value.id.as_str(),
             Self::SessionIdle(value) => value.id.as_str(),
@@ -9479,6 +9983,7 @@ impl V2Event {
             Self::ExperimentalMcpEvent(value) => value.id.as_str(),
             Self::Rpc(value) => value.id.as_str(),
             Self::ServerConnected(value) => value.id.as_str(),
+            Self::ServerResync(value) => value.id.as_str(),
             Self::Unknown(value) => value.get("id").and_then(serde_json::Value::as_str).unwrap_or_default(),
         }
     }
@@ -9501,6 +10006,7 @@ impl V2Event {
             Self::SessionRenamed(value) => Some(value.created),
             Self::SessionMetadataUpdated(value) => Some(value.created),
             Self::SessionPermissions(value) => Some(value.created),
+            Self::SessionSubagentPolicyUpdated(value) => Some(value.created),
             Self::SessionViewed(value) => Some(value.created),
             Self::SessionArchived(value) => Some(value.created),
             Self::SessionUnarchived(value) => Some(value.created),
@@ -9547,6 +10053,7 @@ impl V2Event {
             Self::SessionRevertCleared(value) => Some(value.created),
             Self::SessionRevertCommitted(value) => Some(value.created),
             Self::FilesystemChanged(value) => Some(value.created),
+            Self::FilesystemWatcherDegraded(value) => Some(value.created),
             Self::ReferenceUpdated(value) => Some(value.created),
             Self::PermissionAsked(value) => Some(value.created),
             Self::PermissionReplied(value) => Some(value.created),
@@ -9572,6 +10079,7 @@ impl V2Event {
             Self::FormReplied(value) => Some(value.created),
             Self::FormCancelled(value) => Some(value.created),
             Self::WebsearchUpdated(value) => Some(value.created),
+            Self::MessagingMessageCreated(value) => Some(value.created),
             Self::ArtifactUpdated(value) => Some(value.created),
             Self::SessionStatus(value) => Some(value.created),
             Self::SessionIdle(value) => Some(value.created),
@@ -9586,7 +10094,7 @@ impl V2Event {
             Self::McpResourcesChanged(value) => Some(value.created),
             Self::ExperimentalMcpEvent(value) => Some(value.created),
             Self::Rpc(value) => Some(value.created),
-            Self::ServerConnected(_) | Self::Unknown(_) => None,
+            Self::ServerConnected(_) | Self::ServerResync(_) | Self::Unknown(_) => None,
         }
     }
 
@@ -9608,6 +10116,7 @@ impl V2Event {
             Self::SessionRenamed(value) => value.metadata.as_ref(),
             Self::SessionMetadataUpdated(value) => value.metadata.as_ref(),
             Self::SessionPermissions(value) => value.metadata.as_ref(),
+            Self::SessionSubagentPolicyUpdated(value) => value.metadata.as_ref(),
             Self::SessionViewed(value) => value.metadata.as_ref(),
             Self::SessionArchived(value) => value.metadata.as_ref(),
             Self::SessionUnarchived(value) => value.metadata.as_ref(),
@@ -9654,6 +10163,7 @@ impl V2Event {
             Self::SessionRevertCleared(value) => value.metadata.as_ref(),
             Self::SessionRevertCommitted(value) => value.metadata.as_ref(),
             Self::FilesystemChanged(value) => value.metadata.as_ref(),
+            Self::FilesystemWatcherDegraded(value) => value.metadata.as_ref(),
             Self::ReferenceUpdated(value) => value.metadata.as_ref(),
             Self::PermissionAsked(value) => value.metadata.as_ref(),
             Self::PermissionReplied(value) => value.metadata.as_ref(),
@@ -9679,6 +10189,7 @@ impl V2Event {
             Self::FormReplied(value) => value.metadata.as_ref(),
             Self::FormCancelled(value) => value.metadata.as_ref(),
             Self::WebsearchUpdated(value) => value.metadata.as_ref(),
+            Self::MessagingMessageCreated(value) => value.metadata.as_ref(),
             Self::ArtifactUpdated(value) => value.metadata.as_ref(),
             Self::SessionStatus(value) => value.metadata.as_ref(),
             Self::SessionIdle(value) => value.metadata.as_ref(),
@@ -9694,6 +10205,7 @@ impl V2Event {
             Self::ExperimentalMcpEvent(value) => value.metadata.as_ref(),
             Self::Rpc(value) => value.metadata.as_ref(),
             Self::ServerConnected(value) => value.metadata.as_ref(),
+            Self::ServerResync(value) => value.metadata.as_ref(),
             Self::Unknown(_) => None,
         }
     }
@@ -9708,6 +10220,7 @@ impl V2Event {
             Self::SessionRenamed(value) => Some(value.durable.aggregate_id.as_str()),
             Self::SessionMetadataUpdated(value) => Some(value.durable.aggregate_id.as_str()),
             Self::SessionPermissions(value) => Some(value.durable.aggregate_id.as_str()),
+            Self::SessionSubagentPolicyUpdated(value) => Some(value.durable.aggregate_id.as_str()),
             Self::SessionViewed(value) => Some(value.durable.aggregate_id.as_str()),
             Self::SessionArchived(value) => Some(value.durable.aggregate_id.as_str()),
             Self::SessionUnarchived(value) => Some(value.durable.aggregate_id.as_str()),
@@ -9763,6 +10276,7 @@ impl V2Event {
             | Self::SessionToolProgress(_)
             | Self::SessionCompactionDelta(_)
             | Self::FilesystemChanged(_)
+            | Self::FilesystemWatcherDegraded(_)
             | Self::ReferenceUpdated(_)
             | Self::PermissionAsked(_)
             | Self::PermissionReplied(_)
@@ -9787,6 +10301,7 @@ impl V2Event {
             | Self::FormReplied(_)
             | Self::FormCancelled(_)
             | Self::WebsearchUpdated(_)
+            | Self::MessagingMessageCreated(_)
             | Self::ArtifactUpdated(_)
             | Self::SessionStatus(_)
             | Self::SessionIdle(_)
@@ -9802,6 +10317,7 @@ impl V2Event {
             | Self::ExperimentalMcpEvent(_)
             | Self::Rpc(_)
             | Self::ServerConnected(_)
+            | Self::ServerResync(_)
             | Self::Unknown(_) => None,
         }
     }
@@ -9816,6 +10332,7 @@ impl V2Event {
             Self::SessionRenamed(value) => Some(value.durable.seq),
             Self::SessionMetadataUpdated(value) => Some(value.durable.seq),
             Self::SessionPermissions(value) => Some(value.durable.seq),
+            Self::SessionSubagentPolicyUpdated(value) => Some(value.durable.seq),
             Self::SessionViewed(value) => Some(value.durable.seq),
             Self::SessionArchived(value) => Some(value.durable.seq),
             Self::SessionUnarchived(value) => Some(value.durable.seq),
@@ -9871,6 +10388,7 @@ impl V2Event {
             | Self::SessionToolProgress(_)
             | Self::SessionCompactionDelta(_)
             | Self::FilesystemChanged(_)
+            | Self::FilesystemWatcherDegraded(_)
             | Self::ReferenceUpdated(_)
             | Self::PermissionAsked(_)
             | Self::PermissionReplied(_)
@@ -9895,6 +10413,7 @@ impl V2Event {
             | Self::FormReplied(_)
             | Self::FormCancelled(_)
             | Self::WebsearchUpdated(_)
+            | Self::MessagingMessageCreated(_)
             | Self::ArtifactUpdated(_)
             | Self::SessionStatus(_)
             | Self::SessionIdle(_)
@@ -9910,6 +10429,7 @@ impl V2Event {
             | Self::ExperimentalMcpEvent(_)
             | Self::Rpc(_)
             | Self::ServerConnected(_)
+            | Self::ServerResync(_)
             | Self::Unknown(_) => None,
         }
     }
@@ -9924,6 +10444,7 @@ impl V2Event {
             Self::SessionRenamed(value) => Some(value.durable.version),
             Self::SessionMetadataUpdated(value) => Some(value.durable.version),
             Self::SessionPermissions(value) => Some(value.durable.version),
+            Self::SessionSubagentPolicyUpdated(value) => Some(value.durable.version),
             Self::SessionViewed(value) => Some(value.durable.version),
             Self::SessionArchived(value) => Some(value.durable.version),
             Self::SessionUnarchived(value) => Some(value.durable.version),
@@ -9979,6 +10500,7 @@ impl V2Event {
             | Self::SessionToolProgress(_)
             | Self::SessionCompactionDelta(_)
             | Self::FilesystemChanged(_)
+            | Self::FilesystemWatcherDegraded(_)
             | Self::ReferenceUpdated(_)
             | Self::PermissionAsked(_)
             | Self::PermissionReplied(_)
@@ -10003,6 +10525,7 @@ impl V2Event {
             | Self::FormReplied(_)
             | Self::FormCancelled(_)
             | Self::WebsearchUpdated(_)
+            | Self::MessagingMessageCreated(_)
             | Self::ArtifactUpdated(_)
             | Self::SessionStatus(_)
             | Self::SessionIdle(_)
@@ -10018,6 +10541,7 @@ impl V2Event {
             | Self::ExperimentalMcpEvent(_)
             | Self::Rpc(_)
             | Self::ServerConnected(_)
+            | Self::ServerResync(_)
             | Self::Unknown(_) => None,
         }
     }
@@ -10042,6 +10566,7 @@ pub enum EventKind {
     SessionRenamed,
     SessionMetadataUpdated,
     SessionPermissions,
+    SessionSubagentPolicyUpdated,
     SessionViewed,
     SessionArchived,
     SessionUnarchived,
@@ -10088,6 +10613,7 @@ pub enum EventKind {
     SessionRevertCleared,
     SessionRevertCommitted,
     FilesystemChanged,
+    FilesystemWatcherDegraded,
     ReferenceUpdated,
     PermissionAsked,
     PermissionReplied,
@@ -10113,6 +10639,7 @@ pub enum EventKind {
     FormReplied,
     FormCancelled,
     WebsearchUpdated,
+    MessagingMessageCreated,
     ArtifactUpdated,
     SessionStatus,
     SessionIdle,
@@ -10128,12 +10655,13 @@ pub enum EventKind {
     ExperimentalMcpEvent,
     Rpc,
     ServerConnected,
+    ServerResync,
     Unknown,
 }
 
 impl EventKind {
     /// How many kinds there are, `Unknown` included.
-    pub const COUNT: usize = 102;
+    pub const COUNT: usize = 106;
 
     /// The kind an event whose `type` is `tag` decodes to.
     pub fn from_tag(tag: &str) -> Self {
@@ -10153,6 +10681,7 @@ impl EventKind {
             "session.renamed" => Self::SessionRenamed,
             "session.metadata.updated" => Self::SessionMetadataUpdated,
             "session.permissions" => Self::SessionPermissions,
+            "session.subagent-policy.updated" => Self::SessionSubagentPolicyUpdated,
             "session.viewed" => Self::SessionViewed,
             "session.archived" => Self::SessionArchived,
             "session.unarchived" => Self::SessionUnarchived,
@@ -10199,6 +10728,7 @@ impl EventKind {
             "session.revert.cleared" => Self::SessionRevertCleared,
             "session.revert.committed" => Self::SessionRevertCommitted,
             "filesystem.changed" => Self::FilesystemChanged,
+            "filesystem.watcher-degraded" => Self::FilesystemWatcherDegraded,
             "reference.updated" => Self::ReferenceUpdated,
             "permission.asked" => Self::PermissionAsked,
             "permission.replied" => Self::PermissionReplied,
@@ -10224,6 +10754,7 @@ impl EventKind {
             "form.replied" => Self::FormReplied,
             "form.cancelled" => Self::FormCancelled,
             "websearch.updated" => Self::WebsearchUpdated,
+            "messaging.message.created" => Self::MessagingMessageCreated,
             "artifact.updated" => Self::ArtifactUpdated,
             "session.status" => Self::SessionStatus,
             "session.idle" => Self::SessionIdle,
@@ -10238,6 +10769,7 @@ impl EventKind {
             "mcp.resources.changed" => Self::McpResourcesChanged,
             "experimental.mcp.event" => Self::ExperimentalMcpEvent,
             "server.connected" => Self::ServerConnected,
+            "server.resync" => Self::ServerResync,
             tag if tag.starts_with("rpc.") => Self::Rpc,
             _ => Self::Unknown,
         }
@@ -10268,6 +10800,7 @@ impl V2Event {
             Self::SessionRenamed(_) => EventKind::SessionRenamed,
             Self::SessionMetadataUpdated(_) => EventKind::SessionMetadataUpdated,
             Self::SessionPermissions(_) => EventKind::SessionPermissions,
+            Self::SessionSubagentPolicyUpdated(_) => EventKind::SessionSubagentPolicyUpdated,
             Self::SessionViewed(_) => EventKind::SessionViewed,
             Self::SessionArchived(_) => EventKind::SessionArchived,
             Self::SessionUnarchived(_) => EventKind::SessionUnarchived,
@@ -10314,6 +10847,7 @@ impl V2Event {
             Self::SessionRevertCleared(_) => EventKind::SessionRevertCleared,
             Self::SessionRevertCommitted(_) => EventKind::SessionRevertCommitted,
             Self::FilesystemChanged(_) => EventKind::FilesystemChanged,
+            Self::FilesystemWatcherDegraded(_) => EventKind::FilesystemWatcherDegraded,
             Self::ReferenceUpdated(_) => EventKind::ReferenceUpdated,
             Self::PermissionAsked(_) => EventKind::PermissionAsked,
             Self::PermissionReplied(_) => EventKind::PermissionReplied,
@@ -10339,6 +10873,7 @@ impl V2Event {
             Self::FormReplied(_) => EventKind::FormReplied,
             Self::FormCancelled(_) => EventKind::FormCancelled,
             Self::WebsearchUpdated(_) => EventKind::WebsearchUpdated,
+            Self::MessagingMessageCreated(_) => EventKind::MessagingMessageCreated,
             Self::ArtifactUpdated(_) => EventKind::ArtifactUpdated,
             Self::SessionStatus(_) => EventKind::SessionStatus,
             Self::SessionIdle(_) => EventKind::SessionIdle,
@@ -10354,6 +10889,7 @@ impl V2Event {
             Self::ExperimentalMcpEvent(_) => EventKind::ExperimentalMcpEvent,
             Self::Rpc(_) => EventKind::Rpc,
             Self::ServerConnected(_) => EventKind::ServerConnected,
+            Self::ServerResync(_) => EventKind::ServerResync,
             Self::Unknown(_) => EventKind::Unknown,
         }
     }
@@ -10533,11 +11069,13 @@ pub struct ExperimentalPersistentPtyGetInput {
 /// Output of `Client::experimental_persistent_pty_get`.
 pub type ExperimentalPersistentPtyGetOutput = PersistentPtyInfo;
 
+string_type!(PersistentPtyAttachmentID, "`PersistentPty.AttachmentID`");
+
 /// Input of `Client::experimental_persistent_pty_update`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ExperimentalPersistentPtyUpdateInput {
     pub pty_id: PtyID,
-    pub attachment_id: Option<String>,
+    pub attachment_id: Option<PersistentPtyAttachmentID>,
     pub size: Option<PersistentPtyInfoSize>,
     pub title: Option<Option<String>>,
 }
@@ -11425,6 +11963,715 @@ pub struct WorktreeRefreshInput {
     pub project_id: ProjectID,
 }
 
+literal_enum! {
+/// `Messaging.Delivery`
+MessagingDelivery {
+    None => "none",
+    Inbox => "inbox",
+    Wake => "wake",
+}
+}
+
+/// Input of `Client::messaging_send`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingSendInput {
+    pub r#as: Option<String>,
+    pub topic: Option<String>,
+    pub to: Option<String>,
+    pub text: String,
+    pub r#type: Option<String>,
+    pub meta: Option<IndexMap<String, serde_json::Value>>,
+    pub reply: Option<i64>,
+    pub force: Option<bool>,
+    pub deliver: Option<MessagingDelivery>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingDelivered {
+    pub session: String,
+    pub delivery: MessagingDelivery,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingSendResult {
+    pub topic: String,
+    pub seq: i64,
+    pub created: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub forced: Option<bool>,
+    pub delivered: Vec<MessagingDelivered>,
+}
+
+/// Output of `Client::messaging_send`.
+pub type MessagingSendOutput = MessagingSendResult;
+
+literal_enum! {
+MessagingUserInputRoot {
+    Hidden => "hidden",
+    Visible => "visible",
+    Wake => "wake",
+}
+}
+
+/// Input of `Client::messaging_user`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingUserInput {
+    pub r#as: String,
+    pub text: String,
+    pub title: Option<String>,
+    pub root: Option<MessagingUserInputRoot>,
+}
+
+/// Output of `Client::messaging_user`.
+pub type MessagingUserOutput = MessagingSendResult;
+
+literal_enum! {
+/// `Messaging.MatchMode`
+MessagingMatchMode {
+    Exact => "exact",
+    Regex => "regex",
+    Fuzzy => "fuzzy",
+    Semantic => "semantic",
+    Hybrid => "hybrid",
+    Advanced => "advanced",
+}
+}
+
+literal_enum! {
+/// `Messaging.HiddenMode`
+MessagingHiddenMode {
+    Exclude => "exclude",
+    Include => "include",
+    Only => "only",
+}
+}
+
+literal_enum! {
+MessagingQueryInputOrder {
+    Asc => "asc",
+    Desc => "desc",
+}
+}
+
+/// Input of `Client::messaging_query`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingQueryInput {
+    pub r#as: Option<String>,
+    pub topics: Option<Vec<String>>,
+    pub query: Option<String>,
+    pub r#match: Option<MessagingMatchMode>,
+    pub from: Option<Vec<String>>,
+    pub types: Option<Vec<String>>,
+    pub kinds: Option<Vec<String>>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub after: Option<i64>,
+    pub before: Option<i64>,
+    pub hidden: Option<MessagingHiddenMode>,
+    pub hidden_by: Option<Vec<String>>,
+    pub hidden_from: Option<Vec<String>>,
+    pub hidden_since: Option<String>,
+    pub hidden_until: Option<String>,
+    pub unread: Option<bool>,
+    pub inbox: Option<bool>,
+    pub limit: Option<i64>,
+    pub order: Option<MessagingQueryInputOrder>,
+    pub mark_read: Option<bool>,
+    pub wait: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingOp {
+    pub seq: i64,
+    pub kind: String,
+    pub writer: String,
+    pub time: SessionMessageShellExit,
+    pub viewers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingMessage {
+    pub id: i64,
+    pub topic: String,
+    pub seq: i64,
+    pub kind: String,
+    pub r#type: String,
+    pub writer: String,
+    pub time: SessionMessageShellExit,
+    pub data: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meta: Option<IndexMap<String, serde_json::Value>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ops: Option<Vec<MessagingOp>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingQueryResult {
+    pub messages: Vec<MessagingMessage>,
+    pub more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#match: Option<MessagingMatchMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Output of `Client::messaging_query`.
+pub type MessagingQueryOutput = MessagingQueryResult;
+
+/// Input of `Client::messaging_inspect`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingInspectInput {
+    pub r#as: Option<String>,
+    pub topic: String,
+    pub seq: i64,
+}
+
+/// Output of `Client::messaging_inspect`.
+pub type MessagingInspectOutput = MessagingMessage;
+
+literal_enum! {
+MessagingVisibilityInputAction {
+    Hide => "hide",
+    Restore => "restore",
+}
+}
+
+/// Input of `Client::messaging_visibility`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MessagingVisibilityInput {
+    pub r#as: Option<String>,
+    pub topic: String,
+    pub action: MessagingVisibilityInputAction,
+    pub seqs: Option<Vec<i64>>,
+    pub r#for: Option<Vec<String>>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingVisibilityResult {
+    pub topic: String,
+    pub seq: i64,
+    pub targets: Vec<i64>,
+    pub viewers: Vec<String>,
+    pub default: bool,
+}
+
+/// Output of `Client::messaging_visibility`.
+pub type MessagingVisibilityOutput = MessagingVisibilityResult;
+
+literal_enum! {
+/// `Messaging.WriteMode`
+MessagingWriteMode {
+    Open => "open",
+    Readonly => "readonly",
+    Limited => "limited",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingWriter {
+    pub session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ancestors: Option<bool>,
+}
+
+/// Input of `Client::messaging_settings`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingSettingsInput {
+    pub r#as: Option<String>,
+    pub topic: String,
+    pub mode: Option<MessagingWriteMode>,
+    pub writers: Option<Vec<MessagingWriter>>,
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingParticipant {
+    pub session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub reads: i64,
+    pub writes: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<SessionMessageShellExit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingWindow {
+    pub total: i64,
+    pub first: Vec<MessagingParticipant>,
+    pub latest: Vec<MessagingParticipant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingTopic {
+    pub name: String,
+    pub exists: bool,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creator: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    pub mode: MessagingWriteMode,
+    pub writers: Vec<MessagingWriter>,
+    pub policy: String,
+    pub messages: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unread: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribed: Option<MessagingDelivery>,
+    #[serde(rename = "writersWindow", default, skip_serializing_if = "Option::is_none")]
+    pub writers_window: Option<MessagingWindow>,
+    #[serde(rename = "readersWindow", default, skip_serializing_if = "Option::is_none")]
+    pub readers_window: Option<MessagingWindow>,
+    #[serde(rename = "allowedWindow", default, skip_serializing_if = "Option::is_none")]
+    pub allowed_window: Option<MessagingWindow>,
+}
+
+/// Output of `Client::messaging_settings`.
+pub type MessagingSettingsOutput = MessagingTopic;
+
+/// Input of `Client::messaging_subscribe`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingSubscribeInput {
+    pub r#as: String,
+    pub topic: String,
+    pub delivery: Option<MessagingDelivery>,
+    pub remove: Option<bool>,
+}
+
+/// Output of `Client::messaging_subscribe`.
+pub type MessagingSubscribeOutput = MessagingTopic;
+
+/// Input of `Client::messaging_topic`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingTopicInput {
+    pub r#as: Option<String>,
+    pub topic: String,
+    pub expand: Option<i64>,
+}
+
+/// Output of `Client::messaging_topic`.
+pub type MessagingTopicOutput = MessagingTopic;
+
+literal_enum! {
+MessagingTopicsInputRole {
+    Any => "any",
+    Reader => "reader",
+    Writer => "writer",
+    Subscriber => "subscriber",
+}
+}
+
+literal_enum! {
+MessagingTopicsInputSort {
+    Created => "created",
+    Last => "last",
+}
+}
+
+/// Input of `Client::messaging_topics`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingTopicsInput {
+    pub r#as: Option<String>,
+    pub topics: Option<Vec<String>>,
+    pub sessions: Option<Vec<String>>,
+    pub role: Option<MessagingTopicsInputRole>,
+    pub kinds: Option<Vec<String>>,
+    pub search: Option<String>,
+    pub standard: Option<bool>,
+    pub sort: Option<MessagingTopicsInputSort>,
+    pub order: Option<MessagingQueryInputOrder>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub expand: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingTopicList {
+    pub topics: Vec<MessagingTopic>,
+    pub total: i64,
+}
+
+/// Output of `Client::messaging_topics`.
+pub type MessagingTopicsOutput = MessagingTopicList;
+
+literal_enum! {
+MessagingChainInputDepth {
+    Self_ => "self",
+    Parent => "parent",
+    All => "all",
+}
+}
+
+literal_enum! {
+MessagingChainInputDetail {
+    Brief => "brief",
+    Full => "full",
+}
+}
+
+/// Input of `Client::messaging_chain`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingChainInput {
+    pub session: String,
+    pub depth: Option<MessagingChainInputDepth>,
+    pub detail: Option<MessagingChainInputDetail>,
+    pub expand: Option<i64>,
+}
+
+literal_enum! {
+MessagingSessionNodeStatus {
+    Running => "running",
+    Idle => "idle",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingSessionBrief {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub status: MessagingSessionNodeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<SessionMessageShellExit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingChildWindow {
+    pub total: i64,
+    pub first: Vec<MessagingSessionBrief>,
+    pub latest: Vec<MessagingSessionBrief>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingSessionNode {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(rename = "parentID", default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    pub depth: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    pub directory: String,
+    pub status: MessagingSessionNodeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub children: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub descendants: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messages: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost: Option<SessionMessageShellExit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topics: Option<i64>,
+    #[serde(rename = "childWindow", default, skip_serializing_if = "Option::is_none")]
+    pub child_window: Option<MessagingChildWindow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingChain {
+    pub chain: Vec<MessagingSessionNode>,
+    pub root: String,
+    pub depth: i64,
+}
+
+/// Output of `Client::messaging_chain`.
+pub type MessagingChainOutput = MessagingChain;
+
+literal_enum! {
+MessagingSessionsInputSort {
+    Created => "created",
+    Updated => "updated",
+}
+}
+
+/// Input of `Client::messaging_sessions`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingSessionsInput {
+    pub r#as: Option<String>,
+    pub ids: Option<Vec<String>>,
+    pub parent: Option<String>,
+    pub ancestor: Option<String>,
+    pub project: Option<String>,
+    pub directory: Option<String>,
+    pub agent: Option<String>,
+    pub search: Option<String>,
+    pub active: Option<bool>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub sort: Option<MessagingSessionsInputSort>,
+    pub order: Option<MessagingQueryInputOrder>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub detail: Option<MessagingChainInputDetail>,
+    pub expand: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingSessionList {
+    pub sessions: Vec<MessagingSessionNode>,
+    pub total: i64,
+}
+
+/// Output of `Client::messaging_sessions`.
+pub type MessagingSessionsOutput = MessagingSessionList;
+
+literal_enum! {
+MessagingLogInputOp {
+    Head => "head",
+    Tail => "tail",
+    Grep => "grep",
+    Search => "search",
+    Pull => "pull",
+}
+}
+
+literal_enum! {
+/// `Messaging.LogPart`
+MessagingLogPart {
+    User => "user",
+    Output => "output",
+    Thinking => "thinking",
+    Tools => "tools",
+    Results => "results",
+    System => "system",
+    Synthetic => "synthetic",
+    Shell => "shell",
+    Events => "events",
+    Compaction => "compaction",
+}
+}
+
+literal_enum! {
+MessagingLogInputScope {
+    All => "all",
+    Context => "context",
+}
+}
+
+/// Input of `Client::messaging_log`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingLogInput {
+    pub r#as: Option<String>,
+    pub sessions: Vec<String>,
+    pub op: Option<MessagingLogInputOp>,
+    pub include: Option<Vec<MessagingLogPart>>,
+    pub query: Option<String>,
+    pub r#match: Option<MessagingMatchMode>,
+    pub context: Option<i64>,
+    pub scope: Option<MessagingLogInputScope>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    pub chars: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingLogEntry {
+    pub session: String,
+    pub message: String,
+    pub index: i64,
+    pub part: MessagingLogPart,
+    pub time: SessionMessageShellExit,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#match: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub score: Option<SessionMessageShellExit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingLog {
+    pub entries: Vec<MessagingLogEntry>,
+    pub total: i64,
+    pub more: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#match: Option<MessagingMatchMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// Output of `Client::messaging_log`.
+pub type MessagingLogOutput = MessagingLog;
+
+/// Input of `Client::messaging_vars`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingVarsInput {
+    pub r#as: Option<String>,
+    pub values: Option<bool>,
+    pub render: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingPreset {
+    pub name: String,
+    pub template: String,
+    pub description: String,
+    pub policy: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+literal_enum! {
+MessagingVarKind {
+    Constant => "constant",
+    Context => "context",
+    Time => "time",
+    Custom => "custom",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingVar {
+    pub name: String,
+    pub kind: MessagingVarKind,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingVars {
+    pub presets: Vec<MessagingPreset>,
+    pub vars: Vec<MessagingVar>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rendered: Option<String>,
+}
+
+/// Output of `Client::messaging_vars`.
+pub type MessagingVarsOutput = MessagingVars;
+
+/// Input of `Client::messaging_set_var`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingSetVarInput {
+    pub r#as: Option<String>,
+    pub scope: Option<String>,
+    pub name: String,
+    pub value: Option<String>,
+}
+
+literal_enum! {
+MessagingModelStatusState {
+    Off => "off",
+    Unavailable => "unavailable",
+    Pending => "pending",
+    Downloading => "downloading",
+    Starting => "starting",
+    Ready => "ready",
+    Error => "error",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingModelProgress {
+    pub file: String,
+    pub received: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingModelStatusTiersItem {
+    pub name: String,
+    pub model: String,
+    pub size: String,
+    pub hardware: String,
+    pub available: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MessagingModelStatus {
+    pub state: MessagingModelStatusState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Vec<MessagingModelProgress>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tiers: Option<Vec<MessagingModelStatusTiersItem>>,
+}
+
+/// Output of `Client::messaging_model_status`.
+pub type MessagingModelStatusOutput = MessagingModelStatus;
+
+/// Input of `Client::messaging_model_configure`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MessagingModelConfigureInput {
+    pub tier: Option<String>,
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub start: Option<bool>,
+}
+
+/// Output of `Client::messaging_model_configure`.
+pub type MessagingModelConfigureOutput = MessagingModelStatus;
+
 /// Input of `Client::vcs_init`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VcsInitInput {
@@ -11931,6 +13178,16 @@ pub struct ConfigEntryDocumentInfoAgentsValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ConfigEntryDocumentInfoModel>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub excluded_models: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_models: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_excluded_models: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub request: Option<ConfigEntryDocumentInfoAgentsValueRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system: Option<String>,
@@ -12324,6 +13581,148 @@ impl ConfigEntryDocumentInfoWarming {
     }
 }
 
+literal_enum! {
+ConfigEntryDocumentInfoMessagingDeliveryDirect {
+    None => "none",
+    Inbox => "inbox",
+    Wake => "wake",
+}
+}
+
+literal_enum! {
+ConfigEntryDocumentInfoMessagingDeliveryRoot {
+    None => "none",
+    Inbox => "inbox",
+    Wake => "wake",
+}
+}
+
+literal_enum! {
+ConfigEntryDocumentInfoMessagingDeliveryUser {
+    Hidden => "hidden",
+    Visible => "visible",
+    Wake => "wake",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoMessagingDelivery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direct: Option<ConfigEntryDocumentInfoMessagingDeliveryDirect>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<ConfigEntryDocumentInfoMessagingDeliveryRoot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user: Option<ConfigEntryDocumentInfoMessagingDeliveryUser>,
+}
+
+literal_enum! {
+ConfigEntryDocumentInfoMessagingSearchMatch {
+    Exact => "exact",
+    Regex => "regex",
+    Fuzzy => "fuzzy",
+    Semantic => "semantic",
+    Hybrid => "hybrid",
+    Advanced => "advanced",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoMessagingSearch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#match: Option<ConfigEntryDocumentInfoMessagingSearchMatch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+}
+
+literal_enum! {
+ConfigEntryDocumentInfoMessagingEmbeddingObjectPooling {
+    Last => "last",
+    Mean => "mean",
+    Cls => "cls",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoMessagingEmbeddingObjectRemote {
+    pub url: String,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimensions: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoMessagingEmbeddingObject {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tier: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pooling: Option<ConfigEntryDocumentInfoMessagingEmbeddingObjectPooling>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autostart: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_layers: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threads: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<ConfigEntryDocumentInfoMessagingEmbeddingObjectRemote>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigEntryDocumentInfoMessagingEmbedding {
+    String(String),
+    Object(ConfigEntryDocumentInfoMessagingEmbeddingObject),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigEntryDocumentInfoMessagingEmbedding {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigEntryDocumentInfoMessagingEmbedding {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Object(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoMessaging {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presets: Option<IndexMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vars: Option<IndexMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivery: Option<ConfigEntryDocumentInfoMessagingDelivery>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<ConfigEntryDocumentInfoMessagingSearch>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding: Option<ConfigEntryDocumentInfoMessagingEmbedding>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ConfigProviderSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12533,6 +13932,12 @@ pub struct ConfigEntryDocumentInfoProvidersValueModelsValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hidden: Option<bool>,
+    #[serde(rename = "defaultVariant", default, skip_serializing_if = "Option::is_none")]
+    pub default_variant: Option<String>,
+    #[serde(rename = "lockVariant", default, skip_serializing_if = "Option::is_none")]
+    pub lock_variant: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<ConfigEntryDocumentInfoProvidersValueModelsValueLimit>,
 }
 
@@ -12540,6 +13945,8 @@ pub struct ConfigEntryDocumentInfoProvidersValueModelsValue {
 pub struct ConfigEntryDocumentInfoProvidersValue {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub canonical: Option<ProviderID>,
+    #[serde(rename = "instanceOf", default, skip_serializing_if = "Option::is_none")]
+    pub instance_of: Option<ProviderID>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12556,6 +13963,16 @@ pub struct ConfigEntryDocumentInfoProvidersValue {
     pub body: Option<IndexMap<String, serde_json::Value>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub models: Option<IndexMap<String, ConfigEntryDocumentInfoProvidersValueModelsValue>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoAliases {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<IndexMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<IndexMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<IndexMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -12592,7 +14009,643 @@ impl ConfigEntryDocumentInfoExperimentalVideoGenerate {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalModelRouteDemotion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub threshold: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRouteTargetObjectLimit {
+    pub context: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRouteTargetObjectWindowObject {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invert: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRouteTargetObjectWindow {
+    String(String),
+    Object(ConfigModelRouteTargetObjectWindowObject),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRouteTargetObjectWindow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRouteTargetObjectWindow {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Object(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigModelRouteTargetObject {
+    pub model: ConfigEntryDocumentInfoModel,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+    #[serde(rename = "defaultVariant", default, skip_serializing_if = "Option::is_none")]
+    pub default_variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variants: Option<IndexMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<ConfigModelRouteTargetObjectLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_format: Option<ModelCacheFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<ConfigModelRouteTargetObjectWindow>,
+}
+
+/// `Config.ModelRoute.Target`
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRouteTarget {
+    String(String),
+    Object(ConfigEntryDocumentInfoModelObject),
+    Object2(ConfigModelRouteTargetObject),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRouteTarget {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRouteTarget {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Object(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Object2(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRoutesValueVariantRulesItem {
+    pub r#match: String,
+    pub map: IndexMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRoutesValueHealthFirstTokenTimeoutMs {
+    Number(i64),
+    Bool(bool),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRoutesValueHealthFirstTokenTimeoutMs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRoutesValueHealthFirstTokenTimeoutMs {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Number(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Bool(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRoutesValueHealthLastTargetTimeoutMs {
+    Number(i64),
+    Bool(bool),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRoutesValueHealthLastTargetTimeoutMs {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRoutesValueHealthLastTargetTimeoutMs {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Number(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Bool(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRoutesValueHealth {
+    #[serde(rename = "firstTokenTimeoutMs", default, skip_serializing_if = "Option::is_none")]
+    pub first_token_timeout_ms: Option<ConfigModelRoutesValueHealthFirstTokenTimeoutMs>,
+    #[serde(rename = "lastTargetTimeoutMs", default, skip_serializing_if = "Option::is_none")]
+    pub last_target_timeout_ms: Option<ConfigModelRoutesValueHealthLastTargetTimeoutMs>,
+    #[serde(rename = "maxResponseTimeMs", default, skip_serializing_if = "Option::is_none")]
+    pub max_response_time_ms: Option<i64>,
+    #[serde(
+        rename = "minOutputTokensPerSecond",
+        default,
+        serialize_with = "crate::ser::option_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub min_output_tokens_per_second: Option<f64>,
+    #[serde(rename = "sampleWindow", default, skip_serializing_if = "Option::is_none")]
+    pub sample_window: Option<i64>,
+    #[serde(rename = "slowThreshold", default, skip_serializing_if = "Option::is_none")]
+    pub slow_threshold: Option<i64>,
+    #[serde(rename = "cooldownMs", default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_ms: Option<i64>,
+    #[serde(rename = "quotaCooldownMs", default, skip_serializing_if = "Option::is_none")]
+    pub quota_cooldown_ms: Option<i64>,
+}
+
+literal_enum! {
+ConfigModelRoutesValueNestedTimeout {
+    Longest => "longest",
+    Shortest => "shortest",
+    Own => "own",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRoutesValueBudgetsValue {
+    #[serde(rename = "requestsPerMinute", default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_minute: Option<i64>,
+    #[serde(rename = "requestsPerDay", default, skip_serializing_if = "Option::is_none")]
+    pub requests_per_day: Option<i64>,
+    #[serde(rename = "tokensPerMinute", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_minute: Option<i64>,
+    #[serde(rename = "tokensPerDay", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_day: Option<i64>,
+    #[serde(
+        rename = "softLimit",
+        default,
+        serialize_with = "crate::ser::option_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub soft_limit: Option<f64>,
+}
+
+literal_enum! {
+ConfigModelRoutesValueAutonomy {
+    Fixed => "fixed",
+    Rules => "rules",
+    Adaptive => "adaptive",
+    Predictive => "predictive",
+    Agent => "agent",
+}
+}
+
+literal_enum! {
+ConfigModelRoutesValueSelection {
+    Ordered => "ordered",
+    RoundRobin => "round-robin",
+    Weighted => "weighted",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfWeekItem {
+    String(String),
+    Number(i64),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfWeekItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfWeekItem {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Number(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfMonthItem {
+    Number(#[serde(serialize_with = "crate::ser::number")] f64),
+    Number2(i64),
+    String(String),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfMonthItem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfMonthItem {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Number(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Number2(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRoutesValueSchedulesItemWhenObject {
+    #[serde(rename = "daysOfWeek", default, skip_serializing_if = "Option::is_none")]
+    pub days_of_week: Option<Vec<ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfWeekItem>>,
+    #[serde(rename = "daysOfMonth", default, skip_serializing_if = "Option::is_none")]
+    pub days_of_month: Option<Vec<ConfigModelRoutesValueSchedulesItemWhenObjectDaysOfMonthItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dates: Option<Vec<String>>,
+    #[serde(rename = "excludeDates", default, skip_serializing_if = "Option::is_none")]
+    pub exclude_dates: Option<Vec<String>>,
+    #[serde(rename = "excludeWindows", default, skip_serializing_if = "Option::is_none")]
+    pub exclude_windows: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timezone: Option<String>,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub from: Option<f64>,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub until: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRoutesValueSchedulesItemWhen {
+    Object(ConfigModelRoutesValueSchedulesItemWhenObject),
+    String(String),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRoutesValueSchedulesItemWhen {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRoutesValueSchedulesItemWhen {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Object(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigModelRoutesValueSchedulesItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+    pub when: ConfigModelRoutesValueSchedulesItemWhen,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub factor: Option<f64>,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRoutesValueLimit {
+    pub context: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRoutesValue {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<ConfigModelRouteTarget>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contains: Option<Vec<String>>,
+    #[serde(rename = "notContains", default, skip_serializing_if = "Option::is_none")]
+    pub not_contains: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub r#match: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub levels: Option<Vec<String>>,
+    #[serde(rename = "variantRules", default, skip_serializing_if = "Option::is_none")]
+    pub variant_rules: Option<Vec<ConfigModelRoutesValueVariantRulesItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_format: Option<ModelCacheFormat>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health: Option<ConfigModelRoutesValueHealth>,
+    #[serde(rename = "nestedTimeout", default, skip_serializing_if = "Option::is_none")]
+    pub nested_timeout: Option<ConfigModelRoutesValueNestedTimeout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budgets: Option<IndexMap<String, ConfigModelRoutesValueBudgetsValue>>,
+    #[serde(rename = "hedgeAfterMs", default, skip_serializing_if = "Option::is_none")]
+    pub hedge_after_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attempts: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub autonomy: Option<ConfigModelRoutesValueAutonomy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ConfigModelRoutesValueSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<IndexMap<String, f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<Vec<ConfigModelRoutesValueSchedulesItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<ConfigModelRoutesValueLimit>,
+}
+
+/// `Config.ModelRoutes`
+pub type ConfigModelRoutes = IndexMap<String, ConfigModelRoutesValue>;
+
+literal_enum! {
+ConfigModelRouteProviderRoutesValueSelection {
+    Ordered => "ordered",
+    RoundRobin => "round-robin",
+    Weighted => "weighted",
+}
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub enum ConfigModelRouteProviderRoutesValueWindowsValue {
+    String(String),
+    Object(ConfigModelRouteTargetObjectWindowObject),
+    /// A shape this client does not know, kept as it arrived.
+    Unknown(serde_json::Value),
+}
+
+impl<'de> Deserialize<'de> for ConfigModelRouteProviderRoutesValueWindowsValue {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        crate::de::union(deserializer, Self::from_raw)
+    }
+}
+
+impl ConfigModelRouteProviderRoutesValueWindowsValue {
+    fn from_raw(raw: &crate::de::Raw) -> Result<Self, serde_json::Error> {
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::String(member));
+        }
+        if let Ok(member) = raw.decode() {
+            return Ok(Self::Object(member));
+        }
+        raw.unknown().map(Self::Unknown)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigModelRouteProviderRoutesValue {
+    pub providers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<ConfigModelRouteProviderRoutesValueSelection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weights: Option<IndexMap<String, f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<IndexMap<String, ConfigModelRouteProviderRoutesValueWindowsValue>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<Vec<ConfigModelRoutesValueSchedulesItem>>,
+}
+
+/// `Config.ModelRoute.ProviderRoutes`
+pub type ConfigModelRouteProviderRoutes = IndexMap<String, ConfigModelRouteProviderRoutesValue>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSchedulesItem {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routes: Option<Vec<String>>,
+    pub when: ConfigModelRoutesValueSchedulesItemWhen,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub factor: Option<f64>,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+/// `Config.ModelRoute.Windows`
+pub type ConfigModelRouteWindows = IndexMap<String, ConfigModelRoutesValueSchedulesItemWhenObject>;
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesTuning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(rename = "intervalMinutes", default, skip_serializing_if = "Option::is_none")]
+    pub interval_minutes: Option<i64>,
+    #[serde(rename = "windowHours", default, skip_serializing_if = "Option::is_none")]
+    pub window_hours: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesLog {
+    #[serde(rename = "captureErrorBodies", default, skip_serializing_if = "Option::is_none")]
+    pub capture_error_bodies: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsBench {
+    #[serde(rename = "maxCooldownMs", default, skip_serializing_if = "Option::is_none")]
+    pub max_cooldown_ms: Option<i64>,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub multiplier: Option<f64>,
+    #[serde(rename = "failureCapMs", default, skip_serializing_if = "Option::is_none")]
+    pub failure_cap_ms: Option<i64>,
+    #[serde(rename = "retryAfterMinMs", default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_min_ms: Option<i64>,
+    #[serde(rename = "cooldownCapMs", default, skip_serializing_if = "Option::is_none")]
+    pub cooldown_cap_ms: Option<i64>,
+    #[serde(rename = "quotaCooldownCapMs", default, skip_serializing_if = "Option::is_none")]
+    pub quota_cooldown_cap_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsDemotion {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after: Option<i64>,
+    #[serde(rename = "windowMs", default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<i64>,
+    #[serde(default, serialize_with = "crate::ser::option_number", skip_serializing_if = "Option::is_none")]
+    pub factor: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsQuotaGate {
+    #[serde(rename = "maxMs", default, skip_serializing_if = "Option::is_none")]
+    pub max_ms: Option<i64>,
+    #[serde(rename = "fallbackMs", default, skip_serializing_if = "Option::is_none")]
+    pub fallback_ms: Option<i64>,
+    #[serde(rename = "feedTtlMs", default, skip_serializing_if = "Option::is_none")]
+    pub feed_ttl_ms: Option<i64>,
+    #[serde(
+        rename = "balanceDeadThreshold",
+        default,
+        serialize_with = "crate::ser::option_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub balance_dead_threshold: Option<f64>,
+    #[serde(
+        rename = "rootStartMaxPct",
+        default,
+        serialize_with = "crate::ser::option_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub root_start_max_pct: Option<f64>,
+    #[serde(rename = "rootStartEnabled", default, skip_serializing_if = "Option::is_none")]
+    pub root_start_enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsEscalation {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(rename = "afterGiveUps", default, skip_serializing_if = "Option::is_none")]
+    pub after_give_ups: Option<i64>,
+    #[serde(rename = "outcomeWindow", default, skip_serializing_if = "Option::is_none")]
+    pub outcome_window: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsNetwork {
+    #[serde(rename = "windowMs", default, skip_serializing_if = "Option::is_none")]
+    pub window_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<i64>,
+    #[serde(rename = "providerModels", default, skip_serializing_if = "Option::is_none")]
+    pub provider_models: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsMembership {
+    #[serde(rename = "waitMs", default, skip_serializing_if = "Option::is_none")]
+    pub wait_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsContinuity {
+    #[serde(rename = "hedgeRequests", default, skip_serializing_if = "Option::is_none")]
+    pub hedge_requests: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettingsOverrides {
+    #[serde(
+        rename = "preferredFactor",
+        default,
+        serialize_with = "crate::ser::option_number",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub preferred_factor: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutesSettings {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bench: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsBench>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub demotion: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsDemotion>,
+    #[serde(rename = "quotaGate", default, skip_serializing_if = "Option::is_none")]
+    pub quota_gate: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsQuotaGate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escalation: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsEscalation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsNetwork>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub membership: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsMembership>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continuity: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsContinuity>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overrides: Option<ConfigEntryDocumentInfoExperimentalRoutesSettingsOverrides>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ConfigEntryDocumentInfoExperimentalRoutes {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models: Option<ConfigModelRoutes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub providers: Option<ConfigModelRouteProviderRoutes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedules: Option<Vec<ConfigEntryDocumentInfoExperimentalRoutesSchedulesItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows: Option<ConfigModelRouteWindows>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tuning: Option<ConfigEntryDocumentInfoExperimentalRoutesTuning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log: Option<ConfigEntryDocumentInfoExperimentalRoutesLog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub settings: Option<ConfigEntryDocumentInfoExperimentalRoutesSettings>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ConfigEntryDocumentInfoExperimental {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<ConfigEntryDocumentInfoAliases>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub portable_shell_scanner: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12605,8 +14658,6 @@ pub struct ConfigEntryDocumentInfoExperimental {
     pub media_blob: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifacts: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub video_generate: Option<ConfigEntryDocumentInfoExperimentalVideoGenerate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub console_watches: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -12622,15 +14673,37 @@ pub struct ConfigEntryDocumentInfoExperimental {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sqlite_fts: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_generate: Option<ConfigEntryDocumentInfoExperimentalVideoGenerate>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub part_rows: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_generate: Option<ConfigEntryDocumentInfoExperimentalVideoGenerate>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub subagent_depth: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location_idle_timeout: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_depth: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_timeout: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policies: Option<Vec<ConfigEntryDocumentInfoPoliciesItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route_demotion: Option<ConfigEntryDocumentInfoExperimentalModelRouteDemotion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routes: Option<ConfigEntryDocumentInfoExperimentalRoutes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_routes: Option<ConfigModelRoutes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_routes: Option<ConfigModelRouteProviderRoutes>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route_schedules: Option<Vec<ConfigEntryDocumentInfoExperimentalRoutesSchedulesItem>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route_windows: Option<ConfigModelRouteWindows>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route_tuning: Option<ConfigEntryDocumentInfoExperimentalRoutesTuning>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route_log: Option<ConfigEntryDocumentInfoExperimentalRoutesLog>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_route_settings: Option<ConfigEntryDocumentInfoExperimentalRoutesSettings>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -12694,7 +14767,11 @@ pub struct ConfigEntryDocumentInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub warming: Option<ConfigEntryDocumentInfoWarming>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub messaging: Option<ConfigEntryDocumentInfoMessaging>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub providers: Option<IndexMap<String, ConfigEntryDocumentInfoProvidersValue>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aliases: Option<ConfigEntryDocumentInfoAliases>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub experimental: Option<ConfigEntryDocumentInfoExperimental>,
 }
@@ -13012,6 +15089,18 @@ impl crate::TaggedError for InstructionEntryValueTooLargeError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct InstructionEntryNotFoundError {
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    pub key: String,
+    pub message: String,
+}
+
+impl crate::TaggedError for InstructionEntryNotFoundError {
+    const TAG: &'static str = "InstructionEntryNotFoundError";
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProviderNotFoundError {
     #[serde(rename = "_tag")]
     pub tag: String,
@@ -13085,17 +15174,6 @@ impl crate::TaggedError for ProviderRequestError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct ForbiddenError {
-    #[serde(rename = "_tag")]
-    pub tag: String,
-    pub message: String,
-}
-
-impl crate::TaggedError for ForbiddenError {
-    const TAG: &'static str = "ForbiddenError";
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct VideoNotFoundError {
     #[serde(rename = "_tag")]
     pub tag: String,
@@ -13164,6 +15242,30 @@ impl crate::TaggedError for McpServerNotFoundError {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ForbiddenError {
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    pub message: String,
+}
+
+impl crate::TaggedError for ForbiddenError {
+    const TAG: &'static str = "ForbiddenError";
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CredentialNotFoundError {
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    #[serde(rename = "credentialID")]
+    pub credential_id: String,
+    pub message: String,
+}
+
+impl crate::TaggedError for CredentialNotFoundError {
+    const TAG: &'static str = "CredentialNotFoundError";
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ProjectNotFoundError {
     #[serde(rename = "_tag")]
     pub tag: String,
@@ -13211,6 +15313,18 @@ pub struct FileNotFoundError {
 
 impl crate::TaggedError for FileNotFoundError {
     const TAG: &'static str = "FileNotFoundError";
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct FileTooLargeError {
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    pub path: String,
+    pub message: String,
+}
+
+impl crate::TaggedError for FileTooLargeError {
+    const TAG: &'static str = "FileTooLargeError";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -13353,6 +15467,17 @@ pub struct WorktreeError {
 
 impl crate::TaggedError for WorktreeError {
     const TAG: &'static str = "WorktreeError";
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct MessagingNotFoundError {
+    #[serde(rename = "_tag")]
+    pub tag: String,
+    pub message: String,
+}
+
+impl crate::TaggedError for MessagingNotFoundError {
+    const TAG: &'static str = "MessagingNotFoundError";
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -13553,27 +15678,29 @@ pub mod tag {
         Disabled = "disabled", Document = "document", Env = "env", Error = "error", Event = "event", Every = "every",
         ExperimentalJobUpdated = "experimental.job.updated", ExperimentalMcpEvent = "experimental.mcp.event",
         Expired = "expired", External = "external", Failed = "failed", File = "file",
-        FilesystemChanged = "filesystem.changed", FormCancelled = "form.cancelled", FormCreated = "form.created",
-        FormReplied = "form.replied", Git = "git", Idle = "idle", Image = "image", Inline = "inline",
+        FilesystemChanged = "filesystem.changed", FilesystemWatcherDegraded = "filesystem.watcher-degraded",
+        FormCancelled = "form.cancelled", FormCreated = "form.created", FormReplied = "form.replied", Git = "git",
+        Idle = "idle", Image = "image", Inline = "inline",
         InstallationUpdateAvailable = "installation.update-available", InstallationUpdated = "installation.updated",
         Integer = "integer", IntegrationUpdated = "integration.updated", Iroh = "iroh", Json = "json", Key = "key",
         Local = "local", LocationShutdown = "location.shutdown", LocationSwitched = "location-switched",
         LogSynced = "log.synced", McpResourcesChanged = "mcp.resources.changed",
-        McpStatusChanged = "mcp.status.changed", ModelSwitched = "model-switched", ModelUpdated = "model.updated",
-        ModelsDevRefreshed = "models-dev.refreshed", Move = "move", Multiselect = "multiselect", Native = "native",
-        NeedsAuth = "needs_auth", None = "none", Number = "number", Oauth = "oauth", Package = "package",
-        Pending = "pending", PermissionAsked = "permission.asked", PermissionReplied = "permission.replied",
+        McpStatusChanged = "mcp.status.changed", MessagingMessageCreated = "messaging.message.created",
+        ModelSwitched = "model-switched", ModelUpdated = "model.updated", ModelsDevRefreshed = "models-dev.refreshed",
+        Move = "move", Multiselect = "multiselect", Native = "native", NeedsAuth = "needs_auth", None = "none",
+        Number = "number", Oauth = "oauth", Package = "package", Pending = "pending",
+        PermissionAsked = "permission.asked", PermissionReplied = "permission.replied",
         PersistentPtyAdded = "persistent-pty.added", PersistentPtyRemoved = "persistent-pty.removed",
         PersistentPtyUpdated = "persistent-pty.updated", PluginUpdated = "plugin.updated", Predicate = "predicate",
         ProjectUpdated = "project.updated", Prompt = "prompt", ProviderUpdated = "provider.updated",
         PtyCreated = "pty.created", PtyDeleted = "pty.deleted", PtyExited = "pty.exited", PtyUpdated = "pty.updated",
         Reasoning = "reasoning", ReferenceUpdated = "reference.updated", Remote = "remote", Retry = "retry",
         Running = "running", Score = "score", Sdk = "sdk", ServerConnected = "server.connected",
-        SessionAgentSelected = "session.agent.selected", SessionArchived = "session.archived",
-        SessionCompactionDelta = "session.compaction.delta", SessionCompactionEnded = "session.compaction.ended",
-        SessionCompactionFailed = "session.compaction.failed", SessionCompactionStarted = "session.compaction.started",
-        SessionCreated = "session.created", SessionDeleted = "session.deleted",
-        SessionExecutionFailed = "session.execution.failed",
+        ServerResync = "server.resync", SessionAgentSelected = "session.agent.selected",
+        SessionArchived = "session.archived", SessionCompactionDelta = "session.compaction.delta",
+        SessionCompactionEnded = "session.compaction.ended", SessionCompactionFailed = "session.compaction.failed",
+        SessionCompactionStarted = "session.compaction.started", SessionCreated = "session.created",
+        SessionDeleted = "session.deleted", SessionExecutionFailed = "session.execution.failed",
         SessionExecutionInterrupted = "session.execution.interrupted",
         SessionExecutionStarted = "session.execution.started",
         SessionExecutionSucceeded = "session.execution.succeeded", SessionForked = "session.forked",
@@ -13592,21 +15719,21 @@ pub mod tag {
         SessionSkillActivated = "session.skill.activated", SessionStatus = "session.status",
         SessionStepEnded = "session.step.ended", SessionStepFailed = "session.step.failed",
         SessionStepFirstToken = "session.step.first-token", SessionStepStarted = "session.step.started",
-        SessionStepStreamed = "session.step.streamed", SessionSynthetic = "session.synthetic",
-        SessionTextDelta = "session.text.delta", SessionTextEnded = "session.text.ended",
-        SessionTextStarted = "session.text.started", SessionToolCalled = "session.tool.called",
-        SessionToolFailed = "session.tool.failed", SessionToolInputDelta = "session.tool.input.delta",
-        SessionToolInputEnded = "session.tool.input.ended", SessionToolInputStarted = "session.tool.input.started",
-        SessionToolProgress = "session.tool.progress", SessionToolSuccess = "session.tool.success",
-        SessionUnarchived = "session.unarchived", SessionUsageRecorded = "session.usage.recorded",
-        SessionUsageUpdated = "session.usage.updated", SessionViewed = "session.viewed", Shell = "shell",
-        ShellCreated = "shell.created", ShellDeleted = "shell.deleted", ShellExited = "shell.exited", Skill = "skill",
-        SkillUpdated = "skill.updated", Streaming = "streaming", String = "string", Subagent = "subagent",
-        Summary = "summary", Synthetic = "synthetic", System = "system", Text = "text", Through = "through",
-        Tool = "tool", TuiCommandExecute = "tui.command.execute", TuiPromptAppend = "tui.prompt.append",
-        TuiSessionSelect = "tui.session.select", TuiToastShow = "tui.toast.show", Uri = "uri", Url = "url",
-        User = "user", VcsBranchUpdated = "vcs.branch.updated", Video = "video", Webrtc = "webrtc",
-        WebsearchUpdated = "websearch.updated", Websocket = "websocket", WorktreeResolved = "worktree.resolved",
-        WorktreeUpdated = "worktree.updated",
+        SessionStepStreamed = "session.step.streamed", SessionSubagentPolicyUpdated = "session.subagent-policy.updated",
+        SessionSynthetic = "session.synthetic", SessionTextDelta = "session.text.delta",
+        SessionTextEnded = "session.text.ended", SessionTextStarted = "session.text.started",
+        SessionToolCalled = "session.tool.called", SessionToolFailed = "session.tool.failed",
+        SessionToolInputDelta = "session.tool.input.delta", SessionToolInputEnded = "session.tool.input.ended",
+        SessionToolInputStarted = "session.tool.input.started", SessionToolProgress = "session.tool.progress",
+        SessionToolSuccess = "session.tool.success", SessionUnarchived = "session.unarchived",
+        SessionUsageRecorded = "session.usage.recorded", SessionUsageUpdated = "session.usage.updated",
+        SessionViewed = "session.viewed", Shell = "shell", ShellCreated = "shell.created",
+        ShellDeleted = "shell.deleted", ShellExited = "shell.exited", Skill = "skill", SkillUpdated = "skill.updated",
+        Streaming = "streaming", String = "string", Subagent = "subagent", Summary = "summary", Synthetic = "synthetic",
+        System = "system", Text = "text", Through = "through", Tool = "tool", TuiCommandExecute = "tui.command.execute",
+        TuiPromptAppend = "tui.prompt.append", TuiSessionSelect = "tui.session.select", TuiToastShow = "tui.toast.show",
+        Uri = "uri", Url = "url", User = "user", VcsBranchUpdated = "vcs.branch.updated", Video = "video",
+        Webrtc = "webrtc", WebsearchUpdated = "websearch.updated", Websocket = "websocket",
+        WorktreeResolved = "worktree.resolved", WorktreeUpdated = "worktree.updated",
     }
 }

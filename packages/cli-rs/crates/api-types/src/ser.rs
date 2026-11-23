@@ -18,3 +18,40 @@ pub fn option_number<S: Serializer>(value: &Option<f64>, serializer: S) -> Resul
         None => serializer.serialize_none(),
     }
 }
+
+/// For an optional and nullable number: `Some(None)` is written as `null`, and `Some(Some(value))`
+/// as [`option_number`] writes it. A `None` field is skipped by its `skip_serializing_if`.
+pub fn double_option_number<S: Serializer>(
+    value: &Option<Option<f64>>,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match value {
+        Some(value) => option_number(value, serializer),
+        None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Serialize;
+
+    use super::*;
+
+    #[derive(Serialize)]
+    struct Field {
+        #[serde(
+            serialize_with = "double_option_number",
+            skip_serializing_if = "Option::is_none"
+        )]
+        value: Option<Option<f64>>,
+    }
+
+    #[test]
+    fn double_option_number_writes_like_json_stringify() {
+        let json = |value: Option<Option<f64>>| serde_json::to_string(&Field { value }).unwrap();
+        assert_eq!(json(Some(Some(3.0))), "{\"value\":3}");
+        assert_eq!(json(Some(Some(3.5))), "{\"value\":3.5}");
+        assert_eq!(json(Some(None)), "{\"value\":null}");
+        assert_eq!(json(None), "{}");
+    }
+}

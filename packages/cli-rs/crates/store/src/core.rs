@@ -446,6 +446,7 @@ impl State {
                     text: event.data.text.clone(),
                     description: event.data.description.clone(),
                     metadata: event.data.metadata.clone(),
+                    delivery: None,
                     time: SessionInboxUserTime { created: event.created },
                 };
                 self.insert_message(&event.data.session_id, SessionMessageInfo::Synthetic(row));

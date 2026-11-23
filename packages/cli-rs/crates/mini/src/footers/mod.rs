@@ -802,7 +802,7 @@ impl Inner {
         if tab.status != Status::Running {
             return;
         }
-        let input = SessionInterruptInput { session_id: SessionID(tab.session_id), resume: None };
+        let input = SessionInterruptInput { session_id: SessionID(tab.session_id), resume: None, force: None };
         self.app.spawn(async move { target.client.session_interrupt(&input).await }, |_, result| {
             if let Err(error) = result {
                 log::warn!("mini subagent interrupt failed: {error}");

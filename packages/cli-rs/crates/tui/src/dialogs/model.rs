@@ -1,6 +1,6 @@
 //! Model selection, favorites, and usage alerts.
 
-use opencode_api::generated::{ModelInfo, ModelInfoStatus, ProviderInfo};
+use opencode_api::generated::{ModelInfo, ModelInfoStatus, ProviderInfoWithModels};
 use opencode_api::js::locale_compare;
 use opencode_local::model_pref::Model;
 use opencode_ui::fuzzy;
@@ -160,7 +160,7 @@ impl Catalog {
     fn of(
         local: &Local,
         models: &[ModelInfo],
-        providers: &[ProviderInfo],
+        providers: &[ProviderInfoWithModels],
         provider: Option<&str>,
         favorites_at_open: &[Model],
         marker: Color,

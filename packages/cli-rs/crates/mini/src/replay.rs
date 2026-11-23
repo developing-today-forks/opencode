@@ -1797,7 +1797,7 @@ pub async fn wait(client: &Client, session: &str, mut connected: watch::Receiver
 
 /// `session.interrupt`, for mini's two-press gesture (`resume: true`) and run's shutdown.
 pub async fn interrupt(client: &Client, session: &str, resume: Option<bool>) -> Result<(), String> {
-    let input = SessionInterruptInput { session_id: SessionID(session.to_owned()), resume };
+    let input = SessionInterruptInput { session_id: SessionID(session.to_owned()), resume, force: None };
     client.session_interrupt(&input).await.map(drop).map_err(|error| error.to_string())
 }
 

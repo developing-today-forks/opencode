@@ -34,9 +34,11 @@
   [36mplugin[0m             Manage plugins
   [36mmodels[0m             List all available models
   [36mstats[0m              Show shareable usage statistics
+  [36mquota[0m              Show provider quota usage
   [36mmini[0m               Start the minimal interactive interface
   [36mrun[0m                Run OpenCode with a message
   [36msession[0m            Manage sessions
+  [36mmsg[0m                Send, read and search inter-session messages
   [36mservice[0m            Manage the background server
   [36mreload[0m             Reload configuration
   [36mmachine[0m            Manage remote machines

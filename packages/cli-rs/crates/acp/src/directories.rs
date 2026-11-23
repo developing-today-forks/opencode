@@ -78,8 +78,8 @@ pub async fn activate(client: &Client, session: &SessionInfo, directories: &[Str
         client
             .session_update(&SessionUpdateInput {
                 session_id: session.id.clone(),
-                permissions: permissions_changed.then_some(permissions),
-                metadata: metadata_changed.then_some(metadata),
+                permissions: permissions_changed.then_some(Some(permissions)),
+                metadata: metadata_changed.then_some(Some(metadata)),
                 ..SessionUpdateInput::default()
             })
             .await,

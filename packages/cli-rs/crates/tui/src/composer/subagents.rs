@@ -159,7 +159,7 @@ pub(super) fn commands(inner: &Rc<Inner>) -> Vec<TuiCommand> {
             let cancels: Vec<_> = entry.jobs.iter().map(|job| tui.data.job_cancel(job)).collect();
             tui.app.runtime().spawn(async move {
                 if entry.running {
-                    let input = SessionInterruptInput { session_id: entry.session, resume: None };
+                    let input = SessionInterruptInput { session_id: entry.session, resume: None, force: None };
                     if let Err(error) = client.session_interrupt(&input).await {
                         log::warn!("failed to interrupt the subagent: {error}");
                     }
