@@ -47,6 +47,71 @@ const accessKeys = createRemoteJWKSet(new URL(`${accessTeam}/cdn-cgi/access/cert
 const readTtl = 60_000
 const reads = new Map<string, { expires: number; value: Promise<unknown> }>()
 
+/**
+ * Hard cap on inbound publish/admin request bodies. Publish payloads are
+ * artifact identifiers plus release metadata (kilobytes in practice) and the
+ * admin forms carry a handful of short fields; 1 MiB leaves generous headroom
+ * while bounding memory. Authentication bounds who can send, not how much:
+ * without a cap an accepted request buffers and parses without limit, and
+ * publish metadata is stored verbatim in D1. The declared-length check is an
+ * early exit only; the streaming reader enforces the same cap regardless of
+ * the header, mirroring the capped reader the retired changelog service used
+ * for its upstream body (#1250, the #1158 duration-not-bytes pattern).
+ */
+export const REQUEST_BODY_MAX_BYTES = 1024 * 1024
+
+/**
+ * Read a request body with a hard size cap. Returns the body bytes, or a 413
+ * response when the declared Content-Length or the streamed body exceeds the
+ * cap; an over-cap read cancels the body.
+ */
+export async function readBoundedBody(request: Request): Promise<Uint8Array<ArrayBuffer> | Response> {
+  const declared = Number(request.headers.get("content-length"))
+  if (Number.isFinite(declared) && declared > REQUEST_BODY_MAX_BYTES) {
+    await request.body?.cancel().catch(() => undefined)
+    return json({ error: "Request body too large" }, 413)
+  }
+  if (!request.body) return new Uint8Array(0)
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let size = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > REQUEST_BODY_MAX_BYTES) {
+      await reader.cancel().catch(() => undefined)
+      return json({ error: "Request body too large" }, 413)
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(size)
+  let offset = 0
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return bytes
+}
+
+async function readBoundedFormData(request: Request): Promise<FormData | Response> {
+  const body = await readBoundedBody(request)
+  if (body instanceof Response) return body
+  return new Request(request.url, {
+    method: request.method,
+    headers: { "content-type": request.headers.get("content-type") ?? "" },
+    body,
+  }).formData()
+}
+
+function parseJsonBody(body: Uint8Array): unknown {
+  try {
+    return JSON.parse(new TextDecoder().decode(body))
+  } catch {
+    return undefined
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: Pick<ExecutionContext, "waitUntil">): Promise<Response> {
     const url = new URL(request.url)
@@ -278,7 +343,8 @@ function rolloutCandidates(db: D1Database, active: ArtifactRow, floor: number) {
 async function configureRollout(request: Request, env: Env) {
   const invalid = validMutation(request)
   if (invalid) return invalid
-  const form = await request.formData()
+  const form = await readBoundedFormData(request)
+  if (form instanceof Response) return form
   const channel = form.get("channel")
   const input = form.get("duration_hours")
   const duration = typeof input === "string" && input.trim() ? Number(input) : NaN
@@ -440,7 +506,9 @@ async function admin(request: Request, env: Env) {
 async function publishArtifact(request: Request, env: Env) {
   const claims = await verifyGitHub(request)
   if (claims instanceof Response) return claims
-  const input: unknown = await request.json().catch(() => undefined)
+  const body = await readBoundedBody(request)
+  if (body instanceof Response) return body
+  const input: unknown = parseJsonBody(body)
   const artifact = parseArtifact(isRecord(input) ? input : {})
   if (artifact instanceof Response) return artifact
   if (!allowedChannels(claims).includes(artifact.channel)) return json({ error: "Channel is not allowed" }, 403)
@@ -466,7 +534,8 @@ async function publishArtifact(request: Request, env: Env) {
 export async function markArtifact(request: Request, env: Env, flag: "active" | "minimum") {
   const invalid = validMutation(request)
   if (invalid) return invalid
-  const form = await request.formData()
+  const form = await readBoundedFormData(request)
+  if (form instanceof Response) return form
   const key = parseKey({
     channel: form.get("channel"),
     name: form.get("name"),

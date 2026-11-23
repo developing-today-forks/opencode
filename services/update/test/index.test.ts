@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite"
 import { afterEach, expect, setSystemTime, test } from "bun:test"
 import { readdirSync, readFileSync } from "node:fs"
 import path from "node:path"
-import worker, { allowedChannels, markArtifact, validGitHubClaims } from "../src/index"
+import worker, { allowedChannels, markArtifact, readBoundedBody, REQUEST_BODY_MAX_BYTES, validGitHubClaims } from "../src/index"
 
 type Env = Parameters<typeof worker.fetch>[1]
 
@@ -265,4 +265,67 @@ test.each([
   ["production", false],
 ])("accepts publish tokens from environment %p: %p", (environment, valid) => {
   expect(validGitHubClaims(publishClaims("refs/heads/dev", "push", environment))).toBe(valid)
+})
+
+test("rejects a request body whose declared length exceeds the cap", async () => {
+  const body = await readBoundedBody(
+    new Request("https://opencode.ai/update/api/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": String(REQUEST_BODY_MAX_BYTES + 1) },
+      body: "{}",
+    }),
+  )
+  expect(body).toBeInstanceOf(Response)
+  expect((body as Response).status).toBe(413)
+  expect(await (body as Response).json()).toEqual({ error: "Request body too large" })
+})
+
+test("rejects a streamed form body that grows past the cap", async () => {
+  const db = database()
+  // 2 MiB streamed with no Content-Length: only the reader-side cap stops it.
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (let i = 0; i < 32; i++) controller.enqueue(new Uint8Array(64 * 1024).fill(120))
+      controller.close()
+    },
+  })
+  const response = await markArtifact(
+    new Request("https://opencode.ai/update/admin/activate", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: stream,
+      duplex: "half",
+    }),
+    db.env,
+    "active",
+  )
+  expect(response.status).toBe(413)
+  expect(await response.json()).toEqual({ error: "Request body too large" })
+})
+
+test("reads an in-cap body unchanged", async () => {
+  const payload = JSON.stringify({ channel: "latest", name: "cli" })
+  const body = await readBoundedBody(
+    new Request("https://opencode.ai/update/api/publish", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: payload,
+    }),
+  )
+  expect(body).toBeInstanceOf(Uint8Array)
+  expect(new TextDecoder().decode(body as Uint8Array)).toBe(payload)
+})
+
+test("still parses an in-cap form body", async () => {
+  const db = database()
+  const response = await markArtifact(
+    new Request("https://opencode.ai/update/admin/activate", {
+      method: "POST",
+      body: new URLSearchParams({ channel: "latest", name: "cli", distribution: "opencode", version: "1.0.0" }),
+    }),
+    db.env,
+    "active",
+  )
+  expect(response.status).toBe(404)
+  expect(await response.json()).toEqual({ error: "Artifact not found" })
 })
