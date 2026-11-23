@@ -46,6 +46,12 @@ describe("CDP session-expired classification (#2166)", () => {
     expect(isSessionExpiredStatus(outcome(500, "https://admin.example/api/quota"))).toBe(false)
     expect(isSessionExpiredStatus(outcome(0, ""))).toBe(false)
   })
+
+  test("a non-parseable final URL never throws and is not session-expired (#2657)", () => {
+    expect(isSessionExpiredStatus(outcome(200, "not a url"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(500, "not a url"))).toBe(false)
+    expect(isSessionExpiredStatus(outcome(401, "not a url"))).toBe(true)
+  })
 })
 
 type FakeMode = "wedge-after-location" | "silent" | "close-on-request" | "reply" | "eval-exception"
