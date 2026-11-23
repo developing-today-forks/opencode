@@ -31,6 +31,7 @@ import { CONSOLE_INTEGRATION, type ProviderDialogBody } from "./dialog-machine"
 import { connectMethods, selectProviderConnectView, type ProviderConnectMethod } from "./machine"
 import type { ProviderFormInput, ProviderFormView } from "./form-machine"
 import { ConsoleAuthorization } from "./console"
+import { DialogCustomProvider } from "@/providers/custom/dialog"
 import { StepActions, WaitingButton } from "./step-actions"
 import { DialogChatGPTPlanWelcome } from "./chatgpt-welcome"
 import { authServerName } from "./remote"
@@ -300,6 +301,7 @@ const providerNote = (id: string) => {
 function ProviderPicker(props: { directory?: string; onSelect: (provider: string) => void; onPrepare?: () => void }) {
   const integrations = useIntegrations(() => props.directory)
   const language = useLanguage()
+  const dialog = useDialog()
 
   const [store, setStore] = createStore<{
     filter: string
@@ -484,6 +486,31 @@ function ProviderPicker(props: { directory?: string; onSelect: (provider: string
             <div class="flex h-24 items-center justify-center text-[13px] font-[440] text-v2-text-text-muted">
               {language.t("dialog.provider.empty")}
             </div>
+          </Show>
+          <Show when={!store.filter.trim() || "custom provider".includes(store.filter.trim().toLowerCase())}>
+            <section class="flex flex-col gap-0.5">
+              <div class="px-2 pt-2.5 pb-0.5 text-[12px] font-[440] leading-[18px] tracking-[0.05px] text-v2-text-text-faint">
+                {language.t("provider.custom.title")}
+              </div>
+              <button
+                type="button"
+                class="flex min-h-8 w-full items-center gap-2 rounded-md py-1.5 ps-2 pe-2 text-left text-[13px] leading-5 tracking-[-0.04px] hover:bg-v2-overlay-simple-overlay-hover focus-visible:-outline-offset-2"
+                onClick={() => {
+                  props.onPrepare?.()
+                  void dialog.show(() => (
+                    <DialogCustomProvider directory={props.directory} onSaved={(provider) => connect(provider)} />
+                  ))
+                }}
+              >
+                <Icon name="plus" class="shrink-0 text-v2-icon-icon-base" />
+                <span class="min-w-0 truncate font-[440] text-v2-text-text-base">
+                  {language.t("provider.custom.title")}
+                </span>
+                <span class="min-w-0 shrink-[999] truncate font-[440] text-v2-text-text-muted">
+                  {language.t("provider.custom.description")}
+                </span>
+              </button>
+            </section>
           </Show>
         </div>
         <div

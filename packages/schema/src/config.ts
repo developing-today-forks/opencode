@@ -134,8 +134,34 @@ export class Info extends Schema.Class<Info>("Config.Info")({
   experimental: ConfigExperimental.Info.pipe(optional),
 }) {}
 
+/**
+ * The provider fields a config patch may write. Deliberately a plain shape,
+ * not ConfigProvider.Info: a patch is data for the config file, so it carries
+ * no branded IDs or class instances, and the full Info schema validates the
+ * document again when the patched file is reloaded.
+ */
+export const ProviderPatch = Schema.Struct({
+  name: Schema.String.pipe(optional),
+  package: Schema.String.pipe(optional),
+  env: Schema.String.pipe(Schema.Array, optional),
+  settings: Schema.Record(Schema.String, Schema.Json).pipe(optional),
+  headers: Schema.Record(Schema.String, Schema.String).pipe(optional),
+  body: Schema.Record(Schema.String, Schema.Json).pipe(optional),
+  models: Schema.Record(
+    Schema.String,
+    Schema.Struct({
+      name: Schema.String.pipe(optional),
+      modelID: Schema.String.pipe(optional),
+      settings: Schema.Record(Schema.String, Schema.Json).pipe(optional),
+      headers: Schema.Record(Schema.String, Schema.String).pipe(optional),
+    }),
+  ).pipe(optional),
+}).annotate({ identifier: "Config.ProviderPatch" })
+export interface ProviderPatch extends Schema.Schema.Type<typeof ProviderPatch> {}
+
 export const Patch = Schema.Struct({
-  shell: Schema.NullOr(Schema.String),
+  shell: Schema.NullOr(Schema.String).pipe(optional),
+  providers: Schema.Record(Schema.String, Schema.NullOr(ProviderPatch)).pipe(optional),
 }).annotate({ identifier: "Config.Patch" })
 export interface Patch extends Schema.Schema.Type<typeof Patch> {}
 

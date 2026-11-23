@@ -22457,9 +22457,21 @@
                 "type": "null"
               }
             ]
+          },
+          "providers": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "$ref": "#/components/schemas/Config.ProviderPatch"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
           }
         },
-        "required": ["shell"],
         "additionalProperties": false
       },
       "Config.Plugin.EntryEncoded": {
@@ -22581,6 +22593,60 @@
             "type": "object",
             "additionalProperties": {
               "$ref": "#/components/schemas/Config.ModelEncoded"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Config.ProviderPatch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "package": {
+            "type": "string"
+          },
+          "env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "settings": {
+            "type": "object"
+          },
+          "headers": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            }
+          },
+          "body": {
+            "type": "object"
+          },
+          "models": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "modelID": {
+                  "type": "string"
+                },
+                "settings": {
+                  "type": "object"
+                },
+                "headers": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
             }
           }
         },

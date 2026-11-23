@@ -6327,7 +6327,29 @@ export type ConfigGetOutput = Array<ConfigEntry>
 
 export type ConfigShellsOutput = Array<ConfigShellOption>
 
-export type ExperimentalConfigUpdateInput = { readonly shell: string | null }
+export type ExperimentalConfigUpdateInput = {
+  readonly shell?: string | null | undefined
+  readonly providers?:
+    | {
+        readonly [x: string]: {
+          readonly name?: string
+          readonly package?: string
+          readonly env?: ReadonlyArray<string>
+          readonly settings?: { readonly [x: string]: JsonValue }
+          readonly headers?: { readonly [x: string]: string }
+          readonly body?: { readonly [x: string]: JsonValue }
+          readonly models?: {
+            readonly [x: string]: {
+              readonly name?: string
+              readonly modelID?: string
+              readonly settings?: { readonly [x: string]: JsonValue }
+              readonly headers?: { readonly [x: string]: string }
+            }
+          }
+        } | null
+      }
+    | undefined
+}
 
 export type ExperimentalConfigUpdateOutput = void
 
