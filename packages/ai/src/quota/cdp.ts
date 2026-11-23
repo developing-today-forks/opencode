@@ -335,7 +335,13 @@ export const isSessionExpiredStatus = (result: CdpFetchResult): boolean => {
   if (!result.url) return false
   // Redirects to login pages land on an exact auth/login path segment.
   // Resource names (for example, `login-history`) and query values are not pages.
-  return new URL(result.url).pathname
-    .split("/")
-    .some((segment) => segment.toLowerCase() === "auth" || segment.toLowerCase() === "login")
+  try {
+    return new URL(result.url).pathname
+      .split("/")
+      .some((segment) => segment.toLowerCase() === "auth" || segment.toLowerCase() === "login")
+  } catch {
+    // A final URL that does not parse names no login page; the HTTP status
+    // (already checked above) is the only signal available.
+    return false
+  }
 }
