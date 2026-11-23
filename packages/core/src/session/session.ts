@@ -1,6 +1,6 @@
 export * as Session from "./session.js"
 
-import { DateTime, Effect, Fiber, Option, Scope } from "effect"
+import { DateTime, Effect, Option, Scope } from "effect"
 import type { Agent } from "@opencode/schema/agent"
 import type { Model } from "@opencode/schema/model"
 import type { Permission } from "@opencode/schema/permission"
@@ -11,16 +11,25 @@ import { Database } from "../database/database.js"
 import { Instance } from "../instance/service.js"
 import { LocationServiceMap } from "../location-service-map.js"
 import { MessagingVars } from "../messaging/vars.js"
-import { ShellResult } from "../shell/result.js"
+import { Command } from "../command.js"
+import { Plugin } from "../plugin/service.js"
 import type { Skill } from "../skill.js"
-import { BusyError, CompactionConflictError, InboxConflictError, NotFoundError, PromptConflictError } from "./error.js"
+import {
+  BusyError,
+  CommandConflictError,
+  CompactionConflictError,
+  InboxConflictError,
+  NotFoundError,
+  PromptConflictError,
+  ShellConflictError,
+} from "./error.js"
 import { SessionEvent } from "./event.js"
 import { SessionExecution } from "./execution.js"
 import { SessionInbox } from "./inbox.js"
 import { SessionMessage } from "./message.js"
+import { SessionOperation } from "./operation.js"
 import { SessionPrompt } from "./prompt.js"
 import { SessionRevert } from "./revert.js"
-import { SessionShell } from "./shell.js"
 import { SessionSkill } from "./skill.js"
 import { ModelGovernance } from "./model-governance.js"
 import { GovernanceConfig } from "./governance-config.js"
@@ -251,49 +260,136 @@ export const make = Effect.fn("Session.make")(function* () {
         }),
       ),
   )
+  // Starts an admitted operation's execution in the host scope, so the
+  // server owns its recording even if the submitting client disconnects.
+  // Admission returns as soon as the operation is durable; its start,
+  // progress and completion arrive as events.
+  const forkOperation = (session: SessionSchema.Info, operation: SessionInbox.Operation) =>
+    SessionOperation.run({
+      session,
+      operation,
+      bus,
+      notify: (note) =>
+        synthetic(session.id, { ...note, resume: false }).pipe(
+          Effect.catchTag("Session.NotFoundError", () => Effect.void),
+          Effect.orDie,
+          Effect.asVoid,
+        ),
+      started: (id) =>
+        store.message(id).pipe(
+          Effect.map((found) => found?.sessionID === session.id && found.message.type === "shell"),
+          Effect.orElseSucceed(() => false),
+        ),
+    }).pipe(
+      Effect.provideService(Instance.Service, instances),
+      Effect.forkIn(scope, { startImmediately: true }),
+      Effect.asVoid,
+    )
+
   const shell = Effect.fn("Session.shell")(function* (
     sessionID: SessionSchema.ID,
-    input: { id?: SessionMessage.ID; command: string },
+    input: { id?: SessionMessage.ID; command: string; delivery?: SessionInbox.Delivery },
   ) {
     const session = yield* get(sessionID)
-    // The server owns completion recording even if the submitting client disconnects.
-    const running = yield* Effect.gen(function* () {
-      const started = yield* SessionShell.start({ session, command: input.command }).pipe(
-        Effect.provideService(Instance.Service, instances),
-        Effect.tapError((error) =>
-          synthetic(sessionID, {
-            text: `User shell command failed to start:\n${input.command}\n\n${error.message}`,
-            description: input.command,
-            metadata: { source: "shell", state: "error" },
-            resume: false,
-          }),
-        ),
-        Effect.orDie,
-      )
-      yield* bus.publish(
-        SessionEvent.Shell.Started,
-        {
+    const inputID = input.id ?? SessionMessage.ID.create()
+    const delivery = input.delivery ?? "steer"
+    // Reconciliation, the already-ran check and admission share the Session's
+    // inbox lock, so a duplicate ID can never admit or start a shell twice.
+    const admitted = yield* SessionInbox.serialized(
+      sessionID,
+      Effect.gen(function* () {
+        const existing = yield* admission.reconcile({ id: inputID, sessionID, type: "shell", delivery })
+        if (existing) return { item: existing, fresh: false }
+        // A shell that already ran projects to a message under this same ID
+        // and its admission is long consumed; answer from that record.
+        const prior = yield* store.message(inputID).pipe(Effect.orElseSucceed(() => undefined))
+        if (prior?.sessionID === sessionID && prior.message.type === "shell")
+          return {
+            item: SessionInbox.Shell.make({
+              id: inputID,
+              sessionID,
+              time: { created: prior.message.time.created },
+              type: "shell" as const,
+              payload: SessionInbox.ShellPayload.make({ command: prior.message.command }),
+              delivery,
+            }),
+            fresh: false,
+          }
+        const item = yield* admission.admit({
+          id: inputID,
           sessionID,
-          shell: started.info,
-        },
-        { id: input.id ? Event.ID.make(input.id.replace(/^msg_/, "evt_")) : undefined },
-      )
-      const terminal = yield* started.result
-      const preview = yield* started.output
-      yield* bus.publish(SessionEvent.Shell.Ended, {
-        sessionID,
-        shell: terminal.info,
-        output: preview,
-      })
-      yield* synthetic(sessionID, {
-        ...ShellResult.userNotification(terminal),
-        resume: false,
-      }).pipe(
-        Effect.catchTag("Session.NotFoundError", () => Effect.void),
-        Effect.orDie,
-      )
-    }).pipe(Effect.forkIn(scope, { startImmediately: true }))
-    yield* Fiber.join(running)
+          item: {
+            type: "shell",
+            payload: SessionInbox.ShellPayload.make({ command: input.command }),
+            delivery,
+          },
+        })
+        return { item, fresh: true }
+      }),
+    ).pipe(
+      Effect.catchTag("SessionInbox.LifecycleConflict", () => new ShellConflictError({ sessionID, inputID })),
+    )
+    if (admitted.fresh) yield* forkOperation(session, admitted.item)
+    return admitted.item
+  })
+
+  const command = Effect.fn("Session.command")(function* (
+    sessionID: SessionSchema.ID,
+    input: {
+      id?: SessionMessage.ID
+      command: string
+      text: string
+      files?: SessionInbox.CommandPayload["files"]
+      agents?: SessionInbox.CommandPayload["agents"]
+      skills?: SessionInbox.CommandPayload["skills"]
+      delivery?: SessionInbox.Delivery
+    },
+  ) {
+    const session = yield* get(sessionID)
+    const inputID = input.id ?? SessionMessage.ID.create()
+    const delivery = input.delivery ?? "steer"
+    const admitted = yield* SessionInbox.serialized(
+      sessionID,
+      Effect.gen(function* () {
+        const existing = yield* admission.reconcile({ id: inputID, sessionID, type: "command", delivery })
+        if (existing) return { item: existing, fresh: false }
+        // An unknown command still fails the request, as it did when
+        // execution was inline; a known one is admitted durably and
+        // executes in admission order. Validation waits for plugin
+        // activation, as execution does: at a cold Location the registry
+        // is not populated until activation settles.
+        const known = yield* Plugin.awaitActivation.pipe(
+          Effect.andThen(Command.Service),
+          Effect.flatMap((commands) => commands.get(input.command)),
+          instances.provide(session),
+        )
+        if (!known)
+          return yield* new Command.NotFoundError({
+            command: input.command,
+            message: `Command not found: ${input.command}`,
+          })
+        const item = yield* admission.admit({
+          id: inputID,
+          sessionID,
+          item: {
+            type: "command",
+            payload: SessionInbox.CommandPayload.make({
+              command: input.command,
+              text: input.text,
+              files: input.files,
+              agents: input.agents,
+              skills: input.skills,
+            }),
+            delivery,
+          },
+        })
+        return { item, fresh: true }
+      }),
+    ).pipe(
+      Effect.catchTag("SessionInbox.LifecycleConflict", () => new CommandConflictError({ sessionID, inputID })),
+    )
+    if (admitted.fresh) yield* forkOperation(session, admitted.item)
+    return admitted.item
   })
   const skill = Effect.fn("Session.skill")(function* (
     sessionID: SessionSchema.ID,
@@ -401,6 +497,7 @@ export const make = Effect.fn("Session.make")(function* () {
     prompt,
     synthetic,
     shell,
+    command,
     skill,
     compact,
     wait,
@@ -428,6 +525,7 @@ export const make = Effect.fn("Session.make")(function* () {
     const prompt = operations.prompt.bind(undefined, sessionID)
     const synthetic = operations.synthetic.bind(undefined, sessionID)
     const shell = operations.shell.bind(undefined, sessionID)
+    const command = operations.command.bind(undefined, sessionID)
     const skill = operations.skill.bind(undefined, sessionID)
     const compact = operations.compact.bind(undefined, sessionID)
     const wait = operations.wait.bind(undefined, sessionID)
@@ -458,6 +556,7 @@ export const make = Effect.fn("Session.make")(function* () {
       prompt,
       synthetic,
       shell,
+      command,
       skill,
       compact,
       wait,

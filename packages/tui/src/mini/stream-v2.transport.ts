@@ -1772,6 +1772,7 @@ export async function createSessionTransport(input: StreamInput): Promise<Sessio
     return client.session.command(
       {
         sessionID: input.sessionID,
+        id: messageID,
         name: command.name,
         text: command.arguments,
         files: attachments.files.length ? attachments.files : undefined,

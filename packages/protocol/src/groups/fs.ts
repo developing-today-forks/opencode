@@ -1,15 +1,26 @@
 import { FileSystem } from "@opencode/schema/filesystem"
 import { Location } from "@opencode/schema/location"
-import { PositiveInt } from "@opencode/schema/schema"
+import { NonNegativeInt, PositiveInt } from "@opencode/schema/schema"
 import { Schema } from "effect"
 import { HttpApiEndpoint, HttpApiGroup, HttpApiSchema, OpenApi } from "effect/http-api"
 import { FileNotFoundError, FileTooLargeError, ServiceUnavailableError } from "../errors.js"
 import { LocationQuery, locationQueryOpenApi } from "./location.js"
 
+// The page ceiling for directory listings, mirroring the find cap of 200:
+// one request must not be able to materialise a whole directory.
+const ListLimit = PositiveInt.check(Schema.isLessThanOrEqualTo(200))
+
 const ListQuery = Schema.Struct({
   ...LocationQuery.fields,
   path: Schema.String.pipe(Schema.optional).annotate({
     description: "An absolute path or a path relative to the requested location. Defaults to the location directory.",
+  }),
+  limit: Schema.NumberFromString.pipe(Schema.decodeTo(ListLimit), Schema.optional).annotate({
+    description: "Maximum number of entries to return, at most 200. Defaults to 100.",
+  }),
+  offset: Schema.NumberFromString.pipe(Schema.decodeTo(NonNegativeInt), Schema.optional).annotate({
+    description:
+      "Number of entries to skip in the directories-first sorted order before the page starts. Defaults to 0.",
   }),
 })
 
@@ -67,7 +78,7 @@ export const FileSystemGroup = HttpApiGroup.make("server.fs")
           identifier: "fs.list",
           summary: "List directory",
           description:
-            "List direct children using an absolute path or a path relative to the requested location, including parents and siblings outside its directory. Entry paths remain relative to the requested location; listing does not switch locations.",
+            "List direct children using an absolute path or a path relative to the requested location, including parents and siblings outside its directory. Entry paths remain relative to the requested location; listing does not switch locations. Results are paged in a deterministic directories-first sorted order: limit (default 100, at most 200) bounds the page and offset skips entries before it, so a page shorter than the limit marks the end of the listing and a full page may be followed by more entries at offset + limit.",
         }),
       ),
   )

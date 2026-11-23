@@ -25,7 +25,7 @@ fn model(name: &str) -> Value {
 }
 
 fn provider(name: &str) -> Value {
-    json!({ "id": "company", "name": name, "activation": "enabled", "package": "aisdk:@ai-sdk/openai" })
+    json!({ "id": "company", "name": name, "activation": "enabled", "package": "aisdk:@ai-sdk/openai", "models": [] })
 }
 
 fn located(kind: &str, directory: &str) -> Value {

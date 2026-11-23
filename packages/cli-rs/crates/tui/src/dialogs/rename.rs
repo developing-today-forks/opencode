@@ -39,7 +39,7 @@ pub fn show(tui: &Tui, session: SessionID, title: Option<String>) {
 
 fn rename(tui: &Tui, session: SessionID, title: String) {
     let client = tui.data.client().clone();
-    let input = SessionUpdateInput { session_id: session, title: Some(title), ..SessionUpdateInput::default() };
+    let input = SessionUpdateInput { session_id: session, title: Some(Some(title)), ..SessionUpdateInput::default() };
     tui.app.spawn(
         async move { client.session_update(&input).await },
         bind!(tui, |tui, _, result| {

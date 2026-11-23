@@ -1,11 +1,12 @@
 import { describe, expect } from "bun:test"
-import { Effect, Layer, RcMap, Scope } from "effect"
+import { Context, Effect, Layer, RcMap, Scope } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Database } from "@opencode/core/database/database"
 import { Bus } from "@opencode/core/bus"
 import { Instance } from "@opencode/core/instance/service"
 import { Location } from "@opencode/core/location"
+import { Permission } from "@opencode/core/permission"
 import { Project } from "@opencode/core/project"
 import { AbsolutePath } from "@opencode/core/schema"
 import { Session } from "@opencode/core/session"
@@ -55,6 +56,19 @@ const it = testEffect(
     ],
   ),
 )
+
+// The removal purge settles asynchronously off the bus; poll a read until it shows
+// the settled state instead of assuming one yield is enough.
+function eventually<A>(read: Effect.Effect<A>, predicate: (value: A) => boolean) {
+  return Effect.gen(function* () {
+    let value = yield* read
+    for (let attempt = 0; attempt < 200 && !predicate(value); attempt++) {
+      yield* Effect.yieldNow
+      value = yield* read
+    }
+    return value
+  })
+}
 
 describe("Session.remove", () => {
   it.effect("removes a session and its children", () =>
@@ -112,6 +126,33 @@ describe("Session.remove", () => {
         _tag: "Failure",
         failure: { _tag: "Session.NotFoundError", sessionID },
       })
+    }),
+  )
+
+  it.effect("removes the session's pending permission requests with it", () =>
+    Effect.gen(function* () {
+      const temporary = yield* tmpdirScoped()
+      const location = Location.Ref.make({ directory: AbsolutePath.make(temporary.path) })
+      const session = yield* Session.Service
+      const locations = yield* LocationServiceMap.Service
+      const rules: Permission.Ruleset = [{ action: "deploy", resource: "*", effect: "ask" }]
+      const parent = yield* session.create({ location, permissions: rules })
+      const other = yield* session.create({ location, permissions: rules })
+      const context = yield* locations.contextEffect(location)
+      const permission = Context.get(context, Permission.Service)
+
+      const mine = yield* permission.ask({ sessionID: parent.id, action: "deploy", resources: ["prod"] })
+      const theirs = yield* permission.ask({ sessionID: other.id, action: "deploy", resources: ["prod"] })
+      expect(mine.effect).toBe("ask")
+      expect(theirs.effect).toBe("ask")
+      expect(yield* permission.forSession(parent.id)).toHaveLength(1)
+      expect(yield* permission.forSession(other.id)).toHaveLength(1)
+
+      yield* session.remove(parent.id)
+
+      expect(yield* eventually(permission.forSession(parent.id), (rows) => rows.length === 0)).toEqual([])
+      expect(yield* permission.get(theirs.id)).toBeDefined()
+      expect(yield* permission.forSession(other.id)).toHaveLength(1)
     }),
   )
 })

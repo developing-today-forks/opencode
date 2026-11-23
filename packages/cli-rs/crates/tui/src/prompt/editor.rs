@@ -100,7 +100,7 @@ impl Shared {
     fn interrupt(&self, tui: &Tui, session: SessionID) {
         let client = tui.data.client().clone();
         let previous = self.interrupted(&session);
-        let input = SessionInterruptInput { session_id: session.clone(), resume: Some(true) };
+        let input = SessionInterruptInput { session_id: session.clone(), resume: Some(true), force: None };
         let request = async move {
             previous.await;
             if let Err(error) = client.session_interrupt(&input).await {

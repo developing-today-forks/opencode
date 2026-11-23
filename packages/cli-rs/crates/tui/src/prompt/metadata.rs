@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use opencode_api::generated::{
-    AgentInfo, CommandInfo, ConfigEntry, ConfigEntryDocumentInfoModel, ModelInfo, ModelRef, ProviderID, ProviderInfo,
+    AgentInfo, CommandInfo, ConfigEntry, ConfigEntryDocumentInfoModel, ModelInfo, ModelRef, ProviderID, ProviderInfoWithModels,
 };
 use opencode_store::location::{Catalog as Read, Location};
 use opencode_store::{Data, Parts, State, Task};
@@ -19,7 +19,7 @@ const READS: [Read; 6] = [Read::Agent, Read::Model, Read::Provider, Read::Config
 pub struct Catalog {
     pub agents: Arc<[AgentInfo]>,
     pub models: Arc<[ModelInfo]>,
-    pub providers: Arc<[ProviderInfo]>,
+    pub providers: Arc<[ProviderInfoWithModels]>,
     /// Server commands, for `/name args` submits.
     pub commands: Arc<[CommandInfo]>,
     pub branch: Option<String>,

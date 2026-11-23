@@ -364,6 +364,6 @@ async fn cancel(client: &Client, form: &Value, message: Option<String>) {
     }
     if let Ok(session_id) = decode_session_id(&session_id) {
         let _ =
-            client.session_interrupt(&SessionInterruptInput { session_id: SessionID(session_id), resume: None }).await;
+            client.session_interrupt(&SessionInterruptInput { session_id: SessionID(session_id), resume: None, force: None }).await;
     }
 }

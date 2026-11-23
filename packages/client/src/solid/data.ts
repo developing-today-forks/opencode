@@ -51,6 +51,8 @@ import {
   isMessageNotFoundError,
   isPermissionNotFoundError,
   isSessionNotFoundError,
+  type SessionCommandInput,
+  type SessionInboxCommand,
   type SessionPromptInput,
 } from "../promise"
 import { createStore, produce, reconcile } from "solid-js/store"
@@ -314,26 +316,6 @@ const CHILD_PAGE = 200
 // Listings in flight across every walk below direct children in one client, so wide trees and several open
 // tabs do not queue the client's other requests behind discovery.
 const DESCENDANT_LISTINGS = 8
-// TODO: `sequence` and SEQUENCE_HANDOFF_MS patch a rare ordering race: a
-// `!shell` or `/command` sent behind a prompt that waits on a gate (the
-// desktop browser's attachment) must not reach the server before it. That is
-// fine for now and needs no core, server or protocol change. `session.prompt`
-// and `session.compact` already return on durable admission: core's
-// SessionInbox.admit and admitCompaction publish `session.inbox.enqueued`
-// (one `session_inbox` row), SessionExecution.wake starts the work, and its
-// progress arrives as events. `session.shell` and `session.command` do not:
-// Session.shell joins its fiber until the process exits, publishing
-// `session.shell.started` and `session.shell.ended` on the way, and
-// SessionCommand.execute runs the command, whose template may run shell,
-// before it prompts, so their POST stays open for the whole run. Admitting
-// both through the inbox, returning on admission and streaming output and
-// completion as events would make this chain as deterministic as prompt and
-// compact, and both could then go. The gate exists because the browser
-// plugin's `attach` RPC needs an existing session; `session.create` already
-// takes `permissions`, but nothing attaches at creation today.
-// How long a sequenced request that stays open holds its session's send chain
-// once it has left: time to reach the server before the next send does.
-const SEQUENCE_HANDOFF_MS = 250
 const DELETED_SESSION_LIMIT = 512
 
 export function createData(config: CreateDataInput) {
@@ -506,10 +488,11 @@ export function createData(config: CreateDataInput) {
   // to exist server-side instead of failing with "not found".
   const creating = new Map<string, Promise<unknown>>()
 
-  // Per-session send chain: prompts, compactions and the requests a caller
-  // puts in it with `sequence` must reach the server in submission order.
-  // Each waits for the previous POST to settle, so one failure does not block
-  // the next.
+  // Per-session send chain: prompts, compactions, shells and commands must
+  // reach the server in submission order. Each waits for the previous POST
+  // to settle, so one failure does not block the next. Every one of them
+  // returns on durable admission, so a link settles when the server has the
+  // input, not when the work it starts has run.
   const sending = new Map<string, Promise<unknown>>()
   const messageLoads = new Map<string, Promise<unknown>>()
   const compacting = new Map<string, { id: string; observed: Set<string>; request: Promise<SessionInboxCompaction> }>()
@@ -1984,32 +1967,91 @@ export function createData(config: CreateDataInput) {
         compacting.set(input.sessionID, { id, observed, request })
         return request
       },
-      // Runs a session request this layer does not model, such as a shell or a
-      // server command, in the session's send chain: `prepare` and then `send`
-      // start once the prompts, compactions and sequenced requests made before
-      // it have left, so the server receives them in the order they were made.
-      // The chain keeps the order in which requests leave, not the work they
-      // start: such a request can stay open for as long as that work runs, as a
-      // shell command's does until its process exits. Its link therefore ends
-      // when the request settles or has had `SEQUENCE_HANDOFF_MS` to reach the
-      // server, whichever is first.
-      sequence<Value>(sessionID: string, send: () => Promise<Value>, prepare?: () => Promise<unknown>) {
-        const left = Promise.withResolvers<void>()
+      // Optimistic shell admission: render the shell in the session's
+      // pending inputs under a client-minted ID and return on admission. The
+      // shell's start, output and completion arrive as events; the durable
+      // inbox.enqueued echo upserts the same ID. Server admission is
+      // idempotent per ID, so a retry with the identical payload reconciles
+      // instead of running the shell twice, and an ID that already ran is
+      // answered from its projected message instead of running again.
+      shell(input: { sessionID: string; id?: string; command: string; delivery?: "steer" | "queue" }) {
+        const id = input.id ?? SessionMessage.ID.create()
+        const fresh =
+          !store.session.pending[input.sessionID]?.some((item) => item.id === id) &&
+          !messageIndex.get(input.sessionID)?.has(id)
+        if (fresh) {
+          outbox.add(id)
+          admitLocal({
+            id,
+            sessionID: input.sessionID,
+            time: { created: Date.now() },
+            type: "shell",
+            delivery: input.delivery ?? "steer",
+            payload: { command: input.command },
+          })
+        }
+        return sendAdmission(input.sessionID, async () =>
+          api().session.shell({
+            sessionID: input.sessionID,
+            id,
+            command: input.command,
+            delivery: input.delivery,
+          }),
+        ).catch((error) => {
+          if (fresh && outbox.delete(id)) removePending(input.sessionID, id)
+          throw error
+        })
+      },
+      // Optimistic command admission, like the shell's: the command is
+      // validated at admission (an unknown command fails this request), a
+      // known one executes in admission order, and its outcome arrives as
+      // events and inbox records. `gate` holds the send until the session is
+      // ready for it and `prepare` runs inside the send chain, in submission
+      // order, as they do for a prompt.
+      command(input: {
+        sessionID: string
+        id?: string
+        name: string
+        text: string
+        files?: SessionCommandInput["files"]
+        agents?: SessionCommandInput["agents"]
+        skills?: SessionCommandInput["skills"]
+        delivery?: "steer" | "queue"
+        gate?: Promise<unknown>
+        prepare?: () => Promise<unknown>
+      }) {
+        const { gate, prepare, ...request } = input
+        const id = request.id ?? SessionMessage.ID.create()
+        const fresh = !store.session.pending[request.sessionID]?.some((item) => item.id === id)
+        if (fresh) {
+          outbox.add(id)
+          const payload: SessionInboxCommand["payload"] = {
+            command: request.name,
+            text: request.text,
+            ...(request.files ? { files: [...request.files] } : {}),
+            ...(request.agents ? { agents: [...request.agents] } : {}),
+            ...(request.skills ? { skills: [...request.skills] } : {}),
+          }
+          admitLocal({
+            id,
+            sessionID: request.sessionID,
+            time: { created: Date.now() },
+            type: "command",
+            delivery: request.delivery ?? "steer",
+            payload,
+          })
+        }
         return sendAdmission(
-          sessionID,
+          request.sessionID,
           async () => {
             await prepare?.()
-            const request = send()
-            left.resolve()
-            return request
+            return api().session.command({ ...request, id })
           },
-          undefined,
-          (request) =>
-            Promise.race([
-              request,
-              left.promise.then(() => new Promise((resolve) => setTimeout(resolve, SEQUENCE_HANDOFF_MS))),
-            ]),
-        )
+          gate,
+        ).catch((error) => {
+          if (fresh && outbox.delete(id)) removePending(request.sessionID, id)
+          throw error
+        })
       },
       // Optimistic prompt admission: render the prompt immediately under a
       // client-minted ID, send it, and let the durable inbox.enqueued echo

@@ -6,6 +6,7 @@ import { SessionSchema } from "./schema.js"
 import type { SessionTable } from "./sql.js"
 import { PersistedRevert } from "@opencode/schema/session-revert"
 import { Money } from "@opencode/schema/money"
+import type { ModelUsage } from "../model-usage.js"
 
 const decodeRevert = Schema.decodeUnknownSync(PersistedRevert)
 
@@ -22,6 +23,7 @@ export type AuthoritativeUsage = {
 export function fromRow(
   row: typeof SessionTable.$inferSelect,
   authoritative?: AuthoritativeUsage,
+  serving?: ModelUsage.LastServing | null,
 ): SessionSchema.Info {
   return SessionSchema.Info.make({
     id: row.id,
@@ -53,6 +55,23 @@ export function fromRow(
             output: authoritative.output,
             reasoning: authoritative.reasoning,
             cache: { read: authoritative.cacheRead, write: authoritative.cacheWrite },
+          },
+        }
+      : undefined,
+    route_usage: serving
+      ? {
+          lastServing: {
+            leaf: serving.leaf,
+            providerID: Provider.ID.make(serving.providerID),
+            modelID: Model.ID.make(serving.modelID),
+            variant: serving.variant === null ? null : Model.VariantID.make(serving.variant),
+            routeID: serving.routeID,
+            outcome: serving.outcome,
+            attemptedLeaf: serving.attemptedLeaf,
+            failedOver: serving.failedOver,
+            failedOverTo: serving.failedOverTo,
+            hedged: serving.hedged,
+            timeStarted: serving.timeStarted,
           },
         }
       : undefined,

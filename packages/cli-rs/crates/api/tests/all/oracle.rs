@@ -69,7 +69,7 @@ async fn requests_match_the_typescript_client() {
         })
         .await;
     let _ = client
-        .event_subscribe(&EventSubscribeInput { types: Some(vec!["session.created".to_owned(), "rpc.x".to_owned()]) })
+        .event_subscribe(&EventSubscribeInput { types: Some(vec!["session.created".to_owned(), "rpc.x".to_owned()]), ..Default::default() })
         .await;
     let _ = client.session_remove(&SessionRemoveInput { session_id: "ses_2".into() }).await;
     let mention = |start: f64, end: f64, text: &str| PromptMention { start, end, text: text.to_owned() };

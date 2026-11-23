@@ -119,7 +119,7 @@ impl Inner {
             async move {
                 let input = SessionUpdateInput {
                     session_id: session.clone(),
-                    title: Some(title),
+                    title: Some(Some(title)),
                     ..SessionUpdateInput::default()
                 };
                 remote.client().session_update(&input).await.map_err(|error| error.to_string())?;
@@ -212,7 +212,7 @@ impl Inner {
         }
         tui.app.spawn(
             async move {
-                client.session_interrupt(&SessionInterruptInput { session_id: session.clone(), resume: None }).await?;
+                client.session_interrupt(&SessionInterruptInput { session_id: session.clone(), resume: None, force: None }).await?;
                 client.experimental_session_wait(&ExperimentalSessionWaitInput { session_id: session.clone() }).await?;
                 client
                     .session_revert_stage(&SessionRevertStageInput { session_id: session, message_id: id, files: None })

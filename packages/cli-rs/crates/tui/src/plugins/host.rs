@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use opencode_api::generated::{
     EventKind, IntegrationInfo, LocationQueryInput, McpServer, ModelInfo, ModelRef, PluginInfo, PluginListInput,
-    PluginSource, PluginState, ProviderID, ProviderInfo, SessionInboxDelivery, UsageLimitsInfo, V2Event, VcsInfo,
+    PluginSource, PluginState, ProviderID, ProviderInfoWithModels, SessionInboxDelivery, UsageLimitsInfo, V2Event, VcsInfo,
 };
 use opencode_api::kinds::EventKinds;
 use opencode_local::cli_config::AttentionSoundName;
@@ -903,7 +903,7 @@ impl abi::Read for Reader<'_> {
         self.tui.local.usage().flatten()
     }
 
-    fn providers(&self) -> Option<Arc<[ProviderInfo]>> {
+    fn providers(&self) -> Option<Arc<[ProviderInfoWithModels]>> {
         self.catalog(None, Catalog::Provider, |data| data.provider.clone())
     }
 

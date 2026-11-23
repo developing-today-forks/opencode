@@ -303,7 +303,7 @@ const reads = `    themeMode: (self: Read) -> "dark" | "light",
     --- The models of \`location\`, or where the TUI works; \`nil\` while they are not loaded.
     models: (self: Read, location: LocationRef?) -> { ${server("Model.Info")} }?,
     --- The providers where the TUI works; \`nil\` while they are not loaded.
-    providers: (self: Read) -> { ${server("Provider.Info")} }?,
+    providers: (self: Read) -> { ${server("Provider.InfoWithModels")} }?,
     --- The OpenCode Console workspace's usage limits; \`nil\` while they are not loaded.
     limits: (self: Read) -> ${server("UsageLimits.Info")}?,
     model: (self: Read) -> ${server("Model.Ref")}?,

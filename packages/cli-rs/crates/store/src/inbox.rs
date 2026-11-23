@@ -129,6 +129,7 @@ impl State {
                 agents: item.payload.agents.clone(),
                 skills: item.payload.skills.clone(),
                 metadata: item.payload.metadata.clone(),
+                delivery: None,
                 time: item.time.clone(),
             }),
             SessionInboxInfo::Synthetic(item) => SessionMessageInfo::Synthetic(SessionMessageSynthetic {
@@ -137,6 +138,7 @@ impl State {
                 text: item.payload.text.clone(),
                 description: item.payload.description.clone(),
                 metadata: item.payload.metadata.clone(),
+                delivery: None,
                 time: item.time.clone(),
             }),
             _ => return,

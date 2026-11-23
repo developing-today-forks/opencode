@@ -3446,7 +3446,14 @@ describe("V2 mini transport", () => {
           data: { sessionID: "ses_1" },
         })
       })
-      return ok(undefined)
+      return ok({
+        id: input.id ?? "msg_cmd",
+        sessionID: input.sessionID,
+        type: "command" as const,
+        payload: { command: input.name, text: input.text },
+        delivery: input.delivery ?? ("steer" as const),
+        time: { created: 2 },
+      }) as never
     })
 
     await transport.runPromptTurn({

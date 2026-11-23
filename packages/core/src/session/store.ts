@@ -14,6 +14,7 @@ import { Session } from "@opencode/schema/session"
 import { SessionMessageTable, SessionTable } from "./sql.js"
 import { fromRow } from "./info.js"
 import { ModelRouteLog } from "../model-route-log.js"
+import { ModelUsage } from "../model-usage.js"
 import { LiveToolMetadata } from "./runner/live-tool-metadata.js"
 
 const ListInputBase = {
@@ -181,7 +182,9 @@ const layer = Layer.effect(
       get: Effect.fnUntraced(function* (sessionID) {
         const row = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get().pipe(Effect.orDie)
         if (!row) return undefined
-        return fromRow(row, (yield* ModelRouteLog.authoritativeSessionUsage(db, [row.id]).pipe(Effect.orDie))[0])
+        const authoritative = (yield* ModelRouteLog.authoritativeSessionUsage(db, [row.id]).pipe(Effect.orDie))[0]
+        const attempts = yield* ModelRouteLog.sessionAttempts(db, row.id, 50).pipe(Effect.orDie)
+        return fromRow(row, authoritative, ModelUsage.lastServing(attempts))
       }),
       list: Effect.fn("SessionStore.list")(function* (input = {}) {
         const direction = input.anchor?.direction ?? "next"

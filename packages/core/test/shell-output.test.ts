@@ -1,4 +1,5 @@
 import { expect } from "bun:test"
+import { rm } from "node:fs/promises"
 import { Effect } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Config } from "@opencode/core/config"
@@ -194,6 +195,54 @@ if (process.platform !== "win32") {
           cursor = page.cursor
         }
         expect(first.output + rest).toBe(expected)
+      }),
+    ),
+  )
+
+  // Coverage for #2759: a capture file that disappears must not read as a successful empty page. This harness runs on the process daemon, whose readable size is the file itself, so a missing capture reports size 0 with the marker; the spawned path (in-memory size) is covered in shell-daemon.test.ts.
+  // The disappearance is surfaced with the missing-capture marker in both output() and result(),
+  // while a genuinely empty capture (file present, zero bytes) still reads as an empty success.
+  it.live("a capture deleted before a read reports the disappearance instead of an empty page", () =>
+    provide(
+      Effect.gen(function* () {
+        const { shell, info } = yield* setup
+        yield* Effect.promise(() => rm(info.file))
+        const marker = `[output file ${info.file} is missing; the capture is no longer available]`
+        expect(yield* shell.output(info.id)).toEqual({ output: marker, cursor: 0, size: 0, truncated: false })
+        expect((yield* shell.result(info)).capture).toEqual({ output: marker, truncated: false })
+      }),
+    ),
+  )
+
+  it.live("a capture deleted mid-paging reports the disappearance on the next page", () =>
+    provide(
+      Effect.gen(function* () {
+        const { shell, info } = yield* setup
+        expect(yield* shell.output(info.id, { cursor: 0, limit: 4 })).toEqual({
+          output: "0123",
+          cursor: 4,
+          size: 10,
+          truncated: false,
+        })
+        yield* Effect.promise(() => rm(info.file))
+        expect(yield* shell.output(info.id, { cursor: 4, limit: 4 })).toEqual({
+          output: `[output file ${info.file} is missing; the capture is no longer available]`,
+          cursor: 0,
+          size: 0,
+          truncated: false,
+        })
+      }),
+    ),
+  )
+
+  it.live("a genuinely empty capture still reads as a successful empty page", () =>
+    provide(
+      Effect.gen(function* () {
+        const shell = yield* Shell.Service
+        const info = yield* shell.create({ shell: "/bin/sh", command: "true", timeout: 0 })
+        yield* shell.wait(info.id)
+        expect(yield* shell.output(info.id)).toEqual({ output: "", cursor: 0, size: 0, truncated: false })
+        expect((yield* shell.result(info)).capture).toEqual({ output: "(no output)", truncated: false })
       }),
     ),
   )
