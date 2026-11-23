@@ -51,6 +51,14 @@ export async function writeJsonAtomic(
   value: unknown,
   renameFile: (source: string, destination: string) => Promise<void> = rename,
 ) {
+  return writeTextAtomic(filePath, JSON.stringify(value), renameFile)
+}
+
+export async function writeTextAtomic(
+  filePath: string,
+  content: string,
+  renameFile: (source: string, destination: string) => Promise<void> = rename,
+) {
   const absolute = path.resolve(filePath)
   await mkdir(path.dirname(absolute), { recursive: true })
   const target = await resolveAtomicTarget(absolute)
@@ -62,7 +70,7 @@ export async function writeJsonAtomic(
     const handle = await open(temporary, "wx", 0o600)
     created = true
     try {
-      await handle.writeFile(JSON.stringify(value))
+      await handle.writeFile(content)
     } finally {
       await handle.close()
     }
