@@ -3,7 +3,15 @@ import path from "node:path"
 import { Effect } from "effect"
 import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner"
 import type { Driver } from "./driver.js"
-import { Failed, NotFound, WrongKind, type FileInfo, type FilesImpl, type FileType } from "./files.js"
+import {
+  Failed,
+  MAX_WHOLE_FILE_BYTES,
+  NotFound,
+  WrongKind,
+  type FileInfo,
+  type FilesImpl,
+  type FileType,
+} from "./files.js"
 
 /**
  * The host filesystem binding. Deliberately raw node:fs rather than effect's
@@ -18,7 +26,37 @@ export const makeLocalDriver = (spawner: ChildProcessSpawner["Service"]): Driver
         const info = yield* stat(value, true)
         if (info.type !== "file") return yield* new WrongKind({ path: value, actual: info.type })
         if (range === undefined) {
-          const bytes = yield* attempt(value, () => fs.readFile(value), true)
+          if (info.size > MAX_WHOLE_FILE_BYTES) {
+            return yield* new Failed({ path: value, cause: wholeFileTooLarge(value, info.size) })
+          }
+          const bytes = yield* attempt(
+            value,
+            async () => {
+              const handle = await fs.open(value, "r")
+              try {
+                const chunks: Array<Uint8Array> = []
+                let total = 0
+                for (;;) {
+                  const buffer = new Uint8Array(READ_CHUNK_BYTES)
+                  const result = await handle.read(buffer, 0, buffer.length, null)
+                  if (result.bytesRead === 0) break
+                  total += result.bytesRead
+                  if (total > MAX_WHOLE_FILE_BYTES) throw wholeFileTooLarge(value, total)
+                  chunks.push(buffer.subarray(0, result.bytesRead))
+                }
+                const bytes = new Uint8Array(total)
+                let offset = 0
+                for (const chunk of chunks) {
+                  bytes.set(chunk, offset)
+                  offset += chunk.byteLength
+                }
+                return bytes
+              } finally {
+                await handle.close()
+              }
+            },
+            true,
+          )
           return { info, bytes }
         }
         const bytes = yield* attempt(
@@ -69,6 +107,11 @@ export const makeLocalDriver = (spawner: ChildProcessSpawner["Service"]): Driver
 
   return { spawner, overrides }
 }
+
+const READ_CHUNK_BYTES = 1024 * 1024
+
+const wholeFileTooLarge = (value: string, size: number) =>
+  new Error(`File of ${size} bytes exceeds the whole-file read limit of ${MAX_WHOLE_FILE_BYTES} bytes: ${value}`)
 
 const stat = (value: string, follow: boolean) =>
   attempt(value, () => (follow ? fs.stat(value) : fs.lstat(value)), true).pipe(

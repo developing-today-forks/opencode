@@ -3,7 +3,7 @@ import { ChildProcess } from "effect/process"
 import type { ChildProcessSpawner } from "effect/process/ChildProcessSpawner"
 import { collectStream } from "@opencode/util/process"
 import type { Driver } from "./driver.js"
-import { Failed, NotFound, WrongKind, type FileInfo, type Files, type FileType, type FilesImpl } from "./files.js"
+import { Failed, MAX_WHOLE_FILE_BYTES, NotFound, WrongKind, type FileInfo, type Files, type FileType, type FilesImpl } from "./files.js"
 
 /**
  * Files derived from spawning processes: one process per intent, "$1" is
@@ -14,7 +14,7 @@ import { Failed, NotFound, WrongKind, type FileInfo, type Files, type FileType, 
  * Malformed output from these scripts is our own bug and dies as a defect.
  */
 
-const MAX_DATA_BYTES = 64 * 1024 * 1024
+const MAX_DATA_BYTES = MAX_WHOLE_FILE_BYTES
 const MAX_ERROR_BYTES = 64 * 1024
 const NOT_FOUND = 44
 const WRONG_KIND = 45
