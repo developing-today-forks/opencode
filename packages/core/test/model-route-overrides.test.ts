@@ -174,6 +174,51 @@ describe("ModelRouteOverrides storage", () => {
     expect(ModelRouteOverrides.current()).toEqual([])
   })
 
+  test("an add refuses to overwrite a corrupt store and leaves its bytes unchanged (#2771)", () => {
+    const file = ModelRouteOverrides.filePath()
+    const corrupt = "{\"version\":1,\"overrides\":[{\"id\":\"keep-me\""
+    fs.writeFileSync(file, corrupt)
+    // The read path still tolerates the file, so routing never stops...
+    expect(ModelRouteOverrides.current()).toEqual([])
+    // ...but a write built on that tolerance would erase keep-me without a word.
+    expect(() => ModelRouteOverrides.add(draft({ id: "new", providers: ["openai"] }), now)).toThrow("not valid JSON")
+    expect(fs.readFileSync(file, "utf8")).toBe(corrupt)
+  })
+
+  test("a remove refuses to overwrite a corrupt store and leaves its bytes unchanged (#2771)", () => {
+    const file = ModelRouteOverrides.filePath()
+    const corrupt = "{\"version\":1,\"overrides\":[{\"id\":\"keep-me\""
+    fs.writeFileSync(file, corrupt)
+    expect(() => ModelRouteOverrides.remove("keep-me", now)).toThrow("not valid JSON")
+    expect(fs.readFileSync(file, "utf8")).toBe(corrupt)
+  })
+
+  test("an add refuses to silently erase an entry parse drops, but the entry itself stays removable (#2771)", () => {
+    const file = ModelRouteOverrides.filePath()
+    const entry = (id: string, providers: string[]) => ({
+      id,
+      action: "avoid",
+      providers,
+      models: [],
+      routes: [],
+      fixed: true,
+      until: now + DAY,
+      text: "",
+      source: "user",
+      createdAt: now,
+    })
+    // "broken" names no provider or model, so parse drops it: current() never shows it.
+    const stored = JSON.stringify({ version: 1, overrides: [entry("keep", ["openai"]), entry("broken", [])] }, null, 2)
+    fs.writeFileSync(file, stored)
+    expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["keep"])
+    expect(() => ModelRouteOverrides.add(draft({ id: "new", providers: ["openai"] }), now)).toThrow("cannot be read")
+    expect(fs.readFileSync(file, "utf8")).toBe(stored)
+    // Naming the unreadable entry is a deliberate act on it, so removing it still works.
+    ModelRouteOverrides.remove("broken", now)
+    expect(ModelRouteOverrides.current().map((item) => item.id)).toEqual(["keep"])
+    expect(fs.readFileSync(file, "utf8")).not.toContain("broken")
+  })
+
   test("an external replace that restores the old mtime is still re-read (#2605)", () => {
     const file = ModelRouteOverrides.filePath()
     ModelRouteOverrides.save([draft({ id: "a", providers: ["openai"] })], now)

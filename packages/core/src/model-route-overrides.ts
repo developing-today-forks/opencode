@@ -202,6 +202,44 @@ export const current = (): readonly Override[] => {
   return list
 }
 
+/** The stored overrides as a write must see them. `current()` tolerates a broken file so routing
+ * never stops, but a write built on that tolerance starts from an empty list and replaces a
+ * present-but-unreadable store with only the new state — one bad byte erases every override the
+ * user had, silently (#2771). So the write path reads strictly, the way the plan store's
+ * `readStore` does: a missing file is an empty store, while a file that is not valid JSON, holds
+ * no overrides list, or holds an entry `parse` cannot read refuses the write with an error, and
+ * nothing is overwritten until the file is fixed or moved aside. The one entry a write may always
+ * replace or remove is its own target: naming an entry by id is a deliberate act on that entry,
+ * even when the entry itself no longer parses. */
+const readForWrite = (targetID: string): readonly Override[] => {
+  const file = filePath()
+  let raw: string
+  try {
+    raw = fs.readFileSync(file, "utf8")
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return []
+    throw error
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(raw)
+  } catch {
+    throw new Error(`${file} is not valid JSON. Fix or move it before changing route overrides.`)
+  }
+  const entries = field(value, "overrides")
+  if (!Array.isArray(entries))
+    throw new Error(`${file} does not hold an overrides list. Fix or move it before changing route overrides.`)
+  const unreadable = entries.filter((entry) => parse({ overrides: [entry] }).length === 0)
+  const foreign = unreadable.find((entry) => field(entry, "id") !== targetID)
+  if (foreign !== undefined) {
+    const id = field(foreign, "id")
+    throw new Error(
+      `${file} holds an override entry that cannot be read${typeof id === "string" ? ` (id: ${id})` : ""}. Fix or move it before changing route overrides.`,
+    )
+  }
+  return parse(value)
+}
+
 const transientRenameCodes = new Set(["EPERM", "EACCES", "EBUSY"])
 const renameRetryDelays = [10, 25, 50, 100]
 const renameWait = new Int32Array(new SharedArrayBuffer(4))
@@ -302,13 +340,15 @@ function fileMode(file: string) {
   }
 }
 
-/** Adds one override, replacing any with the same id. */
+/** Adds one override, replacing any with the same id. Refuses, rather than starting from the
+ * tolerant read, when the stored file cannot be read (#2771). */
 export const add = (item: Override, now = Date.now()) =>
-  save([...current().filter((existing) => existing.id !== item.id), item], now)
+  save([...readForWrite(item.id).filter((existing) => existing.id !== item.id), item], now)
 
-/** Removes one override, e.g. when the user says the interpretation was wrong. */
+/** Removes one override, e.g. when the user says the interpretation was wrong. Refuses, rather
+ * than starting from the tolerant read, when the stored file cannot be read (#2771). */
 export const remove = (id: string, now = Date.now()) =>
   save(
-    current().filter((item) => item.id !== id),
+    readForWrite(id).filter((item) => item.id !== id),
     now,
   )
