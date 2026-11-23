@@ -933,6 +933,19 @@ export const layer = Layer.effect(
                           branchState,
                         ),
                   ),
+                  // Cross-route substitution (#12228): with the route and its
+                  // parents exhausted, an open door of the same class beats
+                  // re-seating a cooling door of this route in the last-resort
+                  // pass below — the same principle that seats a healthy
+                  // parent ahead of a cooling in-route target. For the walled
+                  // doors the policy names (quota, auth) the last-resort pass
+                  // cannot seat them anyway, so substitution is the only
+                  // productive step left before the structured ending.
+                  Effect.flatMap((next) =>
+                    next
+                      ? Effect.succeed(next)
+                      : cascadeToSubstitute(definition, requestedVariant, sessionID, requestTokens, branchState),
+                  ),
                   // Last resort, last (#7073): when no ready candidate remains
                   // anywhere in the cascade — every untried target cooling or
                   // quota-walled — seat the least-bad remaining target of this
@@ -1564,6 +1577,109 @@ export const layer = Layer.effect(
         return undefined
       })
 
+    // Cross-route substitution (#12228, Drewry's 2026-11-22 policy): when a route
+    // and every parent that nests it are exhausted — the whole route is walled —
+    // the walk may enter another route, but only one of the same cost/capability
+    // class (config `class` on the route being left). Substitution never crosses
+    // classes: a session never lands on a more expensive or differently-capable
+    // route by failing over, and ACP routes substitute only within ACP because
+    // they declare their own class. A route that declares no class substitutes
+    // nothing and is never substituted into, so undeclared routes keep exactly
+    // the pre-substitution behaviour. Candidates are ordered by measured record:
+    // each candidate's untried targets' answered/attempted counts over the
+    // retained outcome window (the in-process successor of the five-door
+    // measurement), Laplace-smoothed so an unmeasured route scores 1/2 — between
+    // a proven door and a failing one — with catalog order breaking ties, as in
+    // the parent cascade. The tried set carries over by ref, so a door already
+    // attempted in this walk is never re-dealt under the substitute. Entering a
+    // substitute is recorded as a decision on the route left behind — from, to
+    // and class — so a session's record shows the substitution; a silent swap
+    // would be a defect.
+    const cascadeToSubstitute = (
+      from: ModelRoute.Definition,
+      requestedVariant: VariantID | undefined,
+      sessionID: string | undefined,
+      requestTokens: number | undefined,
+      cascade: CascadeState,
+    ): Effect.Effect<Resolved | undefined, Error> =>
+      Effect.gen(function* () {
+        const routeClass = ModelRoute.routeClass(from)
+        if (routeClass === undefined) return undefined
+        if (!cascade.chain.some((entry) => String(entry.definition.id) === String(from.id)))
+          cascade.chain.push({ definition: from, tried: new Set() })
+        // Substitution discovery is execution, not picker discovery (#230), as
+        // in the parent cascade: candidates are the enabled route records.
+        const available = yield* models.all().pipe(
+          Effect.map((list) => list.filter((model) => model.enabled)),
+          Effect.catchCause(() => Effect.succeed([] as readonly Info[])),
+        )
+        const candidates = available
+          .flatMap((candidate, order) => {
+            if (candidate.providerID !== ModelRoute.PROVIDER_ID) return []
+            const substitute = ModelRoute.definition(candidate)
+            if (!substitute || cascade.visitedRoutes.has(String(substitute.id))) return []
+            if (ModelRoute.routeClass(substitute) !== routeClass) return []
+            // The selected route's variant gate applies to every route the
+            // cascade enters (#1014 Codex P2), substitutes included.
+            if (requestedVariant && !candidate.variants.some((item) => item.id === requestedVariant)) return []
+            const untried = substitute.targets.filter((target) => !cascade.triedRefs.has(cascadeRefKey(target)))
+            if (untried.length === 0) return []
+            const record = untried.reduce(
+              (total, target) => {
+                const entry = ModelRoute.measured(target)
+                return { answered: total.answered + entry.answered, attempts: total.attempts + entry.attempts }
+              },
+              { answered: 0, attempts: 0 },
+            )
+            return [{ candidate, substitute, score: (record.answered + 1) / (record.attempts + 2), order }]
+          })
+          .sort((a, b) => b.score - a.score || a.order - b.order)
+        for (const { candidate, substitute } of candidates) {
+          if (cascade.visitedRoutes.has(String(substitute.id))) continue
+          cascade.visitedRoutes.add(String(substitute.id))
+          const seed = new Set(
+            substitute.targets.flatMap((target, index) =>
+              cascade.triedRefs.has(cascadeRefKey(target)) ? [index] : [],
+            ),
+          )
+          // A substitute whose remaining targets all fail to load is
+          // exhausted, not fatal: the next candidate in measured order tries.
+          const resolved = yield* resolveRouteWithin(
+            candidate,
+            substitute,
+            requestedVariant,
+            seed,
+            false,
+            sessionID,
+            requestTokens,
+            cascade,
+          ).pipe(
+            Effect.catch((error) => {
+              cascade.loadErrors.push(error)
+              return Effect.succeed(undefined)
+            }),
+          )
+          if (resolved) {
+            ModelRouteLog.record({
+              kind: "decision",
+              row: {
+                time: Date.now(),
+                session_id: sessionID,
+                route_id: from.id,
+                selection: from.nodes[0]?.selection ?? "ordered",
+                variant: requestedVariant,
+                candidates: candidates.map(({ substitute: entry }) => String(entry.id)),
+                chosen: String(substitute.id),
+                reason: "cross-route-substitution",
+                detail: { from: String(from.id), to: String(substitute.id), class: routeClass },
+              },
+            })
+            return resolved
+          }
+        }
+        return undefined
+      })
+
     // Direct-model route attachment (#7073): a session launched on a bare
     // provider model carries no routing, so the runner's failover cascade —
     // gated on `model.routing` — can never engage and a startup provider
@@ -1648,6 +1764,14 @@ export const layer = Layer.effect(
                   next
                     ? Effect.succeed(next)
                     : cascadeToParent(route, branchTried, requestedVariant, sessionID, requestTokens, branchState),
+                ),
+                // Cross-route substitution (#12228), mirroring the routed
+                // fallback exactly: the containing route's class governs, as
+                // it governs the rest of this chain.
+                Effect.flatMap((next) =>
+                  next
+                    ? Effect.succeed(next)
+                    : cascadeToSubstitute(route, requestedVariant, sessionID, requestTokens, branchState),
                 ),
                 // Last resort, last (#2382): the routed fallback ends with
                 // this pass (#7073) but the direct attachment was left

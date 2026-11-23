@@ -421,6 +421,7 @@ function routeModel(
       [ModelRoute.SETTING]: {
         id: Model.ID.make(direct?.routeID ?? id),
         ...(route.system ? { system: route.system } : {}),
+        ...(route.class ? { class: route.class } : {}),
         targets: expanded.map((target) => target.ref),
         targetVariants: expanded.map((target) => ({
           ...(target.defaultVariant ? { default: target.defaultVariant } : {}),
