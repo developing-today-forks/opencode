@@ -2063,6 +2063,52 @@ describe("ModelResolver routes", () => {
     )
   })
 
+  // #10367 design point 1: the within-call tried set is keyed provider / model /
+  // effort. One model, two pools: the sub pool serves it at xhigh by default,
+  // the nesting parent pool at medium. The xhigh leg's failure (a request-shape
+  // rejection is the motivating case) must not skip the medium leg in the same
+  // call's walk — under the old provider/model key the parent's only leaf was
+  // seeded tried and the walk ended. Once both efforts are tried the walk does
+  // stop: the same effort reached again still prunes.
+  it.effect("a failure at one effort does not skip the same model at another effort in the same walk (#10367)", () => {
+    ModelRoute.resetHealth()
+    const a = model(Provider.aisdk("@ai-sdk/openai"), {
+      providerID: Provider.ID.make("pa"),
+      modelID: "luna",
+      settings: { apiKey: "key" },
+      variants: [{ id: VariantID.make("xhigh") }, { id: VariantID.make("medium") }],
+    })
+    const sub = routeAs("sub", [a], {
+      nodes: [{ selection: "ordered", weights: [1], children: [{ leaf: 0 }] }],
+      targetVariants: [{ default: VariantID.make("xhigh") }],
+    })
+    const parent = routeAs("parent", [a], {
+      nodes: [
+        { selection: "ordered", weights: [1], children: [{ node: 1 }] },
+        { routeID: "sub", selection: "ordered", weights: [1], children: [{ leaf: 0 }] },
+      ],
+      targetVariants: [{ default: VariantID.make("medium") }],
+    })
+    return withCascadeResolver([a], [sub, parent], (resolver) =>
+      Effect.gen(function* () {
+        const first = yield* resolver.resolveModel(sub)
+        expect(String(first.routing?.routeID)).toBe("sub")
+        expect(targetOf(first)).toBe("pa")
+        expect(first.routing?.target.variant).toBe(VariantID.make("xhigh"))
+        // The xhigh leg failed: the cascade climbs to the parent, whose pool
+        // serves the same model at medium — a leg this walk has not tried.
+        const second = yield* first.routing!.fallback()
+        expect(String(second?.routing?.routeID)).toBe("parent")
+        expect(targetOf(second!)).toBe("pa")
+        expect(second?.routing?.target.variant).toBe(VariantID.make("medium"))
+        // Both efforts are now tried: the walk stops rather than re-dealing
+        // either leg.
+        const third = yield* second!.routing!.fallback()
+        expect(third).toBeUndefined()
+      }),
+    )
+  })
+
   // #7073 case (b): the session's route nests a leaf group (a provider route with
   // two members) and a sibling leaf outside the group. The first target fails with
   // an Authentication error and fails over inside the group; the second fails with
