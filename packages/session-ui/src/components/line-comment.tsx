@@ -230,6 +230,7 @@ export const LineCommentEditor = (props: LineCommentEditorProps) => {
   const view = createMemo(() => viewLineCommentEditor(editorState(), readConfig()))
 
   const mentionId = createUniqueId()
+  const labelId = createUniqueId()
   const listbox = createMemo(() => mentionListbox(view(), mentionId))
 
   const currentToken = () =>
@@ -355,6 +356,7 @@ export const LineCommentEditor = (props: LineCommentEditorProps) => {
           aria-expanded={listbox().open}
           aria-controls={listbox().open ? listbox().listboxId : undefined}
           aria-activedescendant={listbox().activeOptionId}
+          aria-labelledby={labelId}
           style={{ "unicode-bidi": "plaintext", "text-align": "start" }}
           on:input={(event) => {
             split.onInput(event.currentTarget.value)
@@ -414,7 +416,7 @@ export const LineCommentEditor = (props: LineCommentEditorProps) => {
           </div>
         </Show>
         <div data-slot="line-comment-actions">
-          <div data-slot="line-comment-editor-label">
+          <div id={labelId} data-slot="line-comment-editor-label">
             {i18n.t("ui.lineComment.editorLabel.prefix")}
             {split.selection}
             {i18n.t("ui.lineComment.editorLabel.suffix")}
