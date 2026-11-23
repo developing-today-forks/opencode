@@ -485,6 +485,52 @@ export const list = Effect.fn("SessionInbox.list")(function* (db: DatabaseServic
   return (yield* SessionBlob.hydrateInbox(db, yield* listRows(db, sessionID))).map(fromRow)
 })
 
+/**
+ * Outcome of the atomic started-claim for a pending command operation.
+ * - "marked": the row was pending and unstarted; the caller now owns the
+ *   first start and must invoke the definition.
+ * - "started": a previous start already claimed the row without settling, so
+ *   the outcome is unknown and the definition must NOT run again.
+ * - "gone": the row is already consumed; a concurrent starter settled it.
+ */
+export type StartClaim = "marked" | "started" | "gone"
+
+/**
+ * Atomically claims the first start of a pending command operation. The
+ * claim is a durable UPDATE on the pending row, so a process that crashes
+ * after invoking the definition leaves the claim behind for the next
+ * process to find. The claim window between the UPDATE and the definition
+ * running is conservatively ambiguous: a crash there surfaces as
+ * interrupted/unknown rather than silently re-running.
+ */
+export const markStarted = Effect.fn("SessionInbox.markStarted")(function* (
+  db: DatabaseService,
+  input: PendingRef,
+) {
+  const claimed = yield* db
+    .update(SessionInboxTable)
+    .set({ started: true })
+    .where(
+      and(
+        eq(SessionInboxTable.id, input.id),
+        eq(SessionInboxTable.session_id, input.sessionID),
+        eq(SessionInboxTable.type, "command"),
+        eq(SessionInboxTable.started, false),
+      ),
+    )
+    .returning({ id: SessionInboxTable.id })
+    .get()
+    .pipe(Effect.orDie)
+  if (claimed) return "marked" as const
+  const row = yield* db
+    .select({ id: SessionInboxTable.id })
+    .from(SessionInboxTable)
+    .where(and(eq(SessionInboxTable.id, input.id), eq(SessionInboxTable.session_id, input.sessionID)))
+    .get()
+    .pipe(Effect.orDie)
+  return row === undefined ? ("gone" as const) : ("started" as const)
+})
+
 /** {@link list} for clients that fetch media themselves: files stored in `blob` stay `media:` refs. */
 export const listWithRefs = Effect.fn("SessionInbox.listWithRefs")(function* (
   db: DatabaseService,

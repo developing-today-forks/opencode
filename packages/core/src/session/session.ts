@@ -269,6 +269,7 @@ export const make = Effect.fn("Session.make")(function* () {
       session,
       operation,
       bus,
+      db: database.db,
       notify: (note) =>
         synthetic(session.id, { ...note, resume: false }).pipe(
           Effect.catchTag("Session.NotFoundError", () => Effect.void),

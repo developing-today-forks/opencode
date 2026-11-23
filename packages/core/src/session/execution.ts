@@ -99,7 +99,9 @@ export const layer = Layer.effect(
     // starter that died). Starting it here keeps the operation's promise —
     // it runs, in admission order relative to the Session's other work —
     // without making drains responsible for operations in the common case.
-    // SessionOperation.run stands down for an operation already started.
+    // SessionOperation.run stands down for an operation already started, and
+    // for a command whose first start was claimed but never settled it
+    // surfaces interrupted/unknown instead of running the definition again.
     const startOperations = Effect.fnUntraced(function* (session: SessionSchema.Info) {
       const operations = yield* SessionInbox.pendingOperations(db, session.id)
       if (operations.length === 0) return
@@ -110,6 +112,7 @@ export const layer = Layer.effect(
             session,
             operation,
             bus,
+            db,
             notify: (note) =>
               synthetic({ sessionID: session.id, ...note, resume: false }).pipe(
                 Effect.catchTag("Session.NotFoundError", () => Effect.void),
