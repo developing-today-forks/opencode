@@ -17,7 +17,11 @@ export function createJsonlFile<Entry>(input: {
   locks: string
   parse: (text: string) => Entry[]
   serialize: (entries: Entry[]) => string
+  readText?: (file: string) => Promise<string>
+  writeText?: (file: string, content: string) => Promise<void>
 }) {
+  const readFileText = input.readText ?? readText
+  const writeFileText = input.writeText ?? writeTextAtomic
   let pending: Promise<unknown> = Promise.resolve()
 
   /** Run a disk operation after every previously queued operation from this instance. */
@@ -30,8 +34,19 @@ export function createJsonlFile<Entry>(input: {
     return result
   }
 
+  /**
+   * Read a store file, treating a missing file as a new empty store. Any
+   * other read failure is propagated so callers never mistake an I/O error
+   * for valid empty state.
+   */
+  const readRaw = (file: string) =>
+    readFileText(file).catch((error) => {
+      if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return ""
+      throw error
+    })
+
   /** Read and parse the file as it currently stands on disk. */
-  const read = async () => input.parse(await readText(input.file).catch(() => ""))
+  const read = async () => input.parse(await readRaw(input.file))
 
   /**
    * Lock-guarded read-modify-write. The transform receives the entries as
@@ -44,11 +59,13 @@ export function createJsonlFile<Entry>(input: {
       Flock.withLock(
         input.file,
         async () => {
-          const raw = await readText(input.file).catch(() => "")
+          // A failed fresh read must refuse the rewrite: transforming an
+          // assumed-empty snapshot would discard the existing store.
+          const raw = await readRaw(input.file)
           const current = input.parse(raw)
           const next = transform(current, raw)
           if (next === undefined) return current
-          await writeTextAtomic(input.file, input.serialize(next))
+          await writeFileText(input.file, input.serialize(next))
           return next
         },
         { dir: input.locks },
