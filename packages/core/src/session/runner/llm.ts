@@ -46,6 +46,32 @@ const CONTINUE_AFTER_INCOMPLETE_STREAM =
 const CONTINUE_AFTER_OUTPUT_LIMIT =
   "Your last response hit the output token limit (stop reason: length). Do not apologize, recap, or repeat yourself. Break the remaining work into smaller pieces."
 
+/**
+ * The built-in tools that change files through FileMutation/FileWrite
+ * (`write`, `edit`, `patch` in tool/plugin). A call one of them left `running`
+ * when its process died may already have applied its change: the mutation
+ * result is only recorded when the call settles, so history cannot prove the
+ * file state. Resume therefore settles such a call with the dedicated
+ * `tool.interrupted` outcome instead of the generic abort — it warns that the
+ * change may already be in effect and must be checked before the call is
+ * repeated, and the call is never re-executed automatically. A call still
+ * `streaming` never started executing, so it cannot have changed anything and
+ * keeps the generic outcome.
+ */
+const FILE_MUTATION_TOOLS: ReadonlySet<string> = new Set(["write", "edit", "patch"])
+
+const interruptedMutationError = (tool: SessionMessage.AssistantTool) => {
+  if (tool.state.status !== "running" || !FILE_MUTATION_TOOLS.has(tool.name)) return undefined
+  const filePath = tool.state.input.filePath
+  return {
+    type: "tool.interrupted",
+    message:
+      typeof filePath === "string"
+        ? `File mutation interrupted, the server was restarted: ${tool.name} (${filePath}). The change may already have been applied to the file; check its current contents before repeating this call.`
+        : `File mutation interrupted, the server was restarted: ${tool.name}. The changes may already have been applied; check the current state of the affected files before repeating this call.`,
+  }
+}
+
 /** How a step ended: whether the turn needs another step, and the link that step's response continues. */
 type StepResult = { readonly needsContinuation: boolean; readonly continuation?: SessionStep.ContinuationLink }
 
@@ -598,14 +624,15 @@ const layer = Layer.effect(
           const metadata = tool.state.status === "running" ? tool.state.metadata : undefined
           const childID =
             tool.name === "subagent" && typeof metadata?.sessionID === "string" ? metadata.sessionID : undefined
+          const error = interruptedMutationError(tool) ?? {
+            type: "aborted",
+            message: `Tool execution interrupted, the server was restarted: ${tool.name}${childID ? ` (sessionID: ${childID})` : ""}`,
+          }
           yield* bus.publish(SessionEvent.Tool.Failed, {
             sessionID,
             assistantMessageID: message.id,
             id: tool.id,
-            error: {
-              type: "aborted",
-              message: `Tool execution interrupted, the server was restarted: ${tool.name}${childID ? ` (sessionID: ${childID})` : ""}`,
-            },
+            error,
             ...(metadata && Object.keys(metadata).length > 0 ? { metadata } : {}),
             executed: tool.executed === true,
           })

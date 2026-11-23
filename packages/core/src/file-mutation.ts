@@ -200,4 +200,10 @@ export const node = makeLocationNode({ service: Service, layer, deps: [FileAcces
 // TODO: Notify LSP and collect diagnostics after LSP runtime exists.
 // TODO: Design multi-file transactions / rollback if patch needs atomic edits.
 // Until then, edits are sequential and report partial application.
-// TODO: Define crash recovery and idempotency for side effects between Tool.Called and durable settlement.
+// Crash recovery between Tool.Called and durable settlement is defined: a
+// mutating call left unsettled by a dead process is reconciled on resume with
+// a `tool.interrupted` outcome and never re-executed automatically
+// (SessionRunner.settleStaleToolCalls in session/runner/llm.ts). Still open:
+// the mutation result is not recorded durably before settlement, so
+// reconciliation cannot prove whether a given change landed, only warn that
+// it may have.
