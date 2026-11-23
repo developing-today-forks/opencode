@@ -3933,28 +3933,121 @@ describe("SessionRunnerLLM", () => {
     })
   }
 
-  for (const response of ["length", "content-filter"] as const) {
-    scenario(`rejects compaction ${response} without retrying or committing its draft`, function* (s) {
-      yield* s.llm.push(TestLLM.text("Earlier answer", "history"))
-      yield* s.runPrompt("Earlier question")
-      s.requests.length = 0
+  scenario("rejects compaction content-filter without retrying or committing its draft", function* (s) {
+    yield* s.llm.push(TestLLM.text("Earlier answer", "history"))
+    yield* s.runPrompt("Earlier question")
+    s.requests.length = 0
+    yield* s.llm.push(
+      TestLLM.complete(
+        { reason: { normalized: "content-filter" } },
+        LLMEvent.textDelta({ id: "truncated", text: "## Objective\n- Incomplete summary" }),
+      ),
+    )
+    const compaction = yield* s.session.compact({ sessionID })
+    yield* s.resume
+
+    expect(s.requests).toHaveLength(1)
+    expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({ status: "failed" })
+    yield* s.llm.push(TestLLM.text("Continued", "continued"))
+    yield* s.runPrompt("Continue")
+    expect(userTexts(s.requests[1])).toContain("Earlier question")
+    expect(JSON.stringify(s.requests[1])).not.toContain("Incomplete summary")
+  })
+
+  // Issue #2618: a summary that hits the output limit is retried smaller, as text, on the same shrink
+  // steps a provider rejection gets — the truncated draft is still never committed, and the output-limit
+  // failure surfaces once the steps run out.
+  scenario("retries a truncated compaction smaller as text and never commits its draft (issue #2618)", function* (s) {
+    yield* s.llm.push(TestLLM.text("Earlier answer", "history"))
+    yield* s.runPrompt("Earlier question")
+    s.requests.length = 0
+    const truncated = TestLLM.complete(
+      { reason: { normalized: "length" } },
+      LLMEvent.textDelta({ id: "truncated", text: "## Objective\n- Incomplete summary" }),
+    )
+    yield* s.llm.push(truncated, truncated, truncated)
+    const compaction = yield* s.session.compact({ sessionID })
+    yield* s.resume
+
+    // The unchanged attempt plus two text retries; the ladder ends there because this transcript's
+    // text form cannot shrink further. (The compaction suite pins the steps running out instead:
+    // the output-limit failure then surfaces unchanged.) No attempt commits the truncated draft.
+    expect(s.requests).toHaveLength(3)
+    expect(s.requests[0]?.tools.length).toBeGreaterThan(0)
+    for (const request of s.requests.slice(1)) expect(request.tools).toEqual([])
+    expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
+      status: "failed",
+      error: { type: "compaction.failed" },
+    })
+    yield* s.llm.push(TestLLM.text("Continued", "continued"))
+    yield* s.runPrompt("Continue")
+    expect(userTexts(s.requests[3])).toContain("Earlier question")
+    expect(JSON.stringify(s.requests[3])).not.toContain("Incomplete summary")
+  })
+
+  // Issue #2618: nine short fleet sessions failed compaction on 2026-11-17 — the summary either hit the
+  // output limit or came back empty. A short transcript's summary request is sized to the reserve the
+  // window affords, and an unusable reply is a reported compaction error, never a silent session failure.
+  scenario("compaction on a short transcript completes within the output budget (issue #2618)", function* (s) {
+    yield* s.llm.push(
+      TestLLM.text("First answer", "short-answer-1"),
+      TestLLM.text("Second answer", "short-answer-2"),
+      TestLLM.text("Third answer", "short-answer-3"),
+    )
+    yield* s.runPrompt("First question")
+    yield* s.runPrompt("Second question")
+    yield* s.runPrompt("Third question")
+    s.requests.length = 0
+    yield* s.llm.push(TestLLM.text("## Objective\n- Short session summary", "short-summary"))
+    const compaction = yield* s.session.compact({ sessionID })
+    yield* s.resume
+
+    // The whole transcript is three exchanges; the summary request asks only for the reserve a 200k
+    // window holds back (30k), never more than the model's 32k output limit.
+    expect(s.requests).toHaveLength(1)
+    expect(s.requests[0]?.maxTokens).toBe(30_000)
+    expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
+      type: "compaction",
+      status: "completed",
+      summary: "## Objective\n- Short session summary",
+    })
+    expect((yield* s.messages).filter((message) => message.type === "compaction")).toHaveLength(1)
+
+    yield* s.llm.push(TestLLM.text("Continued", "short-continued"))
+    yield* s.runPrompt("Continue")
+    expect(JSON.stringify(s.requests[1])).toContain("Short session summary")
+  })
+
+  scenario(
+    "an empty summary on a short transcript is a compaction error, not a silent session failure (issue #2618)",
+    function* (s) {
       yield* s.llm.push(
-        TestLLM.complete(
-          { reason: { normalized: response } },
-          LLMEvent.textDelta({ id: "truncated", text: "## Objective\n- Incomplete summary" }),
-        ),
+        TestLLM.text("Earlier answer", "empty-history-1"),
+        TestLLM.text("Latest answer", "empty-history-2"),
       )
+      yield* s.runPrompt("Earlier question")
+      yield* s.runPrompt("Latest question")
+      s.requests.length = 0
+      // Reasoning consumes the reply on both the first attempt and the template reminder: no summary text at all.
+      const reasoningOnly = TestLLM.stop(LLMEvent.reasoningDelta({ id: "empty-reasoning", text: "Thinking it over" }))
+      yield* s.llm.push(reasoningOnly, reasoningOnly)
       const compaction = yield* s.session.compact({ sessionID })
       yield* s.resume
 
-      expect(s.requests).toHaveLength(1)
-      expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({ status: "failed" })
-      yield* s.llm.push(TestLLM.text("Continued", "continued"))
+      expect(s.requests).toHaveLength(2)
+      expect((yield* s.messages).find((message) => message.id === compaction.id)).toMatchObject({
+        type: "compaction",
+        status: "failed",
+        error: { type: "compaction.failed", message: "Compaction produced no summary" },
+      })
+
+      // The failure is reported on the compaction and the session carries on with its history intact.
+      yield* s.llm.push(TestLLM.text("Continued", "empty-continued"))
       yield* s.runPrompt("Continue")
-      expect(userTexts(s.requests[1])).toContain("Earlier question")
-      expect(JSON.stringify(s.requests[1])).not.toContain("Incomplete summary")
-    })
-  }
+      expect(userTexts(s.requests[2])).toContain("Earlier question")
+      expect(userTexts(s.requests[2])).toContain("Latest question")
+    },
+  )
 
   scenario("stops after four smaller compaction inputs overflow", function* (s) {
     // Large enough that the conversation, not the system prompt, is most of the request.
