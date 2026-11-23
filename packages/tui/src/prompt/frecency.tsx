@@ -92,7 +92,12 @@ export const { use: useFrecency, provider: FrecencyProvider } = createSimpleCont
       // Rewrite valid retained entries to self-heal corruption and enforce
       // the limit, re-reading under the file lock so entries another TUI
       // recorded after this instance started are preserved.
-      const lines = await file.update((current) => (current.length > 0 ? current : undefined)).catch(() => file.read())
+      // A failed startup read leaves the disk untouched (update refuses the
+      // rewrite) and falls back to empty loaded state; entries recorded in
+      // memory while the load was in flight are preserved by the merge below.
+      const lines = await file
+        .update((current) => (current.length > 0 ? current : undefined))
+        .catch(() => file.read().catch(() => []))
       // Merge rather than replace: updates recorded while the load was in
       // flight are already in the store and must not be wiped by it.
       const memory = Object.entries(store.data).map(([entryPath, entry]) => ({ path: entryPath, ...entry }))
