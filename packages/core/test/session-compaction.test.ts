@@ -53,6 +53,7 @@ let requests: LLMRequest[] = []
 /** Runs before a request's response streams; tests hold it back to keep a background summary in flight. */
 let beforeResponse: Effect.Effect<void> = Effect.void
 let reject: ((request: LLMRequest) => boolean) | undefined
+let truncate: ((request: LLMRequest) => boolean) | undefined
 const model = LanguageModel.make({
   id: "summary-model",
   provider: "test",
@@ -75,6 +76,26 @@ const client = Layer.mock(LLMClient.Service)({
       return Stream.fail(
         new AIError({
           reason: new InvalidRequestError({ message: "prompt too long", classification: "context-overflow" }),
+        }),
+      )
+    }
+    if (truncate?.(request)) {
+      return Stream.make(
+        LLMEvent.textDelta({ id: "summary", text: "## Objective\n- a partial summary that runs out of room" }),
+        LLMEvent.stepFinish({
+          index: 0,
+          reason: { normalized: "length" },
+          usage: {
+            inputTokens: 15,
+            outputTokens: 6,
+            nonCachedInputTokens: 10,
+            cacheReadInputTokens: 3,
+            cacheWriteInputTokens: 2,
+            reasoningTokens: 2,
+          },
+        }),
+        LLMEvent.finish({
+          reason: { normalized: "length" },
         }),
       )
     }
@@ -1335,6 +1356,52 @@ it.effect("summary resends as text when a hook makes the request larger than the
     expect(requests).toHaveLength(2)
     expect(requests[0].tools).toEqual(fixture.context.tools.definitions)
     expect(requests[1].tools).toEqual([])
+  }),
+)
+
+it.effect("summary that hits the output limit retries as text instead of failing", () =>
+  Effect.gen(function* () {
+    const fixture = yield* summaryFixture([
+      textUser("Earlier question"),
+      oldReasoning(),
+      textUser("Latest question"),
+      measured("Latest answer", summaryInput),
+    ])
+    // The unchanged request leaves too little of the window for the reply, so generation
+    // stops at the output limit; the text form drops the tool definitions and fits.
+    truncate = (request) => request.tools.length > 0
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        truncate = undefined
+      }),
+    )
+    expect(yield* fixture.run()).toEqual({ status: "completed" })
+    expect(requests).toHaveLength(2)
+    expect(requests[0].tools).toEqual(fixture.context.tools.definitions)
+    expect(requests[1].tools).toEqual([])
+  }),
+)
+
+it.effect("summary that keeps hitting the output limit fails with the output-limit error", () =>
+  Effect.gen(function* () {
+    const fixture = yield* summaryFixture([
+      textUser("Earlier question"),
+      oldReasoning(),
+      textUser("Latest question"),
+      measured("Latest answer", summaryInput),
+    ])
+    truncate = () => true
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        truncate = undefined
+      }),
+    )
+    expect(yield* fixture.run()).toEqual({
+      status: "failed",
+      error: { type: "compaction.failed", message: "Compaction summary reached the output token limit" },
+    })
+    // The shrink steps were spent on retries before the failure surfaced.
+    expect(requests.length).toBeGreaterThan(1)
   }),
 )
 
