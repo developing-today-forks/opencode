@@ -3,7 +3,8 @@ import path from "node:path"
 import { fileURLToPath } from "node:url"
 import { app, BrowserWindow, screen, shell } from "electron"
 import { resolveExternalURL } from "../files/external-url"
-import { windowArguments } from "./bootstrap"
+import { windowArguments, windowBootstrap } from "./bootstrap"
+import { noteEarlyWindowBootstrap } from "./bootstrap-channel"
 import { WINDOW_IDS_KEY } from "../storage/keys"
 import { getStore } from "../storage/store"
 import { platformFrame, storedBackgroundColor, storedZoomLevel, tone } from "./defaults"
@@ -109,6 +110,10 @@ export function createEarlyWindow() {
       additionalArguments: windowArguments(id),
     },
   })
+
+  // The registry that would answer for this window loads with the layers, after its preload
+  // runs; note the bootstrap so the bootstrap channel can answer for it from the start.
+  noteEarlyWindowBootstrap(win, windowBootstrap(id))
 
   manageWindowState(win, file, state, displays)
 

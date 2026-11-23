@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { windowBootstrapArgument, windowBootstrapFromArguments } from "./window-bootstrap"
+import { parseWindowBootstrap, windowBootstrapArgument, windowBootstrapFromArguments } from "./window-bootstrap"
 
 describe("window bootstrap", () => {
   test("round-trips through argv and keeps unknown values absent", () => {
@@ -18,6 +18,15 @@ describe("window bootstrap", () => {
     expect(windowBootstrapFromArguments(["--opencode-window=%ZZ"])).toBeUndefined()
     // Decodes cleanly but does not parse as JSON.
     expect(windowBootstrapFromArguments(["--opencode-window=%7B"])).toBeUndefined()
+  })
+
+  test("parseWindowBootstrap validates an IPC answer the same way", () => {
+    expect(parseWindowBootstrap({ id: "win-1", packaged: true })).toEqual({ id: "win-1", packaged: true })
+    expect(parseWindowBootstrap(undefined)).toBeUndefined()
+    expect(parseWindowBootstrap(null)).toBeUndefined()
+    expect(parseWindowBootstrap("win-1")).toBeUndefined()
+    expect(parseWindowBootstrap({})).toBeUndefined()
+    expect(parseWindowBootstrap({ id: 42 })).toBeUndefined()
   })
 
   test("returns undefined for valid JSON that is not a window bootstrap", () => {

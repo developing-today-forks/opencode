@@ -13,30 +13,34 @@ export function windowBootstrapArgument(bootstrap: WindowBootstrap) {
   return prefix + encodeURIComponent(JSON.stringify(bootstrap))
 }
 
-// SAFETY: argv crosses a process boundary, so the decoded value is untrusted input; the checks in
-// this function establish the complete WindowBootstrap shape contract (an object with a string
-// `id`) before the cast. Every failure — argument absent, malformed percent-encoding, unparseable
-// JSON, wrong shape — resolves to undefined ("ask over IPC") instead of throwing in the preload
-// before the bridge exists.
-/* oxlint-disable anti-slop/no-runtime-typeof -- see SAFETY above */
+// Every failure — argument absent, malformed percent-encoding, unparseable JSON, wrong shape —
+// resolves to undefined ("ask over IPC") instead of throwing in the preload before the bridge
+// exists.
 export function windowBootstrapFromArguments(args: readonly string[]): WindowBootstrap | undefined {
   const value = args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length)
 
   if (!value) return undefined
 
   try {
-    const parsed: unknown = JSON.parse(decodeURIComponent(value))
-
-    if (typeof parsed !== "object" || parsed === null) return undefined
-
-    if (typeof (parsed as { id?: unknown }).id !== "string") return undefined
-
-    // SAFETY: the two checks above establish that `parsed` is a non-null object with a string
-    // `id`, which is the complete required shape of WindowBootstrap; its optional fields are
-    // only ever read as their declared types.
-    return parsed as WindowBootstrap
+    return parseWindowBootstrap(JSON.parse(decodeURIComponent(value)))
   } catch {
     return undefined
   }
+}
+
+// SAFETY: the value crossed a process boundary (argv or an IPC answer), so it is untrusted
+// input; the checks in this function establish the complete WindowBootstrap shape contract (an
+// object with a string `id`) before the cast. Every failure resolves to undefined instead of
+// throwing.
+/* oxlint-disable anti-slop/no-unknown-parameters, anti-slop/no-runtime-typeof -- see SAFETY above */
+export function parseWindowBootstrap(value: unknown): WindowBootstrap | undefined {
+  if (typeof value !== "object" || value === null) return undefined
+
+  if (typeof (value as { id?: unknown }).id !== "string") return undefined
+
+  // SAFETY: the two checks above establish that the value is a non-null object with a string
+  // `id`, which is the complete required shape of WindowBootstrap; its optional fields are
+  // only ever read as their declared types.
+  return value as WindowBootstrap
 }
 /* oxlint-enable anti-slop/no-runtime-typeof */
