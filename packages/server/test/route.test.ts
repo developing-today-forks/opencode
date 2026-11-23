@@ -1,9 +1,15 @@
 import path from "node:path"
 import { expect } from "bun:test"
-import { Effect } from "effect"
+import { Context, Effect } from "effect"
+import { Database } from "@opencode/core/database/database"
+import { ModelRouteLog } from "@opencode/core/model-route-log"
+import { RouteAttemptTable, RouteDecisionTable } from "@opencode/core/model-route-log/sql"
 import { ModelRouteOverrides } from "@opencode/core/model-route-overrides"
+import { Global } from "@opencode/util/global"
+import { tempGlobalLayer } from "../../core/test/fixture/global"
 import { tmpdir } from "../../core/test/fixture/tmpdir"
 import { it } from "../../core/test/lib/effect"
+import { serveRoutes } from "./fixture/routes"
 import { startServer } from "./fixture/server"
 
 const draft = {
@@ -168,3 +174,202 @@ it.live("rejects a route override that names excludeWindows and stores nothing",
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value)
 }
+
+it.live("serves the route-attempt read API over HTTP: empty ledger, aggregate shape, read-only", () =>
+  Effect.gen(function* () {
+    const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-route-attempts-")))
+    const server = yield* startServer(tmp.path)
+
+    const attempts = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts?provider=openai&session=ses_1&since=0", server.base), {
+        headers: server.headers,
+      }),
+    )
+    expect(attempts.status).toBe(200)
+    expect(yield* Effect.promise(() => attempts.json())).toEqual({ data: [] })
+
+    const stats = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts/stats?since=0", server.base), { headers: server.headers }),
+    )
+    expect(stats.status).toBe(200)
+    expect(yield* Effect.promise(() => stats.json())).toEqual({
+      data: {
+        targets: [],
+        errors: [],
+        coverage: { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
+      },
+    })
+
+    const decisions = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/decisions?since=0", server.base), { headers: server.headers }),
+    )
+    expect(decisions.status).toBe(200)
+    expect(yield* Effect.promise(() => decisions.json())).toEqual({ data: [] })
+
+    // Read-only surface (#2497): there is no mutation endpoint for attempts.
+    const posted = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts", server.base), {
+        method: "POST",
+        headers: { ...server.headers, "content-type": "application/json" },
+        body: JSON.stringify({}),
+      }),
+    )
+    expect(posted.status).not.toBe(200)
+    const after = yield* list(server.base, server.headers)
+    expect(after.status).toBe(200)
+  }),
+)
+
+it.live("serves populated route attempts, stats and decisions over HTTP in parity with the core queries (#2497)", () =>
+  Effect.gen(function* () {
+    const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-route-attempts-parity-")))
+    const server = yield* serveRoutes(
+      {
+        app: { version: "test-version" },
+        database: { path: path.join(tmp.path, "opencode.db") },
+        models: { fetch: false },
+        fs: { filewatcher: false },
+      },
+      [Global.node.replace(tempGlobalLayer)],
+    )
+    const db = Context.get(server.context, Database.Service).db
+
+    // A populated ledger: two providers, two sessions, one failure carrying an error tag,
+    // and one row seeded with a credential id and a provider error body — the two values
+    // the read API must never serve (#2497 acceptance: attempts and aggregates only).
+    const attempts: ModelRouteLog.Attempt[] = [
+      {
+        time_started: 1_000,
+        time_ended: 2_000,
+        session_id: "ses_1",
+        route_id: "luna",
+        provider_id: "openai",
+        model_id: "gpt-6-luna",
+        outcome: "success",
+        output_started: true,
+        tokens_input: 100,
+        tokens_output: 10,
+        credential_id: "cred_secret",
+        error_body: "provider body that must never be served",
+      },
+      {
+        time_started: 3_000,
+        time_ended: 4_000,
+        session_id: "ses_2",
+        route_id: "luna",
+        provider_id: "openai",
+        model_id: "gpt-6-luna",
+        outcome: "failure",
+        output_started: false,
+        tokens_input: 50,
+        error_tag: "QuotaExceeded",
+        error_message: "quota",
+      },
+      {
+        time_started: 4_000,
+        time_ended: 5_000,
+        session_id: "ses_1",
+        route_id: "luna",
+        provider_id: "anthropic",
+        model_id: "claude-x",
+        outcome: "success",
+        output_started: true,
+        tokens_input: 200,
+      },
+      {
+        time_started: 9_000,
+        time_ended: 10_000,
+        session_id: "ses_1",
+        route_id: "luna",
+        provider_id: "openai",
+        model_id: "gpt-6-luna",
+        outcome: "success",
+        output_started: true,
+      },
+    ]
+    for (const row of attempts) yield* db.insert(RouteAttemptTable).values(row).run()
+    yield* db
+      .insert(RouteDecisionTable)
+      .values({
+        time: 2_000,
+        session_id: "ses_1",
+        route_id: "luna",
+        selection: "weighted",
+        candidates: ["openai/gpt-6-luna"],
+        chosen: "openai/gpt-6-luna",
+        reason: "drawn",
+      })
+      .run()
+    yield* db
+      .insert(RouteDecisionTable)
+      .values({
+        time: 6_000,
+        session_id: "ses_2",
+        route_id: "other",
+        selection: "weighted",
+        candidates: ["anthropic/claude-x"],
+        chosen: "anthropic/claude-x",
+        reason: "drawn",
+      })
+      .run()
+
+    // The oracle is core's own query layer over the same ledger: the HTTP surface is in
+    // parity when it serves exactly what these functions return for the same window.
+    const expectedAttempts = yield* ModelRouteLog.filteredAttempts(db, { since: 0 })
+    const expectedFiltered = yield* ModelRouteLog.filteredAttempts(db, { since: 0, providerID: "anthropic" })
+    const expectedTargets = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
+    const expectedErrors = yield* ModelRouteLog.errorBreakdown(db, 0, 5_000)
+    const expectedCoverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
+    const expectedDecisions = yield* ModelRouteLog.filteredDecisions(db, { since: 0, routeID: "luna" })
+    expect(expectedAttempts).toHaveLength(4)
+    expect(expectedDecisions).toHaveLength(1)
+
+    const get = (route: string) =>
+      Effect.promise(() => server.fetch(`http://opencode.local${route}`)).pipe(
+        Effect.flatMap((response) =>
+          Effect.promise(async () => ({ status: response.status, text: await response.text() })),
+        ),
+      )
+    // The wire shape of a core row: ledger nulls are absent fields (the handler maps them
+    // to undefined and JSON drops them); every other value is served as stored.
+    const wire = (row: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(row).filter(([, value]) => value !== null && value !== undefined))
+    const byTarget = (a: { providerID: string; modelID: string }, b: { providerID: string; modelID: string }) =>
+      a.providerID.localeCompare(b.providerID) || a.modelID.localeCompare(b.modelID)
+
+    const listAll = yield* get("/api/route/attempts?since=0")
+    expect(listAll.status).toBe(200)
+    expect(listAll.text).not.toContain("cred_secret")
+    expect(listAll.text).not.toContain("provider body that must never be served")
+    const listAllBody = JSON.parse(listAll.text) as { data: Record<string, unknown>[] }
+    expect(listAllBody.data).toEqual(expectedAttempts.map((row) => wire({ ...row })))
+    for (const row of listAllBody.data) {
+      expect(Object.keys(row)).not.toContain("credentialID")
+      expect(Object.keys(row)).not.toContain("errorBody")
+      expect(Object.keys(row)).not.toContain("quota")
+    }
+
+    const listFiltered = yield* get("/api/route/attempts?since=0&provider=anthropic")
+    expect(listFiltered.status).toBe(200)
+    expect(JSON.parse(listFiltered.text)).toEqual({ data: expectedFiltered.map((row) => wire({ ...row })) })
+
+    const stats = yield* get("/api/route/attempts/stats?since=0&until=5000")
+    expect(stats.status).toBe(200)
+    const statsBody = JSON.parse(stats.text) as {
+      data: {
+        targets: { providerID: string; modelID: string }[]
+        errors: unknown[]
+        coverage: unknown
+      }
+    }
+    expect([...statsBody.data.targets].sort(byTarget)).toEqual([...expectedTargets].sort(byTarget))
+    expect(statsBody.data.errors).toEqual(expectedErrors)
+    expect(statsBody.data.coverage).toEqual(
+      expectedCoverage ?? { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
+    )
+
+    const decisions = yield* get("/api/route/decisions?since=0&route=luna")
+    expect(decisions.status).toBe(200)
+    expect(JSON.parse(decisions.text)).toEqual({ data: expectedDecisions.map((row) => wire({ ...row })) })
+  }),
+)

@@ -1878,3 +1878,117 @@ describe("writer persistence failure (#2331)", () => {
     }),
   )
 })
+
+describe("read API over the ledger (#2497)", () => {
+  it.live("filters attempts by window, provider, model and session, and never selects credential or body columns", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const rows: ModelRouteLog.Attempt[] = [
+        attempt({
+          time_started: 1_000,
+          time_ended: 2_000,
+          session_id: "ses_1",
+          tokens_input: 100,
+          tokens_output: 10,
+          credential_id: "cred_secret",
+        }),
+        attempt({
+          time_started: 3_000,
+          time_ended: 4_000,
+          session_id: "ses_2",
+          outcome: "failure",
+          output_started: false,
+          tokens_input: 50,
+          ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "quota" }),
+        }),
+        attempt({
+          time_started: 4_000,
+          time_ended: 5_000,
+          session_id: "ses_1",
+          provider_id: "anthropic",
+          model_id: "claude-x",
+          tokens_input: 200,
+        }),
+        attempt({ time_started: 9_000, time_ended: 10_000, session_id: "ses_1" }),
+      ]
+      for (const row of rows) ModelRouteLog.record({ kind: "attempt", row })
+      ModelRouteLog.record({
+        kind: "decision",
+        row: {
+          time: 2_000,
+          session_id: "ses_1",
+          route_id: "luna",
+          selection: "weighted",
+          candidates: ["openai/gpt-6-luna"],
+          chosen: "openai/gpt-6-luna",
+          reason: "drawn",
+        },
+      })
+      ModelRouteLog.record({
+        kind: "decision",
+        row: {
+          time: 6_000,
+          session_id: "ses_2",
+          route_id: "other",
+          selection: "weighted",
+          candidates: ["anthropic/claude-x"],
+          chosen: "anthropic/claude-x",
+          reason: "drawn",
+        },
+      })
+      yield* Effect.sleep("100 millis")
+
+      const byProvider = yield* ModelRouteLog.filteredAttempts(db, { since: 0, providerID: "openai" })
+      expect(byProvider.map((row) => row.timeStarted)).toEqual([9_000, 3_000, 1_000])
+      // The API contract: no credential, no provider error body, no quota snapshot is ever selected.
+      expect(Object.keys(byProvider[0] ?? {})).not.toContain("credentialID")
+      expect(Object.keys(byProvider[0] ?? {})).not.toContain("errorBody")
+      expect(Object.keys(byProvider[0] ?? {})).not.toContain("quota")
+
+      const byWindowAndSession = yield* ModelRouteLog.filteredAttempts(db, {
+        since: 0,
+        until: 5_000,
+        sessionID: "ses_1",
+      })
+      expect(byWindowAndSession.map((row) => row.timeStarted)).toEqual([4_000, 1_000])
+
+      const byModel = yield* ModelRouteLog.filteredAttempts(db, { since: 0, modelID: "claude-x" })
+      expect(byModel).toHaveLength(1)
+      expect(byModel[0]?.providerID).toBe("anthropic")
+
+      const limited = yield* ModelRouteLog.filteredAttempts(db, { since: 0, limit: 2 })
+      expect(limited.map((row) => row.timeStarted)).toEqual([9_000, 4_000])
+
+      const totals = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
+      expect(totals).toHaveLength(2)
+      expect(totals.find((row) => row.providerID === "openai")).toMatchObject({
+        attempts: 2,
+        successes: 1,
+        failures: 1,
+        tokensInput: 150,
+        tokensOutput: 10,
+        sessions: 2,
+        first: 1_000,
+        last: 4_000,
+      })
+      expect(totals.find((row) => row.providerID === "anthropic")).toMatchObject({
+        attempts: 1,
+        successes: 1,
+        tokensInput: 200,
+        sessions: 1,
+      })
+
+      const coverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
+      expect(coverage).toMatchObject({ attempts: 3, providers: 2, models: 2, sessions: 2, routes: 1, first: 1_000, last: 5_000 })
+
+      const errors = yield* ModelRouteLog.errorBreakdown(db, 0, 5_000)
+      expect(errors.find((row) => row.tag === "QuotaExceeded")?.count).toBe(1)
+      expect(yield* ModelRouteLog.errorBreakdown(db, 0, 2_000)).toHaveLength(0)
+
+      const decisions = yield* ModelRouteLog.filteredDecisions(db, { since: 0, routeID: "luna" })
+      expect(decisions).toHaveLength(1)
+      expect(decisions[0]?.chosen).toBe("openai/gpt-6-luna")
+      expect(yield* ModelRouteLog.filteredDecisions(db, { since: 0, until: 5_000 })).toHaveLength(1)
+    }),
+  )
+})
