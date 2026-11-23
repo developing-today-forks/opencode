@@ -143,6 +143,9 @@ impl Client {
     );
     endpoint!(" `POST /api/route/overrides` (`override.add`)", route_override_add, route_override_add_call, data, RouteOverrideAddOutput, input: RouteOverrideAddInput);
     endpoint!(" `DELETE /api/route/overrides/:overrideID` (`override.remove`)", route_override_remove, route_override_remove_call, empty, (), input: RouteOverrideRemoveInput);
+    endpoint!(" `GET /api/route/attempts` (`attempt.list`)", route_attempt_list, route_attempt_list_call, data, RouteAttemptListOutput, input: RouteAttemptListInput);
+    endpoint!(" `GET /api/route/attempts/stats` (`attempt.stats`)", route_attempt_stats, route_attempt_stats_call, data, RouteAttemptStatsOutput, input: RouteAttemptStatsInput);
+    endpoint!(" `GET /api/route/decisions` (`decision.list`)", route_decision_list, route_decision_list_call, data, RouteDecisionListOutput, input: RouteDecisionListInput);
     endpoint!(" `GET /api/project` (`list`)", project_list, project_list_call, json, ProjectListOutput, input: ProjectListInput);
     endpoint!(" `PATCH /api/project/:projectID` (`update`)", project_update, project_update_call, json, ProjectUpdateOutput, input: ProjectUpdateInput);
     endpoint!(" `GET /api/form` (`list`)", form_list, form_list_call, json, FormListOutput, input: FormListInput);

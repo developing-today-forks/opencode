@@ -1256,6 +1256,63 @@ pub fn route_override_remove(input: &RouteOverrideRemoveInput) -> Call<()> {
     call
 }
 
+/// `GET /api/route/attempts` (`attempt.list`)
+pub fn route_attempt_list(input: &RouteAttemptListInput) -> Call<RouteAttemptListOutput> {
+    let mut call = Call::new("GET", "/api/route/attempts".to_owned(), Reply::Data, 200, &[400, 401]);
+    if let Some(value) = &input.since {
+        call.query("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.query("until", value);
+    }
+    if let Some(value) = &input.provider {
+        call.query("provider", value);
+    }
+    if let Some(value) = &input.model {
+        call.query("model", value);
+    }
+    if let Some(value) = &input.session {
+        call.query("session", value);
+    }
+    if let Some(value) = &input.route {
+        call.query("route", value);
+    }
+    if let Some(value) = &input.limit {
+        call.query("limit", value);
+    }
+    call
+}
+
+/// `GET /api/route/attempts/stats` (`attempt.stats`)
+pub fn route_attempt_stats(input: &RouteAttemptStatsInput) -> Call<RouteAttemptStatsOutput> {
+    let mut call = Call::new("GET", "/api/route/attempts/stats".to_owned(), Reply::Data, 200, &[400, 401]);
+    if let Some(value) = &input.since {
+        call.query("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.query("until", value);
+    }
+    call
+}
+
+/// `GET /api/route/decisions` (`decision.list`)
+pub fn route_decision_list(input: &RouteDecisionListInput) -> Call<RouteDecisionListOutput> {
+    let mut call = Call::new("GET", "/api/route/decisions".to_owned(), Reply::Data, 200, &[400, 401]);
+    if let Some(value) = &input.since {
+        call.query("since", value);
+    }
+    if let Some(value) = &input.until {
+        call.query("until", value);
+    }
+    if let Some(value) = &input.route {
+        call.query("route", value);
+    }
+    if let Some(value) = &input.limit {
+        call.query("limit", value);
+    }
+    call
+}
+
 /// `GET /api/project` (`list`)
 pub fn project_list(input: &ProjectListInput) -> Call<ProjectListOutput> {
     let mut call = Call::new("GET", "/api/project".to_owned(), Reply::Json, 200, &[400, 401]);
@@ -2510,6 +2567,9 @@ pub fn vcs_status(input: &VcsStatusInput) -> Call<VcsStatusOutput> {
     if let Some(value) = &input.location {
         call.query("location", value);
     }
+    if let Some(value) = &input.limit {
+        call.query("limit", value);
+    }
     call
 }
 
@@ -3296,6 +3356,34 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
         "route.override.remove" => Some((|| {
             Ok(route_override_remove(&RouteOverrideRemoveInput { override_id: field(input, "overrideID")? }).cast())
         })()),
+        "route.attempt.list" => Some((|| {
+            Ok(route_attempt_list(&RouteAttemptListInput {
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+                provider: field(input, "provider")?,
+                model: field(input, "model")?,
+                session: field(input, "session")?,
+                route: field(input, "route")?,
+                limit: field(input, "limit")?,
+            })
+            .cast())
+        })()),
+        "route.attempt.stats" => Some((|| {
+            Ok(route_attempt_stats(&RouteAttemptStatsInput {
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+            })
+            .cast())
+        })()),
+        "route.decision.list" => Some((|| {
+            Ok(route_decision_list(&RouteDecisionListInput {
+                since: field(input, "since")?,
+                until: field(input, "until")?,
+                route: field(input, "route")?,
+                limit: field(input, "limit")?,
+            })
+            .cast())
+        })()),
         "project.list" => {
             Some((|| Ok(project_list(&ProjectListInput { archived: field(input, "archived")? }).cast()))())
         }
@@ -3882,7 +3970,10 @@ pub fn probe(name: &str, input: &serde_json::Value) -> Option<Result<Call<serde_
         })()),
         "vcs.get" => Some((|| Ok(vcs_get(&VcsGetInput { location: field(input, "location")? }).cast()))()),
         "vcs.base" => Some((|| Ok(vcs_base(&VcsBaseInput { location: field(input, "location")? }).cast()))()),
-        "vcs.status" => Some((|| Ok(vcs_status(&VcsStatusInput { location: field(input, "location")? }).cast()))()),
+        "vcs.status" => Some((|| {
+            Ok(vcs_status(&VcsStatusInput { location: field(input, "location")?, limit: field(input, "limit")? })
+                .cast())
+        })()),
         "vcs.branch.list" => Some((|| {
             Ok(vcs_branch_list(&VcsBranchListInput {
                 location: field(input, "location")?,

@@ -7471,6 +7471,16 @@ pub struct CredentialExternal {
     pub metadata: Option<IndexMap<String, serde_json::Value>>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct CredentialSessionCookie {
+    pub r#type: tag::SessionCookie,
+    pub cookie: String,
+    #[serde(rename = "workspaceID")]
+    pub workspace_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<IndexMap<String, serde_json::Value>>,
+}
+
 /// `Credential.Value`, tagged by `type`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
@@ -7478,6 +7488,7 @@ pub enum CredentialValue {
     Oauth(CredentialOAuth),
     Key(CredentialKey),
     External(CredentialExternal),
+    SessionCookie(CredentialSessionCookie),
     /// A member this client does not know, kept as it arrived.
     Unknown(serde_json::Value),
 }
@@ -7494,6 +7505,7 @@ impl CredentialValue {
             Some("oauth") => raw.variant().map(Self::Oauth),
             Some("key") => raw.variant().map(Self::Key),
             Some("external") => raw.variant().map(Self::External),
+            Some("session-cookie") => raw.variant().map(Self::SessionCookie),
             _ => raw.unknown().map(Self::Unknown),
         }
     }
@@ -7506,6 +7518,7 @@ impl CredentialValue {
             Self::Oauth(value) => value.r#type.as_str(),
             Self::Key(value) => value.r#type.as_str(),
             Self::External(value) => value.r#type.as_str(),
+            Self::SessionCookie(value) => value.r#type.as_str(),
             Self::Unknown(value) => value.get("type").and_then(serde_json::Value::as_str).unwrap_or_default(),
         }
     }
@@ -7515,7 +7528,7 @@ impl CredentialValue {
         match self {
             Self::Oauth(value) => Some(value.method_id.as_str()),
             Self::External(value) => Some(value.method_id.as_str()),
-            Self::Key(_) | Self::Unknown(_) => None,
+            Self::Key(_) | Self::SessionCookie(_) | Self::Unknown(_) => None,
         }
     }
 
@@ -7525,6 +7538,7 @@ impl CredentialValue {
             Self::Oauth(value) => value.metadata.as_ref(),
             Self::Key(value) => value.metadata.as_ref(),
             Self::External(value) => value.metadata.as_ref(),
+            Self::SessionCookie(value) => value.metadata.as_ref(),
             Self::Unknown(_) => None,
         }
     }
@@ -7693,6 +7707,196 @@ pub type RouteOverrideAddOutput = Vec<RouteOverrideInfo>;
 pub struct RouteOverrideRemoveInput {
     pub override_id: String,
 }
+
+/// Input of `Client::route_attempt_list`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RouteAttemptListInput {
+    pub since: Option<f64>,
+    pub until: Option<f64>,
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub session: Option<String>,
+    pub route: Option<String>,
+    pub limit: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteAttemptAttempt {
+    pub id: SessionMessageShellExit,
+    #[serde(rename = "timeStarted")]
+    pub time_started: SessionMessageShellExit,
+    #[serde(rename = "timeEnded")]
+    pub time_ended: SessionMessageShellExit,
+    #[serde(rename = "sessionID", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(rename = "routeID")]
+    pub route_id: String,
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    #[serde(rename = "modelID")]
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
+    pub outcome: String,
+    #[serde(rename = "errorTag", default, skip_serializing_if = "Option::is_none")]
+    pub error_tag: Option<String>,
+    #[serde(rename = "errorCode", default, skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+    #[serde(rename = "errorStatus", default, skip_serializing_if = "Option::is_none")]
+    pub error_status: Option<SessionMessageShellExit>,
+    #[serde(rename = "errorMessage", default, skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+    #[serde(rename = "outputStarted")]
+    pub output_started: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hedged: Option<bool>,
+    #[serde(rename = "firstTokenMs", default, skip_serializing_if = "Option::is_none")]
+    pub first_token_ms: Option<SessionMessageShellExit>,
+    #[serde(rename = "responseMs", default, skip_serializing_if = "Option::is_none")]
+    pub response_ms: Option<SessionMessageShellExit>,
+    #[serde(rename = "tokensPerSecond", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_per_second: Option<SessionMessageShellExit>,
+    #[serde(rename = "tokensInput", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_input: Option<SessionMessageShellExit>,
+    #[serde(rename = "tokensOutput", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_output: Option<SessionMessageShellExit>,
+    #[serde(rename = "tokensReasoning", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_reasoning: Option<SessionMessageShellExit>,
+    #[serde(rename = "tokensCacheRead", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_cache_read: Option<SessionMessageShellExit>,
+    #[serde(rename = "tokensCacheWrite", default, skip_serializing_if = "Option::is_none")]
+    pub tokens_cache_write: Option<SessionMessageShellExit>,
+    #[serde(rename = "costUsd", default, skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<SessionMessageShellExit>,
+    #[serde(rename = "cacheSavingsUsd", default, skip_serializing_if = "Option::is_none")]
+    pub cache_savings_usd: Option<SessionMessageShellExit>,
+}
+
+/// Output of `Client::route_attempt_list`.
+pub type RouteAttemptListOutput = Vec<RouteAttemptAttempt>;
+
+/// Input of `Client::route_attempt_stats`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RouteAttemptStatsInput {
+    pub since: Option<f64>,
+    pub until: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RouteAttemptTargetTotal {
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    #[serde(rename = "modelID")]
+    pub model_id: String,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub attempts: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub successes: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub failures: f64,
+    #[serde(rename = "policyRejections", serialize_with = "crate::ser::number")]
+    pub policy_rejections: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub timeouts: f64,
+    #[serde(rename = "tokensInput", serialize_with = "crate::ser::number")]
+    pub tokens_input: f64,
+    #[serde(rename = "tokensOutput", serialize_with = "crate::ser::number")]
+    pub tokens_output: f64,
+    #[serde(rename = "tokensReasoning", serialize_with = "crate::ser::number")]
+    pub tokens_reasoning: f64,
+    #[serde(rename = "tokensCacheRead", serialize_with = "crate::ser::number")]
+    pub tokens_cache_read: f64,
+    #[serde(rename = "tokensCacheWrite", serialize_with = "crate::ser::number")]
+    pub tokens_cache_write: f64,
+    #[serde(rename = "costUsd", serialize_with = "crate::ser::number")]
+    pub cost_usd: f64,
+    #[serde(rename = "cacheSavingsUsd", serialize_with = "crate::ser::number")]
+    pub cache_savings_usd: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub sessions: f64,
+    #[serde(default, serialize_with = "crate::ser::option_number")]
+    pub first: Option<f64>,
+    #[serde(default, serialize_with = "crate::ser::option_number")]
+    pub last: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RouteAttemptErrorBreakdown {
+    #[serde(rename = "providerID")]
+    pub provider_id: String,
+    #[serde(rename = "modelID")]
+    pub model_id: String,
+    #[serde(default)]
+    pub tag: Option<String>,
+    #[serde(default)]
+    pub code: Option<String>,
+    #[serde(default, serialize_with = "crate::ser::option_number")]
+    pub status: Option<f64>,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub count: f64,
+    #[serde(rename = "lastTime", serialize_with = "crate::ser::number")]
+    pub last_time: f64,
+    #[serde(rename = "lastMessage", default)]
+    pub last_message: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RouteAttemptCoverage {
+    #[serde(serialize_with = "crate::ser::number")]
+    pub attempts: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub providers: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub models: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub sessions: f64,
+    #[serde(serialize_with = "crate::ser::number")]
+    pub routes: f64,
+    #[serde(default, serialize_with = "crate::ser::option_number")]
+    pub first: Option<f64>,
+    #[serde(default, serialize_with = "crate::ser::option_number")]
+    pub last: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RouteAttemptStats {
+    pub targets: Vec<RouteAttemptTargetTotal>,
+    pub errors: Vec<RouteAttemptErrorBreakdown>,
+    pub coverage: RouteAttemptCoverage,
+}
+
+/// Output of `Client::route_attempt_stats`.
+pub type RouteAttemptStatsOutput = RouteAttemptStats;
+
+/// Input of `Client::route_decision_list`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct RouteDecisionListInput {
+    pub since: Option<f64>,
+    pub until: Option<f64>,
+    pub route: Option<String>,
+    pub limit: Option<f64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RouteAttemptDecision {
+    pub id: SessionMessageShellExit,
+    pub time: SessionMessageShellExit,
+    #[serde(rename = "sessionID", default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    #[serde(rename = "routeID")]
+    pub route_id: String,
+    pub selection: String,
+    pub candidates: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chosen: Option<String>,
+    pub reason: String,
+    pub detail: serde_json::Value,
+}
+
+/// Output of `Client::route_decision_list`.
+pub type RouteDecisionListOutput = Vec<RouteAttemptDecision>;
 
 /// Input of `Client::project_list`.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -12737,6 +12941,7 @@ pub struct VcsBaseOutput {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct VcsStatusInput {
     pub location: Option<LocationQueryInput>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -12745,6 +12950,8 @@ pub struct VcsFileStatus {
     pub additions: i64,
     pub deletions: i64,
     pub status: FileDiffInfoStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub more: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -15699,8 +15906,9 @@ pub mod tag {
         ServerResync = "server.resync", SessionAgentSelected = "session.agent.selected",
         SessionArchived = "session.archived", SessionCompactionDelta = "session.compaction.delta",
         SessionCompactionEnded = "session.compaction.ended", SessionCompactionFailed = "session.compaction.failed",
-        SessionCompactionStarted = "session.compaction.started", SessionCreated = "session.created",
-        SessionDeleted = "session.deleted", SessionExecutionFailed = "session.execution.failed",
+        SessionCompactionStarted = "session.compaction.started", SessionCookie = "session-cookie",
+        SessionCreated = "session.created", SessionDeleted = "session.deleted",
+        SessionExecutionFailed = "session.execution.failed",
         SessionExecutionInterrupted = "session.execution.interrupted",
         SessionExecutionStarted = "session.execution.started",
         SessionExecutionSucceeded = "session.execution.succeeded", SessionForked = "session.forked",
