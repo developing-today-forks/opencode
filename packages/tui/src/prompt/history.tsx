@@ -6,7 +6,7 @@ import type { PromptInput } from "@opencode/schema"
 import type { Types } from "effect"
 import { createSimpleContext } from "../context/helper"
 import { useTuiPaths } from "../context/runtime"
-import { appendText, readText, writeText } from "../util/persistence"
+import { createJsonlFile, mergeLoadedEntries } from "./jsonl"
 
 export type PastedText = {
   text: string
@@ -102,16 +102,27 @@ const { use: useHistoryEntries, provider: PromptHistoryProvider } = createSimple
   init: () => {
     const paths = useTuiPaths()
     const historyPath = path.join(paths.state, "prompt-history.jsonl")
-    onMount(async () => {
-      const lines = parsePromptHistory(await readText(historyPath).catch(() => ""))
-      setStore("history", lines)
-
-      // Rewrite valid retained entries to self-heal corruption and enforce the limit.
-      if (lines.length > 0)
-        writeText(historyPath, lines.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
+    const file = createJsonlFile<PromptInfo>({
+      file: historyPath,
+      locks: path.join(paths.state, "locks"),
+      parse: parsePromptHistory,
+      serialize: (entries) => (entries.length > 0 ? entries.map((line) => JSON.stringify(line)).join("\n") + "\n" : ""),
     })
 
     const [store, setStore] = createStore({ history: [] as PromptInfo[] })
+
+    onMount(async () => {
+      // Rewrite valid retained entries to self-heal corruption and enforce the limit.
+      // The rewrite re-reads under the file lock, so entries another TUI
+      // appended after this instance started are preserved.
+      const lines = await file.update((current) => (current.length > 0 ? current : undefined)).catch(() => file.read())
+      // Merge rather than replace: appends recorded while the load was in
+      // flight are already in the store and must not be wiped by it.
+      setStore(
+        "history",
+        mergeLoadedEntries(lines, [...store.history], (entry) => JSON.stringify(entry), MAX_HISTORY_ENTRIES),
+      )
+    })
 
     return {
       get entries() {
@@ -120,22 +131,21 @@ const { use: useHistoryEntries, provider: PromptHistoryProvider } = createSimple
       append(item: PromptInfo) {
         const entry = structuredClone(unwrap(item))
         if (isDuplicateEntry(store.history.at(-1), entry)) return
-        let trimmed = false
         setStore(
           produce((draft) => {
             draft.history.push(entry)
             if (draft.history.length > MAX_HISTORY_ENTRIES) {
               draft.history = draft.history.slice(-MAX_HISTORY_ENTRIES)
-              trimmed = true
             }
           }),
         )
 
-        if (trimmed) {
-          writeText(historyPath, store.history.map((line) => JSON.stringify(line)).join("\n") + "\n").catch(() => {})
-          return
-        }
-        appendText(historyPath, JSON.stringify(entry) + "\n").catch(() => {})
+        file
+          .update((current) => {
+            if (isDuplicateEntry(current.at(-1), entry)) return undefined
+            return [...current, entry].slice(-MAX_HISTORY_ENTRIES)
+          })
+          .catch(() => {})
       },
     }
   },
