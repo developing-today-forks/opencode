@@ -151,6 +151,9 @@ const Definition = Schema.Struct({
   id: Model.ID,
   /** The route's carried system prompt (config `system`, #1413), when one is declared. */
   system: Schema.String.pipe(optional),
+  /** The route's cost/capability class (config `class`), when one is declared. Cross-route
+   * failover substitutes only within a class (#12228); a route without one takes no part. */
+  class: Schema.String.pipe(optional),
   targets: Schema.Array(Model.Ref),
   targetVariants: Schema.Array(TargetVariant),
   /** Parallel to `targets`; the resolved prompt-cache format for each leaf, an empty object when unset. */
@@ -270,6 +273,14 @@ export const lastTargetTimeout = (policy: Policy): number | false => {
 export const targetPolicy = (definition: Definition, index: number): Policy => {
   const wait = definition.targetFirstTokenTimeouts?.[index]?.firstTokenTimeoutMs
   return wait === undefined ? definition.health : { ...definition.health, firstTokenTimeoutMs: wait }
+}
+
+/** The cost/capability class a route declares, normalized for comparison: class names match
+ * in any case, as route references do throughout route config. Undefined when the route
+ * declares none — such a route neither substitutes nor is substituted into (#12228). */
+export const routeClass = (definition: Definition): string | undefined => {
+  const name = definition.class?.trim().toLowerCase()
+  return name ? name : undefined
 }
 
 /** The route definition a model carries. Route models under the routes provider carry one, and so
@@ -2611,6 +2622,15 @@ export const giveUps = (target: Model.Ref, credentialID?: string, location?: str
   const state = credentialID ? credentialHealth.get(credentialKey(target, credentialID)) : health.get(key(target))
   const window = currentConstants(location).escalation.outcomeWindow
   return (state?.outcomes ?? []).slice(-window).filter((answered) => !answered).length
+}
+
+/** A target's measured recent record: requests answered and attempted in the retained
+ * outcome window — the in-process successor of the #12228 five-door measurement. The
+ * cross-route substitution order ranks a candidate route by the measured record of the
+ * doors it would send the session to. */
+export const measured = (target: Model.Ref): { readonly answered: number; readonly attempts: number } => {
+  const outcomes = health.get(key(target))?.outcomes ?? []
+  return { answered: outcomes.filter((answered) => answered).length, attempts: outcomes.length }
 }
 
 /** A target is steady while it has fewer give-ups than the race threshold among its recent requests. */

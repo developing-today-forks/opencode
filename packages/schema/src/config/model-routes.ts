@@ -488,6 +488,10 @@ export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
     description:
       "System prompt this route carries, prepended to the caller's own system text on every request the route serves (persona routes, #1413: the design-code door's injected design prompt, carried by the route instead of a proxy). A route nested inside another route does not stack its prompt: only the addressed route's prompt applies.",
   }).pipe(optional),
+  class: Schema.String.annotate({
+    description:
+      "The route's cost/capability class, e.g. \"frontier\" or \"frontier-acp\". When a session's whole route is walled, failover may substitute another route of the SAME class, ordered by the doors' measured record; it never substitutes across classes, so a session never lands on a more expensive or differently-capable route by failing over. A route with no class neither substitutes nor is substituted into. ACP routes are their own class: name them separately (e.g. \"frontier-acp\") so ACP traffic only ever substitutes within ACP. Class names match in any case.",
+  }).pipe(optional),
   // The descriptions of the keys below sit inside optional(...): annotated outside it, a description never
   // reaches the generated JSON schema, so editors could not show it.
   targets: Schema.Array(Target)
