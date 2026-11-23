@@ -3261,3 +3261,53 @@ describe("withQuotaLegDeadline", () => {
   })
 })
 
+describe("fetchAllQuota leg isolation (#2562)", () => {
+  // ORACLE: issue #2562, from the 2026-11-16 incident — one wedged
+  // provider leg froze every quota read. A leg that never settles
+  // must land as that provider's leg-timeout error row, the run
+  // must resolve, and every other provider's results must be
+  // present and unaffected. The leg deadline is injected short
+  // via fetchAllQuota's deadlineMs option so the suite never
+  // waits out the 60s production default.
+  const legCtx = (fetchImpl: unknown) =>
+    ({
+      credentials: [
+        { id: "row-deepseek", integrationID: "deepseek", active: true, value: { type: "key", key: "sk-fixture" } },
+        { id: "row-groq", integrationID: "groq", active: true, value: { type: "key", key: "sk-fixture" } },
+      ],
+      disabledProviders: new Set<string>(),
+      instances: new Map(),
+      providerConfig: {},
+      env: { TURSO_API_TOKEN: "fixture-token" },
+      homeDir: "/nonexistent-quota-leg-isolation",
+      fetchImpl,
+    }) as never
+
+  test("a never-settling leg becomes a leg-timeout row and the run completes", async () => {
+    const fetchImpl = async (url: unknown) => {
+      // The wedged leg: the DeepSeek read never settles (the
+      // locked-keyring shape — a stub that ignores the provider's
+      // own abort signal, like a parked Secret Service read).
+      if (String(url).includes("api.deepseek.com")) return new Promise<Response>(() => {})
+      return new Response("{}", { status: 401, headers: { "content-type": "application/json" } })
+    }
+    const started = Date.now()
+    const groups = await fetchAllQuota(legCtx(fetchImpl), { deadlineMs: 50 })
+    expect(Date.now() - started).toBeLessThan(10_000)
+
+    const deepseek = groups.filter((group) => group.providerId === "deepseek")
+    expect(deepseek).toHaveLength(1)
+    expect(deepseek[0]?.results).toHaveLength(1)
+    expect(deepseek[0]?.results[0]?.ok).toBe(false)
+    expect(deepseek[0]?.results[0]?.failureClass).toBe("leg-timeout")
+    expect(deepseek[0]?.results[0]?.error).toContain("leg deadline")
+
+    // The healthy provider is present and carries its own
+    // (internal) result — not a leg-isolation row.
+    const groq = groups.filter((group) => group.providerId === "groq")
+    expect(groq).toHaveLength(1)
+    expect(groq[0]?.results[0]?.ok).toBe(false)
+    expect(["leg-timeout", "leg-error"]).not.toContain(groq[0]?.results[0]?.failureClass)
+    expect(groq[0]?.results[0]?.error).toContain("Invalid or revoked API key")
+  })
+})

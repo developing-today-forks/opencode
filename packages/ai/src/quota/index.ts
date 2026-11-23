@@ -452,13 +452,16 @@ export const withQuotaLegDeadline = async <T>(
 /** Fetch every configured provider (the default `opencode quota` run). */
 export const fetchAllQuota = async (
   ctx: QuotaContext,
-  { includeDisabled = false }: { includeDisabled?: boolean } = {},
+  { includeDisabled = false, deadlineMs }: { includeDisabled?: boolean; deadlineMs?: number } = {},
 ): Promise<{ providerId: string; results: QuotaResult[] }[]> => {
   const { providerIds, probeFailures } = await listConfiguredQuotaProvidersDetailed(ctx, { includeDisabled })
   const out: { providerId: string; results: QuotaResult[] }[] = []
   for (const id of providerIds) {
     try {
-      out.push({ providerId: id, results: await withQuotaLegDeadline(id, fetchQuotaForProviderInstances(ctx, id)) })
+      out.push({
+        providerId: id,
+        results: await withQuotaLegDeadline(id, fetchQuotaForProviderInstances(ctx, id), deadlineMs),
+      })
     } catch (err) {
       out.push({
         providerId: id,
