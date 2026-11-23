@@ -26,7 +26,14 @@ export interface GateDefinition {
   readonly treeChecks?: readonly TreeCheck[]
 }
 
-export const hitKey = (file: string, text: string) => `${file} :: ${text}`
+/**
+ * The disposition key for a hit. Internal whitespace runs collapse to a
+ * single space, so a key survives a formatter pass that only re-spaces a
+ * line; a pass that joins or splits a statement changes the line itself
+ * and is caught by the auto-format gate guard instead (#2630). The sweep
+ * and the allowlist parse both build keys here, so the two sides agree.
+ */
+export const hitKey = (file: string, text: string) => `${file} :: ${text.replace(/\s+/g, " ")}`
 
 /**
  * A line is comment-only when it is a `//` line, a block-comment
