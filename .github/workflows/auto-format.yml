@@ -19,6 +19,13 @@ name: auto-format
 #     already-formatted files simply produce no commit;
 #   - cancel-in-progress is false: a pass is never cancelled
 #     mid-commit; a queued pass just finds nothing left to do.
+#   - gate guard (#2630): the pass records the three allowlist
+#     gates' status (check:numeric-boundaries, check:bounded-http,
+#     check:proto-reads) on the unformatted tree and re-runs them
+#     before committing; a gate that passed at baseline and fails
+#     on the formatted tree fails the pass instead of pushing a
+#     red main. A gate already red at baseline only warns - that
+#     drift is not this pass's doing.
 #
 # Adaptations from the code-repo PoC:
 #   - the formatter is this repo's Prettier 3.6.2 (version pinned in
@@ -119,6 +126,19 @@ jobs:
             fi
             printf 'Formatting %s file(s):\n' "${#changed_files[@]}"
             printf '  %s\n' "${changed_files[@]}"
+            # Gate guard (#2630): baseline the allowlist gates on the
+            # unformatted tree (see header). The gate scripts import
+            # only node builtins, so they run without an install.
+            gate_names=(numeric-boundaries bounded-http proto-reads)
+            declare -A gate_baseline=()
+            for gate in "${gate_names[@]}"; do
+              if bun run "check:$gate" >/dev/null 2>&1; then
+                gate_baseline["$gate"]=pass
+              else
+                gate_baseline["$gate"]=fail
+                echo "::warning::check:$gate already fails on main before formatting; this pass will not be blocked on it."
+              fi
+            done
             bunx prettier@3.6.2 --write --ignore-unknown "${changed_files[@]}"
             # Stage every tracked change Prettier actually made, not
             # just the listed files: the checkout was clean before
@@ -131,6 +151,15 @@ jobs:
               record_success
               exit 0
             fi
+            # A gate that passed at baseline must still pass on the
+            # formatted tree; otherwise the formatter rewrote a
+            # dispositioned line and its key died with it (#2630).
+            for gate in "${gate_names[@]}"; do
+              if [[ "${gate_baseline[$gate]}" == "pass" ]] && ! bun run "check:$gate" >/dev/null 2>&1; then
+                echo "::error::check:$gate passed before formatting and fails on the formatted tree; refusing to commit a formatter pass that turns a gate red (#2630)."
+                exit 1
+              fi
+            done
             git commit -m "style(auto-format): auto-format on main"
             if git push origin HEAD:main; then
               echo "Pushed auto-format commit."

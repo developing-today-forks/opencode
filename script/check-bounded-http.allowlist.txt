@@ -522,3 +522,6 @@ services/site/src/routes/press/index.tsx :: "text/plain": fetch(url) :: unreview
 services/site/src/routes/press/index.tsx :: .then((response) => response.text()) :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
 services/site/src/routes/stylesheet/[file].ts :: const response = await (binding ? binding.fetch(request) : fetch(request)) :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
 services/site/src/routes/stylesheet/[file].ts :: return response.ok ? response.text() : undefined :: unreviewed: arrived with the 2026-11-22 anomalyco/opencode dev sync; triage tracked in #2677
+packages/cli-rs/script/perf.ts :: const base: Run = await Bun.file(basePath).json() :: local file read via Bun.file (filesystem), not a network response body
+packages/cli-rs/script/perf.ts :: const head: Run = await Bun.file(headPath).json() :: local file read via Bun.file (filesystem), not a network response body
+packages/ui/src/components/spinner-radar.test.ts :: const committed = await Bun.file(new URL("./spinner-frames.css", import.meta.url)).text() :: local file read via Bun.file (filesystem), not a network response body
