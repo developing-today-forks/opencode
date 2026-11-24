@@ -1,6 +1,32 @@
 import fs from "fs/promises"
+import { realpathSync } from "fs"
+import os from "os"
 import path from "path"
 import { tmpdir } from "../test/fixture/tmpdir"
+
+// The test home must not sit inside the real home directory. With an
+// ambient TMPDIR under HOME (the OpenCode agent harness sets
+// TMPDIR=~/.local/share/opencode/tmp) the home would be created there, and
+// config discovery walking up from the child's temp projects would reach
+// the real home config (#2681). Drop TMPDIR for the home's own creation so
+// it lands in the platform default temp root; the child environment below
+// still sets TMPDIR to <home>/tmp.
+const realHome = os.homedir()
+if (realHome && inside(os.tmpdir(), realHome)) delete process.env.TMPDIR
+
+function inside(candidate: string, home: string) {
+  const resolved = realpath(candidate)
+  const root = realpath(home)
+  return resolved === root || resolved.startsWith(root + path.sep)
+}
+
+function realpath(candidate: string) {
+  try {
+    return realpathSync(candidate)
+  } catch {
+    return path.resolve(candidate)
+  }
+}
 
 await using directory = await tmpdir("oc-")
 const home = directory.path
