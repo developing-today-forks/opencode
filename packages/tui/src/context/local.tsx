@@ -519,6 +519,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const filePath = path.join(paths.state, "session.json")
       const state = {
         pending: false,
+        unreadable: undefined as string | undefined,
       }
 
       function save() {
@@ -527,6 +528,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return
         }
         state.pending = false
+        if (state.unreadable)
+          throw new Error(`Refusing to overwrite unreadable session pin store ${filePath}: ${state.unreadable}`)
         void writeJsonAtomic(filePath, {
           pinned: sessionStore.pinned,
         })
@@ -542,7 +545,10 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               pinned.filter((item): item is string => typeof item === "string"),
             )
         })
-        .catch(() => {})
+        .catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return
+          state.unreadable = error instanceof Error ? error.message : String(error)
+        })
         .finally(() => {
           setSessionStore("ready", true)
           if (state.pending) save()
