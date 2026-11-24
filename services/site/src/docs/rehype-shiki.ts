@@ -26,7 +26,7 @@ theme.tokenColors?.push(
 )
 const highlighter = createHighlighter({ langs: ["plaintext"], themes: [theme] })
 const shells = new Set(["bash", "sh", "shell", "zsh", "console"])
-const labels: Record<string, string> = {
+const labels: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, {
   ts: "TypeScript",
   typescript: "TypeScript",
   tsx: "TSX",
@@ -50,7 +50,7 @@ const labels: Record<string, string> = {
   dockerfile: "Dockerfile",
   sql: "SQL",
   http: "HTTP",
-}
+})
 
 export default function rehypeShiki() {
   return async (tree: Root) => {

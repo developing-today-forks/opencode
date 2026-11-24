@@ -2656,7 +2656,7 @@ export function createBrowserPage(
       return mask | bit
     }, 0)
 
-    const codes: KeyCodes = {
+    const codes: KeyCodes = Object.assign(Object.create(null) as KeyCodes, {
       Enter: 13,
       Tab: 9,
       Escape: 27,
@@ -2671,7 +2671,7 @@ export function createBrowserPage(
       Home: 36,
       End: 35,
       Space: 32,
-    }
+    })
 
     const code =
       codes[key] ??

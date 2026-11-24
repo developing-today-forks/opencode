@@ -101,14 +101,14 @@ export function v1Section(locale: V1Locale, titles: Map<string, string>): DocsSe
 }
 
 // V1 pages at another address in the latest docs.
-const renamed: Record<string, string> = {
+const renamed: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, {
   acp: "cli/acp",
   keybinds: "cli/keybinds",
   tui: "cli/tui",
   web: "cli/web",
   sdk: "build/sdk",
   rules: "instructions",
-}
+})
 
 /**
  * The latest docs' version of a V1 page (its English slug), or their intro when they have none: a
