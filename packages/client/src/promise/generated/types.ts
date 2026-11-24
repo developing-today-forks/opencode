@@ -574,6 +574,10 @@ export type ConfigModelReasoning =
   | { supported: false }
   | { supported: true; toggle?: boolean; effort?: Array<string>; budget?: { min?: number; max?: number } }
 
+export type ConfigModelDesignations = {
+  [x: string]: { purposes: Array<string>; capabilities?: Array<string>; source?: string }
+}
+
 export type ConfigModelRouteProviderRoutes = {
   [x: string]: {
     providers: Array<string>
@@ -2721,6 +2725,7 @@ export type ConfigModelRoutes = {
     name?: string
     system?: string
     class?: string
+    purpose?: string
     targets?: Array<ConfigModelRouteTarget>
     include?: Array<string>
     exclude?: Array<string>
@@ -3326,6 +3331,7 @@ export type ConfigEntry =
             }
           }
         }
+        model_designations?: ConfigModelDesignations
         aliases?: {
           providers?: { [x: string]: string }
           models?: { [x: string]: string }
@@ -4014,6 +4020,14 @@ export type SessionNotFoundError = {
 export const isSessionNotFoundError = (value: unknown): value is SessionNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "SessionNotFoundError"
 
+export type ConflictError = {
+  readonly _tag: "ConflictError"
+  readonly message: string
+  readonly resource?: string | undefined
+}
+export const isConflictError = (value: unknown): value is ConflictError =>
+  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ConflictError"
+
 export type MessageNotFoundError = {
   readonly _tag: "MessageNotFoundError"
   readonly sessionID: string
@@ -4022,14 +4036,6 @@ export type MessageNotFoundError = {
 }
 export const isMessageNotFoundError = (value: unknown): value is MessageNotFoundError =>
   typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "MessageNotFoundError"
-
-export type ConflictError = {
-  readonly _tag: "ConflictError"
-  readonly message: string
-  readonly resource?: string | undefined
-}
-export const isConflictError = (value: unknown): value is ConflictError =>
-  typeof value === "object" && value !== null && "_tag" in value && value["_tag"] === "ConflictError"
 
 export type CommandNotFoundError = {
   readonly _tag: "CommandNotFoundError"

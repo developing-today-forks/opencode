@@ -1050,12 +1050,13 @@ describe("Session.create", () => {
     }),
   )
 
-  it.effect("returns the existing Session when one ID is reused with different create arguments", () =>
+  it.effect("fails with a typed conflict when one ID is reused with different create arguments", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service
       const created = yield* session.create({ id, location })
       const changed = [
         { id, location: Location.Ref.make({ directory: AbsolutePath.make("/other") }) },
+        { id, location, title: "Different title" },
         { id, location, agent: Agent.ID.make("build") },
         {
           id,
@@ -1065,8 +1066,10 @@ describe("Session.create", () => {
       ]
 
       for (const input of changed) {
-        expect(yield* session.create(input)).toEqual(created)
+        expect(yield* Effect.flip(session.create(input))).toEqual(new Session.AlreadyExistsError({ sessionID: id }))
       }
+      // An exact retry stays idempotent and returns the recorded session.
+      expect(yield* session.create({ id, location })).toEqual(created)
       expect((yield* session.list()).data).toHaveLength(1)
     }),
   )

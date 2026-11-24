@@ -29,6 +29,7 @@ import { SessionRunner } from "./session/runner/index.js"
 import { SessionStore } from "./session/store.js"
 import { SessionExecution } from "./session/execution.js"
 import {
+  AlreadyExistsError,
   AttachmentError,
   BusyError,
   CommandConflictError,
@@ -116,6 +117,7 @@ type ForkInput = {
 }
 
 export {
+  AlreadyExistsError,
   AttachmentError,
   BusyError,
   CommandConflictError,
@@ -146,7 +148,9 @@ export interface Interface {
     },
     InvalidListCursorError
   >
-  readonly create: (input: CreateInput) => Effect.Effect<SessionSchema.Info, NotFoundError | ModelGovernance.DeniedError>
+  readonly create: (
+    input: CreateInput,
+  ) => Effect.Effect<SessionSchema.Info, AlreadyExistsError | NotFoundError | ModelGovernance.DeniedError>
   readonly fork: (
     input: ForkInput,
   ) => Effect.Effect<
@@ -425,7 +429,33 @@ const layer = Layer.effect(
       create: Effect.fn("Session.create")(function* (input) {
         const sessionID = input.id ?? SessionSchema.ID.create()
         const recorded = yield* store.get(sessionID)
-        if (recorded) return recorded
+        if (recorded) {
+          // A reused id is an idempotent retry only when every identity-defining
+          // field the caller supplied matches the recorded session; a differing
+          // field is a collision, not a retry (#2796). Fields the caller omitted
+          // are not compared: creation may have inherited or resolved them
+          // (parent metadata/permissions, governance-checked child model).
+          const location = input.location && LocationServiceMap.canonical(input.location)
+          const differs =
+            input.parentID !== recorded.parentID ||
+            (location !== undefined &&
+              (location.directory !== recorded.location.directory ||
+                location.workspaceID !== recorded.location.workspaceID)) ||
+            (input.title !== undefined && input.title !== recorded.title) ||
+            (input.agent !== undefined && input.agent !== recorded.agent) ||
+            (input.model !== undefined &&
+              (input.model.id !== recorded.model?.id ||
+                input.model.providerID !== recorded.model?.providerID ||
+                input.model.variant !== recorded.model?.variant)) ||
+            (input.metadata !== undefined && JSON.stringify(input.metadata) !== JSON.stringify(recorded.metadata)) ||
+            (input.permissions !== undefined &&
+              JSON.stringify(input.permissions) !== JSON.stringify(recorded.permissions)) ||
+            (input.subagentPolicy !== undefined &&
+              JSON.stringify(input.subagentPolicy) !== JSON.stringify(recorded.subagentPolicy)) ||
+            (input.detached !== undefined && input.detached !== recorded.detached)
+          if (differs) return yield* new AlreadyExistsError({ sessionID })
+          return recorded
+        }
         const parent = input.parentID ? yield* store.get(input.parentID) : undefined
         if (input.parentID && parent === undefined) return yield* new NotFoundError({ sessionID: input.parentID })
         const location = parent?.location ?? (input.location && LocationServiceMap.canonical(input.location))

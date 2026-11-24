@@ -11,6 +11,14 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Session.
   sessionID: SessionSchema.ID,
 }) {}
 
+export class AlreadyExistsError extends Schema.TaggedError<AlreadyExistsError>()("Session.AlreadyExistsError", {
+  sessionID: SessionSchema.ID,
+}) {
+  override get message() {
+    return `Session already exists with different create fields: ${this.sessionID}`
+  }
+}
+
 export class InvalidListCursorError extends Schema.TaggedError<InvalidListCursorError>()(
   "Session.InvalidListCursorError",
   {},
