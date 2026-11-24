@@ -56,6 +56,29 @@ export default {
       if (request.method === "HEAD") headers.delete("Range")
       const cached = await caches.default.match(new Request(cacheKey, { headers }))
       if (cached && !(request.method === "GET" && request.headers.has("Range") && cached.status === 200)) {
+        const ifNoneMatch = request.headers.get("If-None-Match")
+        const cachedEtag = cached.headers.get("ETag")
+        if (ifNoneMatch !== null && cachedEtag !== null && matches(ifNoneMatch, cachedEtag, true)) {
+          await cached.body?.cancel()
+          const notModified = new Headers(cached.headers)
+          notModified.delete("Content-Length")
+          notModified.delete("Content-Range")
+          return new Response(null, { status: 304, headers: notModified })
+        }
+        const ifModifiedSince = request.headers.get("If-Modified-Since")
+        const cachedLastModified = cached.headers.get("Last-Modified")
+        if (
+          ifNoneMatch === null &&
+          ifModifiedSince !== null &&
+          cachedLastModified !== null &&
+          Date.parse(cachedLastModified) <= Date.parse(ifModifiedSince)
+        ) {
+          await cached.body?.cancel()
+          const notModified = new Headers(cached.headers)
+          notModified.delete("Content-Length")
+          notModified.delete("Content-Range")
+          return new Response(null, { status: 304, headers: notModified })
+        }
         if (request.method !== "HEAD") return cached
         await cached.body?.cancel()
         return new Response(null, cached)
