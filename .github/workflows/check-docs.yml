@@ -3,6 +3,13 @@ name: check-docs
 # Builds the V2 docs on their own (services/site/src/docs/script/build.ts): compiles every MDX page,
 # prerenders it, builds search, checks every link and that pages load nothing from outside /docs. The
 # site's deploy runs the same step, so a broken page fails here instead of blocking the deploy.
+#
+# Trigger decision (#2677, 2026-11-24): dispatch-only, deliberately. Upstream triggers this on
+# pull_request (paths-gated); the 2026-11-22 sync dropped that trigger and it is NOT restored -
+# this fork forbids PR triggers (PR #1401, gate #1406) and runs validation by dispatch or
+# schedule only (PR #1635; .github/ci-policy.md). Upstream has no push trigger to lose. The full
+# docs build runs on workflow_dispatch; the job's draft guard and PR-number concurrency key are
+# inert leftovers of the upstream PR shape, kept so the next sync diff stays small.
 on:
   workflow_dispatch:
 

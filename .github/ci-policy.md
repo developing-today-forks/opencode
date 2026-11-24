@@ -17,11 +17,13 @@ every `push:` trigger was removed from the validation workflows
 (Drew's dispatch/schedule-only ruling), and this file was reconciled
 to that reality by #1927. The tiers therefore run **by manual
 dispatch and on schedule only** — a merge to `main` starts no
-validation run by itself. The single remaining `push:` trigger in
-the repo is `nix-hashes.yml` (paths-gated to `bun.lock`,
-`package.json`, `flake.lock`, and the nix node_modules inputs): it
-is a hash-maintenance automation, not a validation tier, and it is
-the exception that proves the rule below. There is no PR tier and
+validation run by itself. The remaining `push:` triggers in the
+repo are automations, not validation tiers: `nix-hashes.yml`
+(paths-gated to `bun.lock`, `package.json`, `flake.lock`, and the
+nix node_modules inputs), a hash-maintenance automation, and
+`release-process-daemon.yml` (gated to `process-daemon-v*` tags),
+whose release job can only run on those tag pushes (#2677). They
+are the exceptions that prove the rule below. There is no PR tier and
 no push tier, whatever older text said (#1533).
 
 ## Change-class policy (design §3.3)

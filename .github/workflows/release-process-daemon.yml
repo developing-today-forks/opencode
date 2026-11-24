@@ -3,8 +3,19 @@ name: Process daemon release
 # Publishes the opencode-pty binaries and the @opencode/pty npm packages from packages/process-daemon.
 # Only process-daemon-v<version> tags publish; pull requests that touch the release pipeline build and pack
 # without publishing.
+#
+# Trigger decision (#2677, 2026-11-24): the process-daemon-v* tag push trigger is restored -
+# the release job below is gated to push events on those tags, so under dispatch-only it could
+# never run and this workflow could never publish. A tag-gated release trigger is release
+# automation, not a validation trigger: it sits in the same exception class as nix-hashes.yml's
+# push trigger (.github/ci-policy.md). Upstream's paths-gated pull_request trigger is NOT
+# restored - this fork forbids PR triggers (PR #1401, gate #1406); the checks job still builds
+# and packs on workflow_dispatch.
 
 on:
+  push:
+    tags:
+      - "process-daemon-v*"
   workflow_dispatch:
 
 permissions:
