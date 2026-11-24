@@ -79,7 +79,7 @@
 import { Effect } from "effect"
 import { Headers } from "effect/http"
 import { deadlineSignal, readBoundedResponseText } from "@opencode/util/http-body"
-import { AIError, AuthenticationError, RateLimitError } from "../schema/index.js"
+import { AIError, AuthenticationError, ProviderInternalError, RateLimitError } from "../schema/index.js"
 import { Auth } from "../route/auth.js"
 import { ClaudeCodeMessages } from "../protocols/claude-code-messages.js"
 
@@ -447,6 +447,23 @@ export class ClaudeCodeRefreshRateLimited extends Error {
 export class ClaudeCodeRefreshRejected extends ClaudeCodeRefreshError {}
 
 /**
+ * The token endpoint answered a renewal with a server error (HTTP 5xx,
+ * #2823): a transient outage, not a grant refusal. Renewal retries
+ * through the standing loop exactly like a rate-limit wait, and a
+ * request that surfaces it fails as a provider-side failure, never as
+ * an authentication failure — the login is not dead, its renewal is
+ * merely waiting for the endpoint to recover.
+ */
+export class ClaudeCodeRefreshUnavailable extends ClaudeCodeRefreshError {
+  constructor(
+    readonly status: number,
+    readonly retryAfterMs: number | undefined,
+  ) {
+    super(`Claude Code OAuth token endpoint is unavailable (HTTP ${status}); renewal is retrying in the background.`)
+  }
+}
+
+/**
  * The endpoint answered 200 but the body was unusable — unparseable,
  * missing a token, an invalid expiry: the exchange's own verdict that
  * nothing usable was issued, the same stop class as a rejected grant.
@@ -512,6 +529,11 @@ const exchangeRefreshToken = async (
   })
   if (response.status === 429)
     throw new ClaudeCodeRefreshRateLimited(retryAfterHeaderMs(response, sources.now ? sources.now() : Date.now()))
+  if (response.status >= 500)
+    throw new ClaudeCodeRefreshUnavailable(
+      response.status,
+      retryAfterHeaderMs(response, sources.now ? sources.now() : Date.now()),
+    )
   if (!response.ok)
     throw new ClaudeCodeRefreshRejected(
       `Claude Code OAuth refresh was rejected with HTTP ${response.status}. ` +
@@ -1149,6 +1171,15 @@ const mapRenewalFailure = (cause: unknown) => {
       reason: new RateLimitError({
         message:
           "Claude Code OAuth renewal is waiting out the token endpoint's rate limit (HTTP 429); " +
+          "the door reopens when the renewal lands.",
+        ...(cause.retryAfterMs !== undefined ? { retryAfterMs: cause.retryAfterMs } : {}),
+      }),
+    })
+  if (cause instanceof ClaudeCodeRefreshUnavailable)
+    return new AIError({
+      reason: new ProviderInternalError({
+        message:
+          `Claude Code OAuth renewal is waiting out the token endpoint's server error (HTTP ${cause.status}); ` +
           "the door reopens when the renewal lands.",
         ...(cause.retryAfterMs !== undefined ? { retryAfterMs: cause.retryAfterMs } : {}),
       }),
