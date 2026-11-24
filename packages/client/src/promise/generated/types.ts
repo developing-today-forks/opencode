@@ -373,6 +373,7 @@ export type RouteAttemptErrorBreakdown = {
   status: number | null
   count: number
   lastTime: number
+  lastMessage: string | null
 }
 
 export type RouteAttemptCoverage = {

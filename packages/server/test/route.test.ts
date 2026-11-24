@@ -195,6 +195,7 @@ it.live("serves the route-attempt read API over HTTP: empty ledger, aggregate sh
     expect(yield* Effect.promise(() => stats.json())).toEqual({
       data: {
         targets: [],
+        hedges: [],
         errors: [],
         coverage: { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
       },
@@ -265,7 +266,8 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         error_tag: "QuotaExceeded",
         error_code: "rate_limit",
         error_status: 429,
-        error_message: "provider detail that must not be served by aggregates",
+        error_message: "upstream quota exceeded",
+        error_body: "raw provider body that must never be served",
         hedged: true,
         assistant_message_id: "msg_hedge",
       },
@@ -388,7 +390,7 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         error_tag: "QuotaExceeded",
         error_code: "rate_limit",
         error_status: 429,
-        error_message: "second private provider detail",
+        error_message: `second upstream message ${"x".repeat(320)}`,
       })
       .run()
     const expectedTargets = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
@@ -412,6 +414,7 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
           status: number | null
           count: number
           lastTime: number
+          lastMessage: string | null
         }[]
         coverage: unknown
       }
@@ -436,9 +439,9 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
       status: 429,
       count: 2,
       lastTime: 4_500,
+      lastMessage: `second upstream message ${"x".repeat(320)}`.slice(0, 300),
     })
-    expect(stats.text).not.toContain("provider detail that must not be served by aggregates")
-    expect(stats.text).not.toContain("second private provider detail")
+    expect(stats.text).not.toContain("raw provider body that must never be served")
     expect(statsBody.data.coverage).toEqual(
       expectedCoverage ?? { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
     )

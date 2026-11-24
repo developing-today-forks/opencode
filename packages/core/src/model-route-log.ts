@@ -1013,8 +1013,8 @@ export const targetTotals = (db: Database.Interface["db"], since: number, until?
     .orderBy(desc(count()))
     .all()
 
-/** Error groups for the public route stats API. Provider error messages are intentionally
- * omitted: unlike their stable tag/code/status, they can contain raw upstream details. */
+/** Error groups for the public route stats API. The truncated last message matches the existing
+ * read schema; raw provider response bodies and credential ids are never selected. */
 export const routeStatsErrors = (db: Database.Interface["db"], since: number, until?: number) =>
   db
     .select({
@@ -1025,6 +1025,9 @@ export const routeStatsErrors = (db: Database.Interface["db"], since: number, un
       status: RouteAttemptTable.error_status,
       count: count(),
       lastTime: sql<number>`max(${RouteAttemptTable.time_started})`,
+      lastMessage: sql<
+        string | null
+      >`substr((select e.error_message from route_attempt e where e.provider_id = ${RouteAttemptTable.provider_id} and e.model_id = ${RouteAttemptTable.model_id} and e.error_tag is ${RouteAttemptTable.error_tag} and e.error_code is ${RouteAttemptTable.error_code} and e.error_status is ${RouteAttemptTable.error_status} order by e.time_started desc limit 1), 1, 300)`,
     })
     .from(RouteAttemptTable)
     .where(

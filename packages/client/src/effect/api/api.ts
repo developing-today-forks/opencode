@@ -2300,6 +2300,7 @@ export type RouteAttemptStatsOutput = {
     readonly status: number | null
     readonly count: number
     readonly lastTime: number
+    readonly lastMessage: string | null
   }>
   readonly coverage: {
     readonly attempts: number

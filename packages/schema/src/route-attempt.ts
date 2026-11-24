@@ -63,8 +63,8 @@ export const TargetTotal = Schema.Struct({
 }).annotate({ identifier: "RouteAttempt.TargetTotal" })
 export type TargetTotal = typeof TargetTotal.Type
 
-/** Failures grouped by exact tag, code and HTTP status. Provider messages are excluded because
- * they can contain raw upstream details. */
+/** Failures grouped by exact tag, code and HTTP status, with a truncated latest error message.
+ * The separate raw provider response body is never served. */
 export const ErrorBreakdown = Schema.Struct({
   providerID: Schema.String,
   modelID: Schema.String,
@@ -73,6 +73,7 @@ export const ErrorBreakdown = Schema.Struct({
   status: Schema.NullOr(Schema.Number),
   count: Schema.Number,
   lastTime: Schema.Number,
+  lastMessage: Schema.NullOr(Schema.String),
 }).annotate({ identifier: "RouteAttempt.ErrorBreakdown" })
 export type ErrorBreakdown = typeof ErrorBreakdown.Type
 
