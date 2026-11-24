@@ -9402,6 +9402,243 @@
         "summary": "Remove credential"
       }
     },
+    "/api/experimental/credential/provider/{providerID}/quota": {
+      "get": {
+        "tags": ["credential"],
+        "operationId": "experimental.credential.providerQuota",
+        "parameters": [
+          {
+            "name": "providerID",
+            "in": "path",
+            "schema": {
+              "type": "string"
+            },
+            "required": true
+          }
+        ],
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "providerId": {
+                          "type": "string"
+                        },
+                        "providerName": {
+                          "type": "string"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "configured": {
+                          "type": "boolean"
+                        },
+                        "usage": {
+                          "anyOf": [
+                            {
+                              "type": "object",
+                              "properties": {
+                                "windows": {
+                                  "type": "object",
+                                  "additionalProperties": {
+                                    "type": "object",
+                                    "properties": {
+                                      "usedPercent": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": ["Infinity", "-Infinity", "NaN"]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "remainingPercent": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": ["Infinity", "-Infinity", "NaN"]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "windowSeconds": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": ["Infinity", "-Infinity", "NaN"]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "resetAfterSeconds": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": ["Infinity", "-Infinity", "NaN"]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "resetAt": {
+                                        "anyOf": [
+                                          {
+                                            "type": "number"
+                                          },
+                                          {
+                                            "type": "string",
+                                            "enum": ["Infinity", "-Infinity", "NaN"]
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "resetAtFormatted": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "resetAfterFormatted": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      },
+                                      "valueLabel": {
+                                        "anyOf": [
+                                          {
+                                            "type": "string"
+                                          },
+                                          {
+                                            "type": "null"
+                                          }
+                                        ]
+                                      }
+                                    },
+                                    "required": [
+                                      "usedPercent",
+                                      "remainingPercent",
+                                      "windowSeconds",
+                                      "resetAfterSeconds",
+                                      "resetAt",
+                                      "resetAtFormatted",
+                                      "resetAfterFormatted"
+                                    ],
+                                    "additionalProperties": false
+                                  }
+                                }
+                              },
+                              "required": ["windows"],
+                              "additionalProperties": false
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        },
+                        "fetchedAt": {
+                          "anyOf": [
+                            {
+                              "type": "number"
+                            },
+                            {
+                              "type": "string",
+                              "enum": ["Infinity", "-Infinity", "NaN"]
+                            }
+                          ]
+                        },
+                        "error": {
+                          "anyOf": [
+                            {
+                              "type": "string"
+                            },
+                            {
+                              "type": "null"
+                            }
+                          ]
+                        }
+                      },
+                      "required": ["providerId", "providerName", "ok", "configured", "usage", "fetchedAt"],
+                      "additionalProperties": false
+                    }
+                  },
+                  "required": ["data"],
+                  "additionalProperties": false
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "InvalidRequestError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InvalidRequestErrorEncoded"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "UnauthorizedError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnauthorizedErrorEncoded"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "ProviderNotFoundError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProviderNotFoundErrorEncoded"
+                }
+              }
+            }
+          }
+        },
+        "description": "Experimental: may change without compatibility guarantees. Answer a provider's quota with the session-cookie credential the server holds for it. The cookie is used by the server and never returned; the response carries only the quota result.",
+        "summary": "Get provider quota from its session cookie"
+      }
+    },
     "/api/credential/{credentialID}/activate": {
       "post": {
         "tags": ["credential"],
@@ -20578,6 +20815,9 @@
               "$ref": "#/components/schemas/Config.ProviderEncoded"
             }
           },
+          "model_designations": {
+            "$ref": "#/components/schemas/Config.ModelDesignations"
+          },
           "aliases": {
             "type": "object",
             "properties": {
@@ -21621,6 +21861,13 @@
           }
         ]
       },
+      "Config.ModelDesignations": {
+        "type": "object",
+        "additionalProperties": {
+          "$ref": "#/components/schemas/Config.ModelRoute.ModelDesignationEncoded"
+        },
+        "description": "Purpose/capability policy keyed by bare model id: which purposes a model may serve, what it can do, and where the classification was verified. External readers (such as the route proxy in developing-today/code, code#13675) seat a designated model only in pools whose purpose is in its purposes list; a model with no entry is unrestricted."
+      },
       "Config.ModelEncoded": {
         "type": "object",
         "properties": {
@@ -21832,6 +22079,31 @@
         "required": ["when"],
         "additionalProperties": false
       },
+      "Config.ModelRoute.ModelDesignationEncoded": {
+        "type": "object",
+        "properties": {
+          "purposes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Purposes this model may serve, e.g. chat, decision, embed, rerank, recommend, transcribe, speak, guard."
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Capabilities this model has, e.g. visual, pdf, audio-in, audio-bidir, tts, stt."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the classification was verified, so a stale entry is traceable."
+          }
+        },
+        "required": ["purposes"],
+        "additionalProperties": false
+      },
       "Config.ModelRoute.ProviderRouteEncoded": {
         "type": "object",
         "properties": {
@@ -21923,6 +22195,10 @@
           "class": {
             "type": "string",
             "description": "The route's cost/capability class, e.g. \"frontier\" or \"frontier-acp\". When a session's whole route is walled, failover may substitute another route of the SAME class, ordered by the doors' measured record; it never substitutes across classes, so a session never lands on a more expensive or differently-capable route by failing over. A route with no class neither substitutes nor is substituted into. ACP routes are their own class: name them separately (e.g. \"frontier-acp\") so ACP traffic only ever substitutes within ACP. Class names match in any case."
+          },
+          "purpose": {
+            "type": "string",
+            "description": "The pool's declared purpose, e.g. \"chat\", \"decision\", \"embed\", \"transcribe\", \"speak\" or \"guard\". Absent means the pool is unrestricted here; external readers (such as the route proxy in developing-today/code, code#13675) use it to seat only models designated for that purpose. Kept as a plain string so new purposes never fail decode."
           },
           "targets": {
             "type": "array",

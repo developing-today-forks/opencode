@@ -1398,6 +1398,27 @@ describe("model route pools", () => {
     // The pool loads as written.
     expect(routesOf(result.encoded)?.outer.targets).toHaveLength(3)
   })
+
+  test("a pool purpose survives normalization (opencode#2782)", () => {
+    const result = normalized({
+      experimental: {
+        model_routes: {
+          coding: { purpose: "chat", targets: ["openai/gpt-6-luna"] },
+        },
+      },
+    })
+    expect(result.diagnostics).toEqual([])
+    expect(routesOf(result.encoded)?.coding?.purpose).toBe("chat")
+  })
+
+  test("top-level model_designations survive normalization (opencode#2782)", () => {
+    const designations = {
+      "gpt-6-luna": { purposes: ["chat", "decision"], capabilities: ["visual"], source: "fixture" },
+    }
+    const result = normalized({ model_designations: designations })
+    expect(result.diagnostics).toEqual([])
+    expect(decoded({ model_designations: designations }).model_designations).toEqual(designations)
+  })
 })
 describe("model route cache formats", () => {
   const routesOf = (encoded: Readonly<Record<string, unknown>>) =>
@@ -1533,6 +1554,9 @@ describe("per-field normalization survival guard (#1285)", () => {
     warming: { interval: "4 minutes", duration: "30 minutes" },
     messaging: { presets: { greeting: "hello" } },
     providers: { custom: { name: "Custom Provider" } },
+    model_designations: {
+      "gpt-6-luna": { purposes: ["chat"], capabilities: ["visual"], source: "guard-fixture" },
+    },
     aliases: { providers: { ds: "deepseek" } },
     experimental: { portable_shell_scanner: true },
     timezone: "America/Chicago",
