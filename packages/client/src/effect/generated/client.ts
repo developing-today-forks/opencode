@@ -202,6 +202,8 @@ import type {
   CredentialActivateOutput,
   CredentialRemoveInput,
   CredentialRemoveOutput,
+  ExperimentalCredentialProviderQuotaInput,
+  ExperimentalCredentialProviderQuotaOutput,
   RouteOverrideListOutput,
   RouteOverrideAddInput,
   RouteOverrideAddOutput,
@@ -1474,6 +1476,19 @@ const adaptGroupCredential = (raw: RawClient["server.credential"]) => ({
   remove: EndpointCredentialRemove(raw),
 })
 
+const EndpointExperimentalCredentialProviderQuota =
+  (raw: RawClient["server.credential"]) => (input: ExperimentalCredentialProviderQuotaInput) =>
+    preserveEffect<ExperimentalCredentialProviderQuotaOutput>()(
+      raw["credential.providerQuota"]({ params: { providerID: input["providerID"] } }).pipe(
+        Effect.mapError(mapClientError),
+        Effect.map((value) => value.data),
+      ),
+    )
+
+const adaptGroupExperimentalCredential = (raw: RawClient["server.credential"]) => ({
+  providerQuota: EndpointExperimentalCredentialProviderQuota(raw),
+})
+
 const EndpointRouteOverrideList = (raw: RawClient["server.route"]) => () =>
   preserveEffect<RouteOverrideListOutput>()(
     raw["route.override.list"]({}).pipe(
@@ -2594,6 +2609,7 @@ const adaptClient = (raw: RawClient) => {
       voice: adaptGroupExperimentalVoice(raw["server.voice"]),
       integration: adaptGroupExperimentalIntegration(raw["server.integration"]),
       mcp: adaptGroupExperimentalMcp(raw["server.mcp"]),
+      credential: adaptGroupExperimentalCredential(raw["server.credential"]),
       file: adaptGroupExperimentalFile(raw["server.fs"]),
       migration: adaptGroupExperimentalMigration(raw["server.migration"]),
       usage: adaptGroupExperimentalUsage(raw["server.usage"]),

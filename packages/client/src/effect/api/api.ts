@@ -2095,6 +2095,37 @@ export interface CredentialApi<E = never> {
   readonly remove: CredentialRemoveOperation<E>
 }
 
+export type ExperimentalCredentialProviderQuotaInput = { readonly providerID: string }
+export type ExperimentalCredentialProviderQuotaOutput = {
+  readonly providerId: string
+  readonly providerName: string
+  readonly ok: boolean
+  readonly configured: boolean
+  readonly usage: {
+    readonly windows: {
+      readonly [x: string]: {
+        readonly usedPercent: number | null
+        readonly remainingPercent: number | null
+        readonly windowSeconds: number | null
+        readonly resetAfterSeconds: number | null
+        readonly resetAt: number | null
+        readonly resetAtFormatted: string | null
+        readonly resetAfterFormatted: string | null
+        readonly valueLabel?: string | undefined
+      }
+    }
+  } | null
+  readonly fetchedAt: number
+  readonly error?: string | undefined
+}
+export type ExperimentalCredentialProviderQuotaOperation<E = never> = (
+  input: ExperimentalCredentialProviderQuotaInput,
+) => Effect.Effect<ExperimentalCredentialProviderQuotaOutput, E>
+
+export interface ExperimentalCredentialApi<E = never> {
+  readonly providerQuota: ExperimentalCredentialProviderQuotaOperation<E>
+}
+
 export type RouteOverrideListOutput = ReadonlyArray<{
   readonly id: string
   readonly action: "avoid" | "prefer" | "allow-over-budget"
@@ -3772,6 +3803,7 @@ export interface AppApi<E = never> {
     readonly voice: ExperimentalVoiceApi<E>
     readonly integration: ExperimentalIntegrationApi<E>
     readonly mcp: ExperimentalMcpApi<E>
+    readonly credential: ExperimentalCredentialApi<E>
     readonly file: ExperimentalFileApi<E>
     readonly migration: ExperimentalMigrationApi<E>
     readonly usage: ExperimentalUsageApi<E>
