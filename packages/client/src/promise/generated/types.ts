@@ -5424,6 +5424,33 @@ export type CredentialRemoveInput = { readonly credentialID: string }
 
 export type CredentialRemoveOutput = void
 
+export type ExperimentalCredentialProviderQuotaInput = { readonly providerID: string }
+
+export type ExperimentalCredentialProviderQuotaOutput = {
+  data: {
+    providerId: string
+    providerName: string
+    ok: boolean
+    configured: boolean
+    usage: {
+      windows: {
+        [x: string]: {
+          usedPercent: number | null
+          remainingPercent: number | null
+          windowSeconds: number | null
+          resetAfterSeconds: number | null
+          resetAt: number | null
+          resetAtFormatted: string | null
+          resetAfterFormatted: string | null
+          valueLabel?: string | undefined
+        }
+      }
+    } | null
+    fetchedAt: number
+    error?: string | undefined
+  }
+}["data"]
+
 export type RouteOverrideListOutput = { data: Array<RouteOverrideInfo> }["data"]
 
 export type RouteOverrideAddInput = {

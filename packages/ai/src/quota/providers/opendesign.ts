@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
-import type { QuotaContext, QuotaProvider, QuotaWindow, JsonValue } from "../types.js"
+import type { QuotaContext, QuotaProvider, QuotaResult, QuotaWindow, JsonValue } from "../types.js"
 import {
   asNonEmptyString,
   asObject,
@@ -38,7 +38,7 @@ const SESSION_COOKIE_NAME = "better-auth.session_token"
 export const IMPORT_REQUIRED_ERROR = "Import the Open Design session cookie in Settings to read Open Design quota"
 export const SESSION_EXPIRED_ERROR = "Open Design session expired; import a fresh session cookie in Settings"
 
-interface OpenDesignCredential {
+export interface OpenDesignCredential {
   cookie: string
   workspaceId: string
 }
@@ -51,9 +51,7 @@ export const normalizeOpenDesignCredential = (value: JsonValue): OpenDesignCrede
   const cookieInput = clean(record?.cookie)
   const workspaceId = clean(record?.workspaceId)
   if (!cookieInput || !workspaceId) return null
-  const cookie = cookieInput.includes("better-auth")
-    ? cookieInput
-    : `${SESSION_COOKIE_NAME}=${cookieInput}`
+  const cookie = cookieInput.includes("better-auth") ? cookieInput : `${SESSION_COOKIE_NAME}=${cookieInput}`
   return { cookie, workspaceId }
 }
 
@@ -62,7 +60,8 @@ export const readManagedOpenDesignCredential = (ctx: QuotaContext): OpenDesignCr
   const env = envOf(ctx)
   const root =
     ctx.openchamberDataDir ??
-    (asNonEmptyString(env.OPENCHAMBER_DATA_DIR) ?? join(ctx.homeDir ?? homedir(), ".config", "openchamber"))
+    asNonEmptyString(env.OPENCHAMBER_DATA_DIR) ??
+    join(ctx.homeDir ?? homedir(), ".config", "openchamber")
   try {
     return normalizeOpenDesignCredential(parseJsonValue(readFileSync(join(root, "quota", "opendesign.json"), "utf8")))
   } catch {
@@ -153,6 +152,28 @@ export const fetchOpenDesignQuota = async (
   return { windows }
 }
 
+/**
+ * The quota answer for one credential. Failures become the result's error text, which names the
+ * failure and never the credential it was read with.
+ */
+export const fetchOpenDesignSessionQuota = async (
+  ctx: QuotaContext,
+  credential: OpenDesignCredential,
+): Promise<QuotaResult> => {
+  try {
+    const usage = await fetchOpenDesignQuota(ctx, credential)
+    return buildResult({ providerId, providerName, ok: true, configured: true, usage })
+  } catch (error) {
+    return buildResult({
+      providerId,
+      providerName,
+      ok: false,
+      configured: true,
+      error: error instanceof Error ? error.message : "Request failed",
+    })
+  }
+}
+
 export const provider: QuotaProvider = {
   providerId,
   providerName,
@@ -169,17 +190,6 @@ export const provider: QuotaProvider = {
         error: IMPORT_REQUIRED_ERROR,
       })
     }
-    try {
-      const usage = await fetchOpenDesignQuota(ctx, credential)
-      return buildResult({ providerId, providerName, ok: true, configured: true, usage })
-    } catch (error) {
-      return buildResult({
-        providerId,
-        providerName,
-        ok: false,
-        configured: true,
-        error: error instanceof Error ? error.message : "Request failed",
-      })
-    }
+    return fetchOpenDesignSessionQuota(ctx, credential)
   },
 }

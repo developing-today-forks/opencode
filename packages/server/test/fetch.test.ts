@@ -374,6 +374,34 @@ it.live("never returns a raw session cookie from a credential create response", 
   }),
 )
 
+it.live("answers provider quota 404 without a session-cookie credential and never discloses one", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make(options)
+    const created = yield* Effect.promise(() =>
+      handler(
+        new Request("http://opencode.local/api/credential", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            integrationID: "opendesign",
+            label: "provider session",
+            value: { type: "session-cookie", cookie: "session-cookie-secret", workspaceID: "wrk_test" },
+          }),
+        }),
+      ),
+    )
+    expect(created.status).toBe(200)
+    const unbound = yield* Effect.promise(() =>
+      handler(new Request("http://opencode.local/api/experimental/credential/provider/openai/quota")),
+    )
+    expect(unbound.status).toBe(404)
+    const unboundBody = yield* Effect.promise(() => unbound.text())
+    expect(unboundBody).not.toContain("session-cookie-secret")
+    const listed = yield* Effect.promise(() => handler(new Request("http://opencode.local/api/credential")))
+    expect(yield* Effect.promise(() => listed.text())).not.toContain("session-cookie-secret")
+  }),
+)
+
 it.live("serves unauthenticated and answers CORS preflight when no password is configured", () =>
   Effect.gen(function* () {
     const handler = yield* ServerFetch.make(options)

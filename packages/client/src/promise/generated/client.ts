@@ -196,6 +196,8 @@ import type {
   CredentialActivateOutput,
   CredentialRemoveInput,
   CredentialRemoveOutput,
+  ExperimentalCredentialProviderQuotaInput,
+  ExperimentalCredentialProviderQuotaOutput,
   RouteOverrideListOutput,
   RouteOverrideAddInput,
   RouteOverrideAddOutput,
@@ -1514,6 +1516,19 @@ export function make(options: ClientOptions) {
               requestOptions,
             ),
         },
+      },
+      credential: {
+        providerQuota: (input: ExperimentalCredentialProviderQuotaInput, requestOptions?: RequestOptions) =>
+          request<{ readonly data: ExperimentalCredentialProviderQuotaOutput }>(
+            {
+              method: "GET",
+              path: `/api/experimental/credential/provider/${encodeURIComponent(input.providerID)}/quota`,
+              successStatus: 200,
+              declaredStatuses: [400, 401, 404],
+              empty: false,
+            },
+            requestOptions,
+          ).then((value) => value.data),
       },
       file: {
         write: (input: ExperimentalFileWriteInput, requestOptions?: RequestOptions) =>

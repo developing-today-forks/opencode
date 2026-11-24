@@ -29,7 +29,12 @@ export {
   TURSO_SECRET_NAME,
 } from "./providers/turso.js"
 export { parseCommandCodeCredits, MONTHLY_INCLUDED_CREDITS } from "./providers/command-code.js"
-export { parseCodingPlanWindows, normalizeOpenDesignCredential } from "./providers/opendesign.js"
+export {
+  parseCodingPlanWindows,
+  normalizeOpenDesignCredential,
+  fetchOpenDesignSessionQuota,
+  type OpenDesignCredential,
+} from "./providers/opendesign.js"
 export { parseGroqResetSeconds, NO_QUOTA_SURFACE } from "./providers/groq.js"
 export { KEY_EXPIRES_AT as EXAONE_KEY_EXPIRES_AT } from "./providers/exaone.js"
 export { toClaudeUsage, findClaudeCredential } from "./providers/claude.js"

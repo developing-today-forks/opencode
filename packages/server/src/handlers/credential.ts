@@ -3,8 +3,9 @@ import { FileSystem } from "@opencode/core/filesystem"
 import { Integration } from "@opencode/core/integration"
 import { Location } from "@opencode/core/location"
 import { LocationServiceMap } from "@opencode/core/location-services"
+import { ProviderQuota } from "@opencode/core/provider-quota"
 import { AbsolutePath } from "@opencode/core/schema"
-import { ConflictError, CredentialNotFoundError } from "@opencode/protocol/errors"
+import { ConflictError, CredentialNotFoundError, ProviderNotFoundError } from "@opencode/protocol/errors"
 import { Global } from "@opencode/util/global"
 import { Effect } from "effect"
 import { HttpApiBuilder, HttpApiSchema } from "effect/http-api"
@@ -43,6 +44,18 @@ export const CredentialHandler = HttpApiBuilder.group(Api, "server.credential", 
           const created = yield* credential.create(ctx.payload)
           const entry = entries(yield* credential.list(created.integrationID)).find((item) => item.id === created.id)
           return { data: entry ?? { ...created, active: false, value: Credential.redactedValue(created.value) } }
+        }),
+      )
+      .handle(
+        "credential.providerQuota",
+        Effect.fn(function* (ctx) {
+          const quota = yield* ProviderQuota.sessionCookie(ctx.params.providerID)
+          if (!quota)
+            return yield* new ProviderNotFoundError({
+              providerID: ctx.params.providerID,
+              message: `No session-cookie quota is bound to provider: ${ctx.params.providerID}`,
+            })
+          return { data: quota }
         }),
       )
       .handle(
