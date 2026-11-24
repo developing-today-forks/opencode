@@ -1030,7 +1030,7 @@ export const routeStatsErrors = (db: Database.Interface["db"], since: number, un
       lastTime: sql<number>`max(${attempts.time_started})`,
       lastMessage: sql<
         string | null
-      >`substr((select ${latestError.error_message} from ${latestError} where ${latestError.provider_id} = ${attempts.provider_id} and ${latestError.model_id} = ${attempts.model_id} and ${latestError.error_tag} is ${attempts.error_tag} and ${latestError.error_code} is ${attempts.error_code} and ${latestError.error_status} is ${attempts.error_status} order by ${latestError.time_started} desc limit 1), 1, 300)`,
+      >`substr((select ${latestError.error_message} from route_attempt as stats_error where ${latestError.provider_id} = ${attempts.provider_id} and ${latestError.model_id} = ${attempts.model_id} and ${latestError.error_tag} is ${attempts.error_tag} and ${latestError.error_code} is ${attempts.error_code} and ${latestError.error_status} is ${attempts.error_status} order by ${latestError.time_started} desc limit 1), 1, 300)`,
     })
     .from(attempts)
     .where(
