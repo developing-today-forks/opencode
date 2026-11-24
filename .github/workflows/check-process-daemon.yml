@@ -1,5 +1,10 @@
 name: Process daemon
 
+# Trigger decision (#2677, 2026-11-24): dispatch-only, deliberately. Upstream triggers this on
+# pull_request and on push to dev (both paths-gated); the 2026-11-22 sync dropped both and
+# neither is restored - this fork forbids PR triggers (PR #1401, gate #1406) and removed push
+# triggers from validation workflows (PR #1635; .github/ci-policy.md), and this fork has no dev
+# branch. The full Miri + test matrix runs on workflow_dispatch.
 on:
   workflow_dispatch:
 
