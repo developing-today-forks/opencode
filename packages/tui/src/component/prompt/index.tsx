@@ -55,6 +55,7 @@ import {
   VoiceInputMachine,
   detectRecorder,
   formatVoiceClock,
+  createVoiceRecordingFile,
   startRecorder,
   submitVoiceTranscription,
   submitVoiceTranscriptionStream,
@@ -66,7 +67,6 @@ import {
 } from "./voice-input"
 import { spawn, spawnSync } from "child_process"
 import { readFile, unlink } from "fs/promises"
-import { tmpdir } from "os"
 import { locationKey, useData } from "../../context/data"
 import { useLocation } from "../../context/location"
 import { useArgs } from "../../context/args"
@@ -329,7 +329,7 @@ export function Prompt(props: PromptProps) {
       }),
     )
   }
-  function voiceToggleRecord() {
+  async function voiceToggleRecord() {
     if (!voiceMachine) return
     if (voice().state === "recording") {
       void voiceFinishRecording()
@@ -345,7 +345,14 @@ export function Prompt(props: PromptProps) {
       })
       return
     }
-    voiceRecordingPath = path.join(tmpdir(), `opencode-voice-${Date.now()}.wav`)
+    try {
+      voiceRecordingPath = await createVoiceRecordingFile()
+    } catch {
+      setVoice(
+        voiceMachine.fail("Could not reserve a private file for the recording. Check the temp directory and try again."),
+      )
+      return
+    }
     try {
       voiceRecorder = startRecorder(candidate, voiceRecordingPath, (command, args) => {
         const child = spawn(command, [...args], { stdio: "ignore" })
