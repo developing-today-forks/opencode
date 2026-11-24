@@ -56,6 +56,10 @@ export interface MockServerConfig {
   onCredentialActivate?: (credentialID: string) => void
   // Runs on PATCH /api/credential/:id with the request body; the fixture applies the new label.
   onCredentialUpdate?: (credentialID: string, body: { label?: string }) => void
+  // Runs on POST /api/credential with the stored credential's integration and key; the fixture records it.
+  onCredentialCreate?: (input: { integrationID: string; key?: string }) => void
+  // Runs on PATCH /api/experimental/config with the patched provider IDs; the fixture applies the patch.
+  onConfigUpdate?: (input: { providerIDs: string[] }) => void
   // Runs on POST /api/integration/:id/connect/key; returning `{ error }` rejects the key with a 400 and that message.
   onConnectKey?: (input: { integrationID: string; body: unknown }) => void | { error: string }
   // Terminal shells the settings offer (`/api/config/shell`).
@@ -896,6 +900,27 @@ function mockHandlers(
         integrationOAuthCancel: (ctx) =>
           Effect.sync(() => config.onIntegrationOAuthCancel?.(ctx.params.attemptID)).pipe(Effect.andThen(noContent)),
         integrationConnectExternal: () => noContent,
+        credentialCreate: (ctx) =>
+          Effect.sync(() => {
+            const body = Predicate.isObject(ctx.payload) ? ctx.payload : {}
+            const integrationID = Predicate.isString(body.integrationID) ? body.integrationID : "unknown"
+            const value = Predicate.isObject(body.value) ? body.value : { type: "key", key: "" }
+
+            config.onCredentialCreate?.({
+              integrationID,
+              key: Predicate.isString(value.key) ? value.key : undefined,
+            })
+
+            return {
+              data: {
+                id: `cred_mock_${integrationID}`,
+                integrationID,
+                label: Predicate.isString(body.label) ? body.label : "API key",
+                active: body.activate !== false,
+                value,
+              },
+            }
+          }),
         credentialActivate: (ctx) =>
           Effect.sync(() => config.onCredentialActivate?.(ctx.params.credentialID)).pipe(Effect.andThen(noContent)),
         credentialUpdate: (ctx) =>
@@ -942,7 +967,23 @@ function mockHandlers(
             canonical: projectSeed(config)?.canonical ?? config.directory,
           }),
         configShells: () => Effect.succeed(config.shells ?? []),
-        configUpdate: () => noContent,
+        configUpdate: (ctx) =>
+          Effect.sync(() => {
+            const body = Predicate.isObject(ctx.payload) ? ctx.payload : {}
+            const providers = Predicate.isObject(body.providers) ? body.providers : {}
+
+            config.onConfigUpdate?.({ providerIDs: Object.keys(providers) })
+            // Like the real server, a config patch publishes config.updated; the
+            // app refetches its catalogs from that event, not from the response.
+            state.emit([
+              {
+                id: "evt_config_updated",
+                type: "config.updated",
+                created: Date.now(),
+                data: { sections: ["providers"] },
+              },
+            ])
+          }).pipe(Effect.andThen(noContent)),
         websearchProviders: () =>
           Effect.sync(() => ({ location: location(config), data: resolve(config.websearchProviders ?? []) })),
         // No scenario signs in to an OpenCode Console workspace, so none has usage limits.

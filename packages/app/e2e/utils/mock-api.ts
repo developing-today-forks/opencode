@@ -176,6 +176,12 @@ const Group = HttpApiGroup.make("mock")
     }),
   )
   .add(
+    HttpApiEndpoint.post("credentialCreate", "/api/credential", {
+      payload: JsonPayload,
+      success: Json,
+    }),
+  )
+  .add(
     HttpApiEndpoint.post("credentialActivate", "/api/credential/:credentialID/activate", {
       params: { credentialID: Schema.String },
       success: NoContent,
@@ -229,7 +235,7 @@ const Group = HttpApiGroup.make("mock")
   .add(HttpApiEndpoint.get("configShells", "/api/config/shell", { success: Json }))
   .add(
     HttpApiEndpoint.patch("configUpdate", "/api/experimental/config", {
-      payload: Schema.Struct({ shell: Schema.NullOr(Schema.String) }),
+      payload: JsonPayload,
       success: HttpApiSchema.NoContent,
     }),
   )
