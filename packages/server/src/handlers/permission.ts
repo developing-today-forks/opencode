@@ -52,7 +52,16 @@ export const PermissionHandler = HttpApiBuilder.group(Api, "server.permission", 
                 source: ctx.payload.source,
                 agent: ctx.payload.agent,
               })
-              .pipe(Effect.catchTag("Session.NotFoundError", missingSession)),
+              .pipe(
+                Effect.catchTags({
+                  "Session.NotFoundError": missingSession,
+                  "Permission.ConflictError": (error) =>
+                    new ConflictError({
+                      resource: error.requestID,
+                      message: `Duplicate pending permission ID: ${error.requestID}`,
+                    }),
+                }),
+              ),
           }
         }),
       )

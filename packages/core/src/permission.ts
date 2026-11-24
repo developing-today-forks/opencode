@@ -100,6 +100,14 @@ export class NotFoundError extends Schema.TaggedError<NotFoundError>()("Permissi
   requestID: ID,
 }) {}
 
+export class ConflictError extends Schema.TaggedError<ConflictError>()("Permission.ConflictError", {
+  requestID: ID,
+}) {
+  override get message() {
+    return `Duplicate pending permission ID: ${this.requestID}`
+  }
+}
+
 export type Error = BlockedError | CorrectedError
 
 /** Actions whose resources are file paths. */
@@ -150,7 +158,7 @@ export function effectiveRules(
 
 export interface Interface {
   readonly close: Effect.Effect<void>
-  readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError>
+  readonly ask: (input: AssertInput) => Effect.Effect<AskResult, SessionErrors.NotFoundError | ConflictError>
   readonly assert: (input: AssertInput) => Effect.Effect<void, Error | SessionErrors.NotFoundError>
   /** Fails only when the rules deny the request; never asks the user. */
   readonly assertNotDenied: (input: AssertInput) => Effect.Effect<void, BlockedError | SessionErrors.NotFoundError>
@@ -320,8 +328,7 @@ const layer = Layer.effect(
             yield* Deferred.fail(deferred, new DeclinedError())
             return item
           }
-          if (pending.has(request.id))
-            return yield* Effect.die(new Error(`Duplicate pending permission ID: ${request.id}`))
+          if (pending.has(request.id)) return yield* new ConflictError({ requestID: request.id })
           pending.set(request.id, item)
           yield* bus
             .publish(Permission.Event.Asked, request)
@@ -372,7 +379,12 @@ const layer = Layer.effect(
               })
             }
             if (result.effect === "allow") return
-            const item = yield* create(request(input, result.message), input.agent)
+            const item = yield* create(request(input, result.message), input.agent).pipe(
+              // Unlike `ask` (the API path, which surfaces the conflict typed), a duplicate
+              // pending id here means the same tool invocation asserted twice and there is
+              // no caller to answer a conflict, so it stays a defect.
+              Effect.catchTag("Permission.ConflictError", (error) => Effect.die(error)),
+            )
             return yield* restore(Deferred.await(item.deferred)).pipe(
               // Deliberate defect tunnel: leaves wrap execution in blanket `mapError`, which
               // must not convert a user's decline into model-facing tool output. The decline
