@@ -250,7 +250,6 @@ export function normalize(input: unknown): Result {
     worktree: Info.fields.worktree,
     warming: Info.fields.warming,
     messaging: Info.fields.messaging,
-    model_designations: Info.fields.model_designations,
   }
   Object.entries(nativeAtomic).forEach(([key, schema]) => {
     if (!own(input, key)) return
@@ -258,6 +257,18 @@ export function normalize(input: unknown): Result {
     if (value === undefined) return
     overlay(encoded, key, value, [key], diagnostics)
   })
+
+  if (own(input, "model_designations")) {
+    const designations = decodeMap(
+      input.model_designations,
+      ConfigModelRoutes.ModelDesignation,
+      ["model_designations"],
+      diagnostics,
+      decodeEncoded,
+    )
+    if (Object.keys(designations).length || isRecord(input.model_designations))
+      encoded.model_designations = designations
+  }
 
   const instructions = decodeList(input.instructions, Schema.String, ["instructions"], diagnostics, decodeEncoded)
   if (instructions.length || Array.isArray(input.instructions)) encoded.instructions = instructions

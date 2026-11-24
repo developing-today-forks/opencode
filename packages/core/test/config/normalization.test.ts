@@ -1419,6 +1419,14 @@ describe("model route pools", () => {
     expect(result.diagnostics).toEqual([])
     expect(decoded({ model_designations: designations }).model_designations).toEqual(designations)
   })
+
+  test("a malformed model_designations entry keeps its valid siblings (opencode#2782)", () => {
+    const valid = { purposes: ["chat"], capabilities: ["visual"], source: "fixture" }
+    const input = { "gpt-6-luna": valid, "broken-model": { purposes: "chat" } }
+    const result = normalized({ model_designations: input })
+    expect(result.diagnostics.length).toBeGreaterThan(0)
+    expect(result.encoded.model_designations).toEqual({ "gpt-6-luna": valid })
+  })
 })
 describe("model route cache formats", () => {
   const routesOf = (encoded: Readonly<Record<string, unknown>>) =>
