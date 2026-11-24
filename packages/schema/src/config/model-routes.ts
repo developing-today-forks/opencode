@@ -492,6 +492,10 @@ export class Route extends Schema.Class<Route>("Config.ModelRoute.Route")({
     description:
       "The route's cost/capability class, e.g. \"frontier\" or \"frontier-acp\". When a session's whole route is walled, failover may substitute another route of the SAME class, ordered by the doors' measured record; it never substitutes across classes, so a session never lands on a more expensive or differently-capable route by failing over. A route with no class neither substitutes nor is substituted into. ACP routes are their own class: name them separately (e.g. \"frontier-acp\") so ACP traffic only ever substitutes within ACP. Class names match in any case.",
   }).pipe(optional),
+  purpose: Schema.String.annotate({
+    description:
+      "The pool's declared purpose, e.g. \"chat\", \"decision\", \"embed\", \"transcribe\", \"speak\" or \"guard\". Absent means the pool is unrestricted here; external readers (such as the route proxy in developing-today/code, code#13675) use it to seat only models designated for that purpose. Kept as a plain string so new purposes never fail decode.",
+  }).pipe(optional),
   // The descriptions of the keys below sit inside optional(...): annotated outside it, a description never
   // reaches the generated JSON schema, so editors could not show it.
   targets: Schema.Array(Target)
@@ -805,6 +809,30 @@ const RouteID = Schema.String.check(Schema.isPattern(/^[a-zA-Z0-9][a-zA-Z0-9._-]
 
 export const Info = Schema.Record(RouteID, Route).annotate({ identifier: "Config.ModelRoutes" })
 export type Info = typeof Info.Type
+
+/** A model's purpose/capability policy: which purposes the model may serve, what it
+ * can do, and where the classification was verified. Keyed by bare model id in
+ * `model_designations` (code#13675: the route proxy in developing-today/code seats
+ * a designated model only in pools whose `purpose` is in its purposes list; an
+ * absent entry is unrestricted). Plain strings throughout so new purposes or
+ * capabilities never fail decode. */
+export class ModelDesignation extends Schema.Class<ModelDesignation>("Config.ModelRoute.ModelDesignation")({
+  purposes: Schema.Array(Schema.String).annotate({
+    description: "Purposes this model may serve, e.g. chat, decision, embed, rerank, recommend, transcribe, speak, guard.",
+  }),
+  capabilities: Schema.Array(Schema.String).annotate({
+    description: "Capabilities this model has, e.g. visual, pdf, audio-in, audio-bidir, tts, stt.",
+  }).pipe(optional),
+  source: Schema.String.annotate({
+    description: "Where the classification was verified, so a stale entry is traceable.",
+  }).pipe(optional),
+}) {}
+
+/** Purpose/capability policy keyed by bare model id. */
+export const ModelDesignations = Schema.Record(Schema.String, ModelDesignation).annotate({
+  identifier: "Config.ModelDesignations",
+})
+export type ModelDesignations = typeof ModelDesignations.Type
 
 /** A provider route: a selection over concrete providers, with the same selection modes as a
  * model route - ordered, round-robin (weights are priority tiers), weighted - except at provider

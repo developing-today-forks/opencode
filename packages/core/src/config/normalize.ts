@@ -258,6 +258,18 @@ export function normalize(input: unknown): Result {
     overlay(encoded, key, value, [key], diagnostics)
   })
 
+  if (own(input, "model_designations")) {
+    const designations = decodeMap(
+      input.model_designations,
+      ConfigModelRoutes.ModelDesignation,
+      ["model_designations"],
+      diagnostics,
+      decodeEncoded,
+    )
+    if (Object.keys(designations).length || isRecord(input.model_designations))
+      encoded.model_designations = designations
+  }
+
   const instructions = decodeList(input.instructions, Schema.String, ["instructions"], diagnostics, decodeEncoded)
   if (instructions.length || Array.isArray(input.instructions)) encoded.instructions = instructions
 

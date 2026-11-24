@@ -15,6 +15,7 @@ import { ConfigLSP } from "./config/lsp.js"
 import { ConfigMCP } from "./config/mcp.js"
 import { ConfigMessaging } from "./config/messaging.js"
 import { ConfigModel } from "./config/model.js"
+import { ConfigModelRoutes } from "./config/model-routes.js"
 import { ConfigPlugin } from "./config/plugin.js"
 import { ConfigPolicy } from "./config/policy.js"
 import { ConfigProvider } from "./config/provider.js"
@@ -128,6 +129,10 @@ export class Info extends Schema.Class<Info>("Config.Info")({
     description: "Inter-session messaging: topic presets, template variables, delivery, search, and the local embedding model",
   }).pipe(optional),
   providers: Schema.Record(Schema.String, ConfigProvider.Info).pipe(optional),
+  model_designations: ConfigModelRoutes.ModelDesignations.annotate({
+    description:
+      "Purpose/capability policy keyed by bare model id: which purposes a model may serve, what it can do, and where the classification was verified. External readers (such as the route proxy in developing-today/code, code#13675) seat a designated model only in pools whose purpose is in its purposes list; a model with no entry is unrestricted.",
+  }).pipe(optional),
   aliases: ConfigAlias.Info.annotate({
     description: "Configured aliases for providers, models, and effort levels/variants",
   }).pipe(optional),
