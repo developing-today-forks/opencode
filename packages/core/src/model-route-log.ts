@@ -1018,6 +1018,7 @@ export const targetTotals = (db: Database.Interface["db"], since: number, until?
  * read schema; raw provider response bodies and credential ids are never selected. */
 export const routeStatsErrors = (db: Database.Interface["db"], since: number, until?: number) => {
   const attempts = alias(RouteAttemptTable, "stats_attempt")
+  const latestError = alias(RouteAttemptTable, "stats_error")
   return db
     .select({
       providerID: attempts.provider_id,
@@ -1029,7 +1030,7 @@ export const routeStatsErrors = (db: Database.Interface["db"], since: number, un
       lastTime: sql<number>`max(${attempts.time_started})`,
       lastMessage: sql<
         string | null
-      >`substr((select e.error_message from route_attempt e where e.provider_id = ${attempts.provider_id} and e.model_id = ${attempts.model_id} and e.error_tag is ${attempts.error_tag} and e.error_code is ${attempts.error_code} and e.error_status is ${attempts.error_status} order by e.time_started desc limit 1), 1, 300)`,
+      >`substr((select ${latestError.error_message} from ${latestError} where ${latestError.provider_id} = ${attempts.provider_id} and ${latestError.model_id} = ${attempts.model_id} and ${latestError.error_tag} is ${attempts.error_tag} and ${latestError.error_code} is ${attempts.error_code} and ${latestError.error_status} is ${attempts.error_status} order by ${latestError.time_started} desc limit 1), 1, 300)`,
     })
     .from(attempts)
     .where(

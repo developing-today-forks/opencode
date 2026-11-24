@@ -377,6 +377,7 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         })
         .run()
     }
+    const secondErrorMessage = `second upstream message ${"x".repeat(320)}`
     yield* db
       .insert(RouteAttemptTable)
       .values({
@@ -390,9 +391,17 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         error_tag: "QuotaExceeded",
         error_code: "rate_limit",
         error_status: 429,
-        error_message: `second upstream message ${"x".repeat(320)}`,
+        error_message: secondErrorMessage,
       })
       .run()
+    const latestErrorAttempt = yield* ModelRouteLog.filteredAttempts(db, {
+      since: 4_500,
+      until: 4_500,
+      providerID: "openai",
+      modelID: "gpt-6-luna",
+      limit: 1,
+    })
+    expect(latestErrorAttempt[0]?.errorMessage).toBe(secondErrorMessage)
     const expectedTargets = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
     const expectedCoverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
     const stats = yield* get("/api/route/attempts/stats?since=0&until=5000")
@@ -439,7 +448,7 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
       status: 429,
       count: 2,
       lastTime: 4_500,
-      lastMessage: `second upstream message ${"x".repeat(320)}`.slice(0, 300),
+      lastMessage: secondErrorMessage.slice(0, 300),
     })
     expect(stats.text).not.toContain("raw provider body that must never be served")
     expect(statsBody.data.coverage).toEqual(
