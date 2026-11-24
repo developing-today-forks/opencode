@@ -474,6 +474,24 @@ describe("Permission", () => {
     }),
   )
 
+  it.effect("fails a duplicate pending ask with a typed conflict and leaves the first request resolvable", () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const service = yield* Permission.Service
+      const input = assertion()
+      expect(yield* service.ask(input)).toEqual({ id: Permission.ID.create("per_test"), effect: "ask" })
+      const error = yield* service.ask(input).pipe(Effect.flip)
+      expect(error._tag).toEqual("Permission.ConflictError")
+      if (error._tag === "Permission.ConflictError") expect(error.requestID).toEqual(Permission.ID.create("per_test"))
+      expect(error.message).toEqual("Duplicate pending permission ID: per_test")
+      // The first pending entry is undisturbed and can still be replied to.
+      expect(yield* service.get(Permission.ID.create("per_test"))).toBeDefined()
+      expect(yield* service.list()).toHaveLength(1)
+      yield* service.reply({ requestID: Permission.ID.create("per_test"), reply: "once" })
+      expect(yield* service.list()).toEqual([])
+    }),
+  )
+
   it.effect("resolves an asked permission once", () =>
     Effect.gen(function* () {
       yield* setup()
