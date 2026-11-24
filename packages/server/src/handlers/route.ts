@@ -107,11 +107,13 @@ export const RouteHandler = HttpApiBuilder.group(Api, "server.route", (handlers)
         const since = ctx.query.since ?? Date.now() - DAY_MS
         const until = ctx.query.until
         const targets = yield* ModelRouteLog.targetTotals(db, since, until).pipe(Effect.orDie)
-        const errors = yield* ModelRouteLog.errorBreakdown(db, since, until).pipe(Effect.orDie)
+        const hedges = yield* ModelRouteLog.hedgeAccuracy(db, since, undefined, until).pipe(Effect.orDie)
+        const errors = yield* ModelRouteLog.routeStatsErrors(db, since, until).pipe(Effect.orDie)
         const coverage = yield* ModelRouteLog.ledgerCoverage(db, since, until).pipe(Effect.orDie)
         return {
           data: {
             targets,
+            hedges,
             errors,
             coverage: coverage ?? {
               attempts: 0,

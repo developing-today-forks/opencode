@@ -325,9 +325,6 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
     // parity when it serves exactly what these functions return for the same window.
     const expectedAttempts = yield* ModelRouteLog.filteredAttempts(db, { since: 0 })
     const expectedFiltered = yield* ModelRouteLog.filteredAttempts(db, { since: 0, providerID: "anthropic" })
-    const expectedTargets = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
-    const expectedErrors = yield* ModelRouteLog.errorBreakdown(db, 0, 5_000)
-    const expectedCoverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
     const expectedDecisions = yield* ModelRouteLog.filteredDecisions(db, { since: 0, routeID: "luna" })
     expect(expectedAttempts).toHaveLength(4)
     expect(expectedDecisions).toHaveLength(1)
@@ -361,6 +358,41 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
     expect(listFiltered.status).toBe(200)
     expect(JSON.parse(listFiltered.text)).toEqual({ data: expectedFiltered.map((row) => wire({ ...row })) })
 
+    for (const index of Array.from({ length: 51 }, (_, index) => index)) {
+      yield* db
+        .insert(RouteAttemptTable)
+        .values({
+          time_started: 1_100 + index,
+          time_ended: 1_200 + index,
+          route_id: "luna",
+          provider_id: `error-provider-${index}`,
+          model_id: `error-model-${index}`,
+          outcome: "failure",
+          output_started: false,
+          error_tag: `ProviderError${index}`,
+          error_code: `ERR_${index}`,
+          error_status: 500,
+        })
+        .run()
+    }
+    yield* db
+      .insert(RouteAttemptTable)
+      .values({
+        time_started: 4_500,
+        time_ended: 4_600,
+        route_id: "luna",
+        provider_id: "openai",
+        model_id: "gpt-6-luna",
+        outcome: "failure",
+        output_started: false,
+        error_tag: "QuotaExceeded",
+        error_code: "rate_limit",
+        error_status: 429,
+        error_message: "second private provider detail",
+      })
+      .run()
+    const expectedTargets = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
+    const expectedCoverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
     const stats = yield* get("/api/route/attempts/stats?since=0&until=5000")
     expect(stats.status).toBe(200)
     const statsBody = JSON.parse(stats.text) as {
@@ -372,7 +404,15 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
           avgTokensPerSecond: number | null
         }[]
         hedges: { providerID: string; modelID: string; hedges: number; wins: number }[]
-        errors: { providerID: string; modelID: string; tag: string | null; code: string | null; status: number | null; count: number; lastTime: number }[]
+        errors: {
+          providerID: string
+          modelID: string
+          tag: string | null
+          code: string | null
+          status: number | null
+          count: number
+          lastTime: number
+        }[]
         coverage: unknown
       }
     }
@@ -381,22 +421,24 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
       avgFirstTokenMs: 800,
       avgTokensPerSecond: 20,
     })
-    expect(statsBody.data.hedges).toEqual([
-      { providerID: "anthropic", modelID: "claude-x", hedges: 1, wins: 1 },
-      { providerID: "openai", modelID: "gpt-6-luna", hedges: 1, wins: 0 },
-    ])
-    expect(statsBody.data.errors).toEqual([
-      {
-        providerID: "openai",
-        modelID: "gpt-6-luna",
-        tag: "QuotaExceeded",
-        code: "rate_limit",
-        status: 429,
-        count: 1,
-        lastTime: 3_000,
-      },
-    ])
+    expect([...statsBody.data.hedges].sort(byTarget)).toEqual(
+      [
+        { providerID: "anthropic", modelID: "claude-x", hedges: 1, wins: 1 },
+        { providerID: "openai", modelID: "gpt-6-luna", hedges: 1, wins: 0 },
+      ].sort(byTarget),
+    )
+    expect(statsBody.data.errors).toHaveLength(50)
+    expect(statsBody.data.errors[0]).toEqual({
+      providerID: "openai",
+      modelID: "gpt-6-luna",
+      tag: "QuotaExceeded",
+      code: "rate_limit",
+      status: 429,
+      count: 2,
+      lastTime: 4_500,
+    })
     expect(stats.text).not.toContain("provider detail that must not be served by aggregates")
+    expect(stats.text).not.toContain("second private provider detail")
     expect(statsBody.data.coverage).toEqual(
       expectedCoverage ?? { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
     )

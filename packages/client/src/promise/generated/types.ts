@@ -345,6 +345,8 @@ export type RouteAttemptTargetTotal = {
   providerID: string
   modelID: string
   attempts: number
+  avgFirstTokenMs: number | null
+  avgTokensPerSecond: number | null
   successes: number
   failures: number
   policyRejections: number
@@ -361,6 +363,8 @@ export type RouteAttemptTargetTotal = {
   last: number | null
 }
 
+export type RouteAttemptHedgeAccuracy = { providerID: string; modelID: string; hedges: number; wins: number }
+
 export type RouteAttemptErrorBreakdown = {
   providerID: string
   modelID: string
@@ -369,7 +373,6 @@ export type RouteAttemptErrorBreakdown = {
   status: number | null
   count: number
   lastTime: number
-  lastMessage: string | null
 }
 
 export type RouteAttemptCoverage = {
@@ -1171,6 +1174,7 @@ export type RouteOverrideInfo = {
 
 export type RouteAttemptStats = {
   targets: Array<RouteAttemptTargetTotal>
+  hedges: Array<RouteAttemptHedgeAccuracy>
   errors: Array<RouteAttemptErrorBreakdown>
   coverage: RouteAttemptCoverage
 }

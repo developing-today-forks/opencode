@@ -783,7 +783,7 @@ export interface HedgeAccuracy {
  * `hedged` rows that share an assistant message: one `hedged-out` loser and one `success` winner.
  * This is the record of what hedging predicted against how it turned out.
  */
-export const hedgeAccuracy = (db: Database.Interface["db"], since: number, routeID?: string) =>
+export const hedgeAccuracy = (db: Database.Interface["db"], since: number, routeID?: string, until?: number) =>
   db
     .select({
       providerID: RouteAttemptTable.provider_id,
@@ -795,6 +795,7 @@ export const hedgeAccuracy = (db: Database.Interface["db"], since: number, route
     .where(
       and(
         gte(RouteAttemptTable.time_started, since),
+        until === undefined ? undefined : lte(RouteAttemptTable.time_started, until),
         sql`${RouteAttemptTable.hedged} is true`,
         sql`${RouteAttemptTable.assistant_message_id} is not null`,
         sql`exists (select 1 from route_attempt rival where rival.assistant_message_id = ${RouteAttemptTable.assistant_message_id} and rival.hedged is true and (rival.provider_id != ${RouteAttemptTable.provider_id} or rival.model_id != ${RouteAttemptTable.model_id}))`,
@@ -984,6 +985,8 @@ export const targetTotals = (db: Database.Interface["db"], since: number, until?
       providerID: RouteAttemptTable.provider_id,
       modelID: RouteAttemptTable.model_id,
       attempts: count(),
+      avgFirstTokenMs: sql<number | null>`round(avg(${RouteAttemptTable.first_token_ms}))`,
+      avgTokensPerSecond: sql<number | null>`avg(${RouteAttemptTable.tokens_per_second})`,
       successes: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} = 'success' then 1 else 0 end), 0)`,
       failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end), 0)`,
       policyRejections: sql<number>`coalesce(sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end), 0)`,
@@ -1007,6 +1010,39 @@ export const targetTotals = (db: Database.Interface["db"], since: number, until?
       ),
     )
     .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id)
+    .orderBy(desc(count()))
+    .all()
+
+/** Error groups for the public route stats API. Provider error messages are intentionally
+ * omitted: unlike their stable tag/code/status, they can contain raw upstream details. */
+export const routeStatsErrors = (db: Database.Interface["db"], since: number, until?: number) =>
+  db
+    .select({
+      providerID: RouteAttemptTable.provider_id,
+      modelID: RouteAttemptTable.model_id,
+      tag: RouteAttemptTable.error_tag,
+      code: RouteAttemptTable.error_code,
+      status: RouteAttemptTable.error_status,
+      count: count(),
+      lastTime: sql<number>`max(${RouteAttemptTable.time_started})`,
+    })
+    .from(RouteAttemptTable)
+    .where(
+      and(
+        gte(RouteAttemptTable.time_started, since),
+        until === undefined ? undefined : lte(RouteAttemptTable.time_started, until),
+        sql`${RouteAttemptTable.outcome} != 'success'`,
+      ),
+    )
+    .groupBy(
+      RouteAttemptTable.provider_id,
+      RouteAttemptTable.model_id,
+      RouteAttemptTable.error_tag,
+      RouteAttemptTable.error_code,
+      RouteAttemptTable.error_status,
+    )
+    .orderBy(desc(count()))
+    .limit(50)
     .all()
 
 export interface LedgerCoverage {

@@ -103,7 +103,7 @@ export const RouteGroup = HttpApiGroup.make("server.route")
         identifier: "route.attempt.stats",
         summary: "Route attempt aggregates",
         description:
-          "The aggregate view over the route_attempt ledger for a time window (#2497): per provider/model attempt and token totals, the error breakdown, and the window's coverage (distinct providers, models, sessions, and routes). Read-only; the same shapes the current direct database readers compute.",
+          "The aggregate view over the route_attempt ledger for a time window (#2497): per provider/model attempt, token, and latency totals; hedge counts and wins; redacted error groups with last-seen times; and window coverage. Aggregates exclude provider error messages, credentials, and raw provider error bodies.",
       }),
     ),
   )
