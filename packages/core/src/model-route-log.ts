@@ -1,6 +1,7 @@
 export * as ModelRouteLog from "./model-route-log.js"
 
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm"
+import { alias } from "drizzle-orm/sqlite-core"
 import { Effect, Layer, Queue } from "effect"
 import { AIError, isRetryable, type HttpContext } from "@opencode/ai/effect"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
@@ -1015,38 +1016,34 @@ export const targetTotals = (db: Database.Interface["db"], since: number, until?
 
 /** Error groups for the public route stats API. The truncated last message matches the existing
  * read schema; raw provider response bodies and credential ids are never selected. */
-export const routeStatsErrors = (db: Database.Interface["db"], since: number, until?: number) =>
-  db
+export const routeStatsErrors = (db: Database.Interface["db"], since: number, until?: number) => {
+  const attempts = alias(RouteAttemptTable, "stats_attempt")
+  return db
     .select({
-      providerID: RouteAttemptTable.provider_id,
-      modelID: RouteAttemptTable.model_id,
-      tag: RouteAttemptTable.error_tag,
-      code: RouteAttemptTable.error_code,
-      status: RouteAttemptTable.error_status,
+      providerID: attempts.provider_id,
+      modelID: attempts.model_id,
+      tag: attempts.error_tag,
+      code: attempts.error_code,
+      status: attempts.error_status,
       count: count(),
-      lastTime: sql<number>`max(${RouteAttemptTable.time_started})`,
+      lastTime: sql<number>`max(${attempts.time_started})`,
       lastMessage: sql<
         string | null
-      >`substr((select e.error_message from route_attempt e where e.provider_id = ${RouteAttemptTable.provider_id} and e.model_id = ${RouteAttemptTable.model_id} and e.error_tag is ${RouteAttemptTable.error_tag} and e.error_code is ${RouteAttemptTable.error_code} and e.error_status is ${RouteAttemptTable.error_status} order by e.time_started desc limit 1), 1, 300)`,
+      >`substr((select e.error_message from route_attempt e where e.provider_id = ${attempts.provider_id} and e.model_id = ${attempts.model_id} and e.error_tag is ${attempts.error_tag} and e.error_code is ${attempts.error_code} and e.error_status is ${attempts.error_status} order by e.time_started desc limit 1), 1, 300)`,
     })
-    .from(RouteAttemptTable)
+    .from(attempts)
     .where(
       and(
-        gte(RouteAttemptTable.time_started, since),
-        until === undefined ? undefined : lte(RouteAttemptTable.time_started, until),
-        sql`${RouteAttemptTable.outcome} != 'success'`,
+        gte(attempts.time_started, since),
+        until === undefined ? undefined : lte(attempts.time_started, until),
+        sql`${attempts.outcome} != 'success'`,
       ),
     )
-    .groupBy(
-      RouteAttemptTable.provider_id,
-      RouteAttemptTable.model_id,
-      RouteAttemptTable.error_tag,
-      RouteAttemptTable.error_code,
-      RouteAttemptTable.error_status,
-    )
+    .groupBy(attempts.provider_id, attempts.model_id, attempts.error_tag, attempts.error_code, attempts.error_status)
     .orderBy(desc(count()))
     .limit(50)
     .all()
+}
 
 export interface LedgerCoverage {
   readonly attempts: number
