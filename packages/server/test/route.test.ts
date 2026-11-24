@@ -263,7 +263,11 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         output_started: false,
         tokens_input: 50,
         error_tag: "QuotaExceeded",
-        error_message: "quota",
+        error_code: "rate_limit",
+        error_status: 429,
+        error_message: "provider detail that must not be served by aggregates",
+        hedged: true,
+        assistant_message_id: "msg_hedge",
       },
       {
         time_started: 4_000,
@@ -275,6 +279,10 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         outcome: "success",
         output_started: true,
         tokens_input: 200,
+        hedged: true,
+        assistant_message_id: "msg_hedge",
+        first_token_ms: 800,
+        tokens_per_second: 20,
       },
       {
         time_started: 9_000,
@@ -357,13 +365,38 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
     expect(stats.status).toBe(200)
     const statsBody = JSON.parse(stats.text) as {
       data: {
-        targets: { providerID: string; modelID: string }[]
-        errors: unknown[]
+        targets: {
+          providerID: string
+          modelID: string
+          avgFirstTokenMs: number | null
+          avgTokensPerSecond: number | null
+        }[]
+        hedges: { providerID: string; modelID: string; hedges: number; wins: number }[]
+        errors: { providerID: string; modelID: string; tag: string | null; code: string | null; status: number | null; count: number; lastTime: number }[]
         coverage: unknown
       }
     }
     expect([...statsBody.data.targets].sort(byTarget)).toEqual([...expectedTargets].sort(byTarget))
-    expect(statsBody.data.errors).toEqual(expectedErrors)
+    expect(statsBody.data.targets.find((target) => target.providerID === "anthropic")).toMatchObject({
+      avgFirstTokenMs: 800,
+      avgTokensPerSecond: 20,
+    })
+    expect(statsBody.data.hedges).toEqual([
+      { providerID: "anthropic", modelID: "claude-x", hedges: 1, wins: 1 },
+      { providerID: "openai", modelID: "gpt-6-luna", hedges: 1, wins: 0 },
+    ])
+    expect(statsBody.data.errors).toEqual([
+      {
+        providerID: "openai",
+        modelID: "gpt-6-luna",
+        tag: "QuotaExceeded",
+        code: "rate_limit",
+        status: 429,
+        count: 1,
+        lastTime: 3_000,
+      },
+    ])
+    expect(stats.text).not.toContain("provider detail that must not be served by aggregates")
     expect(statsBody.data.coverage).toEqual(
       expectedCoverage ?? { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
     )
