@@ -29,6 +29,10 @@ import {
 } from "@opencode/core/transcription-facade"
 import { ownValue } from "@opencode/core/util/record"
 import { deadlineSignal, readBoundedResponseText, readExcerptResponseText } from "@opencode/util/http-body"
+import { open } from "node:fs/promises"
+import { randomUUID } from "node:crypto"
+import { tmpdir } from "node:os"
+import path from "node:path"
 
 export type { TranscriptionModelRegistration }
 
@@ -690,6 +694,30 @@ export interface RecorderHandle {
 }
 
 export type RecorderSpawn = (command: string, args: ReadonlyArray<string>) => RecorderHandle
+
+/** Reserve the voice-recording staging file before the recorder spawns
+ * (#2793, mirroring createEditorStagingFile / #2791): an unguessable
+ * name, created exclusively ("wx") with mode 0o600, retrying on EEXIST.
+ * A pre-planted file or symlink at a candidate path is never followed
+ * or overwritten — after the retries the reservation throws and the
+ * recorder is never spawned. The recorder's `-y` flag then overwrites
+ * only the empty file this call created and owns. */
+export async function createVoiceRecordingFile(
+  directory: string = tmpdir(),
+  name: () => string = () => `opencode-voice-${randomUUID()}.wav`,
+): Promise<string> {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const file = path.join(directory, name())
+    const handle = await open(file, "wx", 0o600).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "EEXIST") return undefined
+      throw error
+    })
+    if (!handle) continue
+    await handle.close()
+    return file
+  }
+  throw new Error("Unable to create a unique staging file for the voice recording")
+}
 
 export function startRecorder(candidate: RecorderCandidate, outputPath: string, spawn: RecorderSpawn): RecorderHandle {
   return spawn(candidate.command, candidate.args(outputPath))
