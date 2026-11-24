@@ -1,6 +1,7 @@
 import type { CliRenderer } from "@opentui/core"
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
-import { readFile, rm, writeFile } from "node:fs/promises"
+import { open, readFile, rm } from "node:fs/promises"
+import crypto from "node:crypto"
 import os from "node:os"
 import path from "node:path"
 import { spawn } from "node:child_process"
@@ -11,11 +12,39 @@ export { normalizePromptContent } from "./prompt/content"
 
 type EditorStdio = "inherit" | "pipe" | "ignore" | number | Stream
 
+// Stage the prompt buffer in a file only this process can know about or open:
+// an unguessable name, created exclusively ("wx") with mode 0o600, retrying
+// with a fresh name on EEXIST so a pre-planted file or symlink at a candidate
+// path is never followed. Mirrors writeTextAtomic in ./util/persistence.
+export async function createEditorStagingFile(
+  value: string,
+  directory: string = os.tmpdir(),
+  name: () => string = () => `opencode-editor-${crypto.randomUUID()}.md`,
+): Promise<string> {
+  for (let attempt = 0; attempt < 16; attempt++) {
+    const file = path.join(directory, name())
+    const handle = await open(file, "wx", 0o600).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "EEXIST") return undefined
+      throw error
+    })
+    if (!handle) continue
+    try {
+      await handle.writeFile(value)
+      return file
+    } catch (error) {
+      await rm(file, { force: true }).catch(() => undefined)
+      throw error
+    } finally {
+      await handle.close()
+    }
+  }
+  throw new Error("Unable to create a unique staging file for the external editor")
+}
+
 export async function openEditor(input: { value: string; renderer: CliRenderer; cwd?: string; stdin?: EditorStdio }) {
   const editor = process.env.VISUAL || process.env.EDITOR
   if (!editor) throw new Error("Set $VISUAL or $EDITOR to open an external editor")
-  const file = path.join(os.tmpdir(), `${Date.now()}.md`)
-  await writeFile(file, input.value)
+  const file = await createEditorStagingFile(input.value)
   await input.renderer.suspend()
   try {
     await new Promise<void>((resolve, reject) => {

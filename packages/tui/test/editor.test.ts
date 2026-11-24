@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test"
-import { writeFile } from "node:fs/promises"
+import { readFile, stat, symlink, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { normalizePromptContent, openEditor, parseEditorPort } from "../src/editor"
+import { createEditorStagingFile, normalizePromptContent, openEditor, parseEditorPort } from "../src/editor"
 import { tmpdir } from "./fixture/fixture"
 
 const editor = process.env.EDITOR
@@ -79,4 +79,33 @@ test("normalizes a single trailing editor newline for one-line prompts", () => {
 
 test("preserves multiline prompts that end with a newline", () => {
   expect(normalizePromptContent("hello\nworld\n")).toBe("hello\nworld\n")
+})
+
+test.skipIf(process.platform === "win32")("concurrent stagings get distinct files", async () => {
+  await using tmp = await tmpdir()
+  const [first, second] = await Promise.all([
+    createEditorStagingFile("one", tmp.path),
+    createEditorStagingFile("two", tmp.path),
+  ])
+  expect(first).not.toBe(second)
+  expect(await readFile(first, "utf8")).toBe("one")
+  expect(await readFile(second, "utf8")).toBe("two")
+})
+
+test.skipIf(process.platform === "win32")("staging never follows a pre-planted symlink", async () => {
+  await using tmp = await tmpdir()
+  const victim = path.join(tmp.path, "victim.txt")
+  await writeFile(victim, "precious")
+  await symlink(victim, path.join(tmp.path, "planted.md"))
+  const names = ["planted.md", "fresh.md"]
+  const file = await createEditorStagingFile("draft", tmp.path, () => names.shift()!)
+  expect(path.basename(file)).toBe("fresh.md")
+  expect(await readFile(victim, "utf8")).toBe("precious")
+  expect(await readFile(file, "utf8")).toBe("draft")
+})
+
+test.skipIf(process.platform === "win32")("staging file is created with mode 0o600", async () => {
+  await using tmp = await tmpdir()
+  const file = await createEditorStagingFile("draft", tmp.path)
+  expect((await stat(file)).mode & 0o777).toBe(0o600)
 })
