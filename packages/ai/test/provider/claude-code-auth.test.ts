@@ -810,6 +810,21 @@ describe("claudeCodeAuth — renewal lead, rate-limit wait, and hold (#6120)", (
     expect(calls).toHaveLength(0)
   })
 
+  test.each([500, 502, 503])(
+    "a token-endpoint %i is transient: no re-sign-in, no write, and not an authentication failure",
+    async (status) => {
+      const { sources, store, sleeps } = harness(() => new Response("upstream down", { status }))
+      const before = store.get(CREDENTIALS_PATH)
+      const error = await apply(sources).catch((cause: unknown) => cause)
+      expect(JSON.stringify(error)).toContain(`HTTP ${status}`)
+      expect(JSON.stringify(error)).toContain("ProviderInternal")
+      expect(JSON.stringify(error)).not.toContain("Authentication")
+      expect(JSON.stringify(error)).not.toContain("in-product sign-in")
+      expect(store.get(CREDENTIALS_PATH)).toBe(before)
+      expect(sleeps).toEqual([])
+    },
+  )
+
   test("a 429 with Retry-After is waited out and the renewal then lands", async () => {
     const { sources, store, calls, sleeps } = harness((call) =>
       call < 3 ? new Response("rate limited", { status: 429, headers: { "Retry-After": "7" } }) : rotated(),
@@ -1597,6 +1612,87 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
     await waitFor(() => JSON.parse(store.get(path)!).claudeAiOauth.accessToken === "tok-transient")
     expect(exchanges).toBe(2)
     expect(events.map((event) => event.kind)).toEqual(["attempt", "standing-scheduled", "attempt", "landed"])
+  })
+
+  test("a 5xx on the first load schedules the standing retry, and a 5xx inside it does not end the loop", async () => {
+    const path = CREDENTIALS_PATH
+    const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-5xx")]])
+    const events: Array<RenewalEvent> = []
+    let exchanges = 0
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: async () => {},
+      onRenewalEvent: (event) => {
+        events.push(event)
+      },
+      fetchFn: async () => {
+        exchanges += 1
+        if (exchanges === 1) return new Response("upstream down", { status: 503 })
+        if (exchanges === 2) return new Response("bad gateway", { status: 502 })
+        return rotated("tok-5xx", "ref-standing-5xx-b")
+      },
+    }
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("ProviderInternal")
+    expect(JSON.stringify(error)).not.toContain("Authentication")
+    await waitFor(() => JSON.parse(store.get(path)!).claudeAiOauth.accessToken === "tok-5xx")
+    expect(exchanges).toBe(3)
+    expect(events.map((event) => event.kind)).toEqual([
+      "attempt",
+      "standing-scheduled",
+      "attempt",
+      "transient-failure",
+      "attempt",
+      "landed",
+    ])
+  })
+
+  test("a 5xx followed by a genuine refusal stops the standing retry at the refusal", async () => {
+    const path = CREDENTIALS_PATH
+    const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-5xx-c")]])
+    const events: Array<RenewalEvent> = []
+    let exchanges = 0
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: async () => {},
+      onRenewalEvent: (event) => {
+        events.push(event)
+      },
+      fetchFn: async () => {
+        exchanges += 1
+        return exchanges === 1
+          ? new Response("upstream down", { status: 500 })
+          : new Response(JSON.stringify({ error: "invalid_grant" }), { status: 400 })
+      },
+    }
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("ProviderInternal")
+    await waitFor(() => events.some((event) => event.kind === "rejected"))
+    expect(events.map((event) => event.kind)).toEqual(["attempt", "standing-scheduled", "attempt", "rejected"])
+    expect(JSON.stringify(events)).toContain("HTTP 400")
+    expect(store.get(path)).toBe(blobWith(NOW - 1_000, "ref-standing-5xx-c"))
   })
 
   test("the lifecycle is reconstructible from the default log lines alone", async () => {
