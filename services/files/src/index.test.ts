@@ -32,10 +32,24 @@ const bucket = {
 const env = { FILES: bucket }
 const ctx = { waitUntil: () => {} }
 
-// The Cache API is a worker runtime global; tests stub it as an always-miss
-// cache. Requests also send no-store where they must not depend on it.
+// The Cache API is a worker runtime global; tests stub it as a miss by
+// default with an opt-in stored hit. Requests also send no-store where
+// they must not depend on it.
+let cachedHit = null
 // @ts-expect-error runtime global stub
-globalThis.caches = { default: { match: async () => undefined, put: async () => {} } }
+globalThis.caches = { default: { match: async () => (cachedHit ? cachedHit.clone() : undefined), put: async () => {} } }
+
+const storeHit = () => {
+  cachedHit = new Response(CONTENT, {
+    status: 200,
+    headers: {
+      ETag: '"etag-1"',
+      "Last-Modified": UPLOADED.toUTCString(),
+      "Cache-Control": "public, max-age=3600",
+      "Content-Type": "text/plain",
+    },
+  })
+}
 
 const fetchFile = (headers = {}, method = "GET") =>
   worker.fetch(new Request("https://files.test/files/a.txt", { method, headers }), env, ctx)
@@ -101,5 +115,65 @@ describe("files worker range handling (#1646)", () => {
   test("If-Match with a stale etag serves 412", async () => {
     const response = await fetchFile({ "If-Match": '"other"' })
     expect(response.status).toBe(412)
+  })
+})
+
+describe("files worker cache-hit conditionals (#2786)", () => {
+  test("matching If-None-Match on a hit serves a bodyless 304 with cached headers", async () => {
+    storeHit()
+    try {
+      const response = await fetchFile({ "If-None-Match": '"etag-1"' })
+      expect(response.status).toBe(304)
+      expect(await response.text()).toBe("")
+      expect(response.headers.get("ETag")).toBe('"etag-1"')
+      expect(response.headers.get("Last-Modified")).toBe(UPLOADED.toUTCString())
+    } finally {
+      cachedHit = null
+    }
+  })
+
+  test("non-matching If-None-Match on a hit serves the stored 200 with body", async () => {
+    storeHit()
+    try {
+      const response = await fetchFile({ "If-None-Match": '"other"' })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe(CONTENT)
+    } finally {
+      cachedHit = null
+    }
+  })
+
+  test("If-Modified-Since at the cached Last-Modified serves 304", async () => {
+    storeHit()
+    try {
+      const response = await fetchFile({ "If-Modified-Since": UPLOADED.toUTCString() })
+      expect(response.status).toBe(304)
+      expect(await response.text()).toBe("")
+    } finally {
+      cachedHit = null
+    }
+  })
+
+  test("stale If-Modified-Since on a hit serves the stored 200", async () => {
+    storeHit()
+    try {
+      const response = await fetchFile({ "If-Modified-Since": "Wed, 31 Dec 2025 00:00:00 GMT" })
+      expect(response.status).toBe(200)
+      expect(await response.text()).toBe(CONTENT)
+    } finally {
+      cachedHit = null
+    }
+  })
+
+  test("matching If-None-Match on a HEAD hit serves a bodyless 304", async () => {
+    storeHit()
+    try {
+      const response = await fetchFile({ "If-None-Match": '"etag-1"' }, "HEAD")
+      expect(response.status).toBe(304)
+      expect(await response.text()).toBe("")
+      expect(response.headers.get("ETag")).toBe('"etag-1"')
+    } finally {
+      cachedHit = null
+    }
   })
 })
