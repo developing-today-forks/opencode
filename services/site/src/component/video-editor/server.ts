@@ -15,7 +15,7 @@ const EDITOR = join(ROOT, "editor")
 const SITE = join(process.cwd(), "public", "product-videos")
 const PIPELINES = ["real-ui", "real-cli", "real-ios"]
 const PROXY_WIDTH = 1280
-const types: Record<string, string> = {
+const types: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, {
   ".html": "text/html",
   ".jpg": "image/jpeg",
   ".png": "image/png",
@@ -23,7 +23,7 @@ const types: Record<string, string> = {
   ".js": "text/javascript",
   ".json": "application/json",
   ".mp4": "video/mp4",
-}
+})
 
 export async function handle(event: APIEvent) {
   const url = new URL(event.request.url)

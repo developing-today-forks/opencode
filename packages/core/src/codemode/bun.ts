@@ -465,7 +465,7 @@ const codeOf = (error: unknown) => {
 }
 
 // Bun's MIME types for common extensions, with the charset Bun adds to some text types.
-const types = Object.fromEntries(
+const types: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, Object.fromEntries(
   Object.entries({
     "text/plain;charset=utf-8": ["txt", "log", "ini"],
     "text/javascript;charset=utf-8": ["js", "mjs", "cjs", "jsx", "ts", "mts", "cts", "tsx"],
@@ -498,7 +498,7 @@ const types = Object.fromEntries(
     "font/ttf": ["ttf"],
     "font/otf": ["otf"],
   }).flatMap(([type, extensions]) => extensions.map((extension) => [extension, type])),
-)
+))
 
 const mime = (name: string) => types[path.extname(name).slice(1).toLowerCase()] ?? "application/octet-stream"
 

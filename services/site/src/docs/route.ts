@@ -61,7 +61,7 @@ const moved = new Map([
 ])
 
 // The V1 docs app's other names for its languages (its middleware), and English's.
-const aliases: Record<string, string> = {
+const aliases: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, {
   en: "",
   root: "",
   uk: "",
@@ -71,7 +71,7 @@ const aliases: Record<string, string> = {
   pt: "pt-br",
   no: "nb",
   nn: "nb",
-}
+})
 
 /** A V1 address that isn't a page, as the V1 docs app answered it, or missing. */
 function v1Fallback(slug: string, file: boolean, search: string) {

@@ -143,7 +143,7 @@ export function address(path: string) {
   return /^[a-z][a-z\d+.-]+:/i.test(path.trim())
 }
 
-const types: Record<string, string> = {
+const types: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, {
   ".txt": "text/plain",
   ".csv": "text/csv",
   ".json": "application/json",
@@ -157,7 +157,7 @@ const types: Record<string, string> = {
   ".pdf": "application/pdf",
   ".zip": "application/zip",
   ".gz": "application/gzip",
-}
+})
 
 /** A session owns one private cache tree. Neither file names nor session IDs are interpreted as directory paths. */
 export function exportRoot(sessionID: string) {

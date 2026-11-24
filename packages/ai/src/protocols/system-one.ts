@@ -214,14 +214,14 @@ const stateItem = (
 }
 
 /** OpenRouter's `input_audio` format names for MIME subtypes that aren't one themselves. */
-const audioFormats: Readonly<Record<string, string>> = {
+const audioFormats: Readonly<Record<string, string>> = Object.assign(Object.create(null) as Record<string, string>, {
   "x-wav": "wav",
   wave: "wav",
   "vnd.wave": "wav",
   "x-m4a": "m4a",
   "x-aiff": "aiff",
   "x-flac": "flac",
-}
+})
 
 /** Map System One's answers, keyed by question name, back to the request's question order. */
 export const toResponse = (

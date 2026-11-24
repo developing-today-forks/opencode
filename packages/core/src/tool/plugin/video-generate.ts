@@ -26,7 +26,7 @@ import { VideoGeneration } from "../../video-generation.js"
 export const name = "generate_video"
 export const MAX_INPUT_BYTES = 100 * 1024 * 1024
 const CHUNK = 4 * 1024 * 1024
-const URL_TYPES: Record<string, string> = {
+const URL_TYPES: Record<string, string> = Object.assign(Object.create(null) as Record<string, string>, {
   mp4: "video/mp4",
   mov: "video/quicktime",
   webm: "video/webm",
@@ -35,7 +35,7 @@ const URL_TYPES: Record<string, string> = {
   m4a: "audio/mp4",
   ogg: "audio/ogg",
   flac: "audio/flac",
-}
+})
 
 export const description = [
   "Generates a video from a prompt, optionally starting or ending on given images and guided by reference images, videos or audio.",
