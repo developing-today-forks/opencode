@@ -1,7 +1,7 @@
 export * as Session from "./session.js"
 export * from "./session/schema.js"
 
-import { DateTime, Effect, Layer, Context, Option, Stream } from "effect"
+import { DateTime, Effect, Equal, Layer, Context, Option, Stream } from "effect"
 import { LLMClient } from "@opencode/ai/effect"
 import { ListAnchor, ListCursor, ListFilter } from "@opencode/schema/session"
 import { and, desc, eq } from "drizzle-orm"
@@ -428,15 +428,14 @@ const layer = Layer.effect(
     const result = Service.of({
       create: Effect.fn("Session.create")(function* (input) {
         const sessionID = input.id ?? SessionSchema.ID.create()
-        const recorded = yield* store.get(sessionID)
-        if (recorded) {
-          // A reused id is an idempotent retry only when every identity-defining
-          // field the caller supplied matches the recorded session; a differing
-          // field is a collision, not a retry (#2796). Fields the caller omitted
-          // are not compared: creation may have inherited or resolved them
-          // (parent metadata/permissions, governance-checked child model).
+        // A reused id is an idempotent retry only when every identity-defining
+        // field the caller supplied matches the recorded session; a differing
+        // field is a collision, not a retry (#2796). Fields the caller omitted
+        // are not compared: creation may have inherited or resolved them
+        // (parent metadata/permissions, governance-checked child model).
+        const differsFromRecorded = (recorded: SessionSchema.Info) => {
           const location = input.location && LocationServiceMap.canonical(input.location)
-          const differs =
+          return (
             input.parentID !== recorded.parentID ||
             (location !== undefined &&
               (location.directory !== recorded.location.directory ||
@@ -447,13 +446,15 @@ const layer = Layer.effect(
               (input.model.id !== recorded.model?.id ||
                 input.model.providerID !== recorded.model?.providerID ||
                 input.model.variant !== recorded.model?.variant)) ||
-            (input.metadata !== undefined && JSON.stringify(input.metadata) !== JSON.stringify(recorded.metadata)) ||
-            (input.permissions !== undefined &&
-              JSON.stringify(input.permissions) !== JSON.stringify(recorded.permissions)) ||
-            (input.subagentPolicy !== undefined &&
-              JSON.stringify(input.subagentPolicy) !== JSON.stringify(recorded.subagentPolicy)) ||
+            (input.metadata !== undefined && !Equal.equals(input.metadata, recorded.metadata)) ||
+            (input.permissions !== undefined && !Equal.equals(input.permissions, recorded.permissions)) ||
+            (input.subagentPolicy !== undefined && !Equal.equals(input.subagentPolicy, recorded.subagentPolicy)) ||
             (input.detached !== undefined && input.detached !== recorded.detached)
-          if (differs) return yield* new AlreadyExistsError({ sessionID })
+          )
+        }
+        const recorded = yield* store.get(sessionID)
+        if (recorded) {
+          if (differsFromRecorded(recorded)) return yield* new AlreadyExistsError({ sessionID })
           return recorded
         }
         const parent = input.parentID ? yield* store.get(input.parentID) : undefined
@@ -536,7 +537,13 @@ const layer = Layer.effect(
                 )
             }),
           )
-        if (projected.type === "existing") return projected.session
+        if (projected.type === "existing") {
+          // The projection-race winner is validated with the same comparison
+          // as a recorded session: a concurrent create whose supplied fields
+          // differ from the winner is a collision, not a retry (#2796).
+          if (differsFromRecorded(projected.session)) return yield* new AlreadyExistsError({ sessionID })
+          return projected.session
+        }
         if (input.parentID) {
           yield* McpxSubagent.initializeSubagentSession({
             parentSessionID: input.parentID,
