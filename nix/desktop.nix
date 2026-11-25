@@ -95,7 +95,9 @@ stdenv.mkDerivation (finalAttrs: {
 
     cd packages/desktop
 
-    export OPENCODE_CLI_DIST="$TMPDIR/desktop-cli"
+    # script/build.ts reads the CLI from ../cli/dist (it has no override), and a prod
+    # build fails without it, so stage the Nix-built CLI exactly there.
+    export OPENCODE_CLI_DIST="$PWD/../cli/dist"
     cli_package=$(bun -e 'import { getCurrentCli } from "./script/utils.ts"; console.log(getCurrentCli().package.replace("@opencode/", ""))')
     # copyBuiltCliToResources joins this dist with the npm package name getCurrentCli()
     # reports, not the Nix build's name. It reads only .version from the manifest and
