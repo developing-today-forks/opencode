@@ -1,14 +1,17 @@
 <!--
   developing-today-forks/opencode fork notice:
-  This fork tracks the upstream v2 line (anomalyco/opencode branch dev) exclusively.
-  Following upstream's promotion of v2 to dev (with legacy v1 branched to v1), this fork tracks dev.
-  Latest upstream commit merged: 00e7472faa2ef15b30db6110440117e4e7e1a72a (Fri Oct 16 15:15:15 2026 +0530).
+  This repository is a fork of dezren39/opencode; the upstream source is anomalyco/opencode.
+  The fork's default branch is main. Upstream's v2 line (anomalyco/opencode branch dev,
+  following upstream's promotion of v2 to dev, with legacy v1 branched to v1) is merged
+  into main by periodic sync PRs.
+  Latest upstream commit merged: bab0d0413ff31edd07b55fc499294e2e031c57d2 (2026-11-23),
+  via sync PR #2690.
 -->
 
 > [!NOTE]
 > **Fork Information (`developing-today-forks/opencode`):**
-> This repository is a fork of [OpenCode](https://github.com/anomalyco/opencode) tracking the upstream **`v2`** codebase on `dev` exclusively (upstream promoted v2 to `dev` on Oct 10, 2026; legacy v1 is on `v1`).
-> - **Latest upstream commit merged**: `00e7472faa2ef15b30db6110440117e4e7e1a72a` (Fri Oct 16 2026).
+> This repository is a fork of [dezren39/opencode](https://github.com/dezren39/opencode), whose upstream source is [OpenCode](https://github.com/anomalyco/opencode). The fork's default branch is `main`; the upstream **`v2`** codebase (on `dev` since upstream promoted v2 to `dev` on Oct 10, 2026; legacy v1 is on `v1`) is merged into `main` by periodic sync PRs.
+> - **Latest upstream commit merged**: `bab0d0413ff31edd07b55fc499294e2e031c57d2` (2026-11-23, via sync PR #2690).
 >
 > **High-Level Additions & Differences in this Fork:**
 > - **Model Route Pooling & Scheduled Weights**: Named provider/model route pools (`experimental.model_routes`), recurring time-based weight schedules (`schedules` and `experimental.model_route_schedules` with weekday/month/hour/timezone windows), selection modes (ordered, round-robin, weighted), soft budgets, burst rate-limit continuity, and silent-target hedging.
