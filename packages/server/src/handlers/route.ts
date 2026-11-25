@@ -127,6 +127,29 @@ export const RouteHandler = HttpApiBuilder.group(Api, "server.route", (handlers)
       }),
     )
     .handle(
+      "route.attempt.rollup",
+      Effect.fn(function* (ctx) {
+        const group = (ctx.query.group ?? "")
+          .split(",")
+          .map((part) => part.trim())
+          .filter((part) => part.length > 0)
+        const unknown = group.filter((part) => !ModelRouteLog.ROLLUP_DIMENSIONS.includes(part as never))
+        if (unknown.length > 0)
+          return yield* new InvalidRequestError({
+            message: `Unknown rollup dimension: ${unknown.join(", ")}. Use provider, model, variant or credential.`,
+          })
+        const db = (yield* Database.Service).db
+        const rows = yield* ModelRouteLog.attemptRollup(db, {
+          since: ctx.query.since ?? Date.now() - DAY_MS,
+          until: ctx.query.until,
+          bucket: ctx.query.bucket,
+          group: group as ModelRouteLog.RollupDimension[],
+          clock: ctx.query.clock,
+        }).pipe(Effect.orDie)
+        return { data: rows }
+      }),
+    )
+    .handle(
       "route.decision.list",
       Effect.fn(function* (ctx) {
         const db = (yield* Database.Service).db

@@ -111,3 +111,29 @@ export const Stats = Schema.Struct({
   coverage: Coverage,
 }).annotate({ identifier: "RouteAttempt.Stats" })
 export type Stats = typeof Stats.Type
+
+/** One bucket of the rollup read (#2795): attempt and token totals for a time bucket and the
+ * dimensions the request grouped by. Dimensions the request did not group by are absent. A
+ * credential is served only as `credentialKey`, a digest a reader that already holds the id can
+ * match; the id itself is never served. */
+export const RollupRow = Schema.Struct({
+  bucket: Schema.NullOr(Schema.Union([Schema.String, Schema.Number])),
+  providerID: optional(Schema.String),
+  modelID: optional(Schema.String),
+  variant: optional(Schema.NullOr(Schema.String)),
+  credentialKey: optional(Schema.NullOr(Schema.String)),
+  attempts: Schema.Number,
+  successes: Schema.Number,
+  tokensInput: Schema.Number,
+  tokensOutput: Schema.Number,
+  tokensReasoning: Schema.Number,
+  tokensCacheRead: Schema.Number,
+  tokensCacheWrite: Schema.Number,
+  tokensCombined: Schema.Number,
+  costUsd: Schema.Number,
+  costRows: Schema.Number,
+  credentialRows: Schema.Number,
+  first: Schema.NullOr(Schema.Number),
+  last: Schema.NullOr(Schema.Number),
+}).annotate({ identifier: "RouteAttempt.RollupRow" })
+export type RollupRow = typeof RollupRow.Type

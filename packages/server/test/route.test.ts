@@ -373,3 +373,30 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
     expect(JSON.parse(decisions.text)).toEqual({ data: expectedDecisions.map((row) => wire({ ...row })) })
   }),
 )
+
+it.live("serves the route-attempt rollup over HTTP and refuses an unknown dimension (#2795)", () =>
+  Effect.gen(function* () {
+    const tmp = yield* Effect.acquireDisposable(Effect.promise(() => tmpdir("opencode-route-rollup-")))
+    const server = yield* startServer(tmp.path)
+
+    const rollup = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts/rollup?since=0&bucket=day&group=provider,credential&clock=local", server.base), {
+        headers: server.headers,
+      }),
+    )
+    expect(rollup.status).toBe(200)
+    expect(yield* Effect.promise(() => rollup.json())).toEqual({ data: [] })
+
+    const unknown = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts/rollup?since=0&group=provider,credential_id", server.base), {
+        headers: server.headers,
+      }),
+    )
+    expect(unknown.status).toBe(400)
+
+    const badBucket = yield* Effect.promise(() =>
+      fetch(new URL("/api/route/attempts/rollup?since=0&bucket=minute", server.base), { headers: server.headers }),
+    )
+    expect(badBucket.status).toBe(400)
+  }),
+)
