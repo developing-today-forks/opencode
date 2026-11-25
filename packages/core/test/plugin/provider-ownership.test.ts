@@ -10,6 +10,7 @@ import { Integration } from "@opencode/core/integration"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { PluginHooks } from "@opencode/core/plugin/hooks"
+import { ProviderInstancePlugin } from "@opencode/core/plugin/provider/instance"
 import { foldSettings, seating, settingsConflicts } from "@opencode/core/plugin/provider/configured"
 import { Provider } from "@opencode/core/provider"
 import { testEffect } from "../lib/effect"
@@ -199,10 +200,38 @@ const applyProviderConfig = Effect.fn(function* (entries: Entry[]) {
     })
   })
   const config = Config.testLayer(entries)
+  yield* ProviderInstancePlugin.effect(yield* PluginHost.make(plugin, ProviderInstancePlugin.id)).pipe(
+    Effect.provide(config),
+  )
   yield* ConfigProviderPlugin.Plugin.effect(yield* PluginHost.make(plugin, ConfigProviderPlugin.Plugin.id)).pipe(Effect.provide(config))
 })
 
 describe("provider transform package seating (#2202)", () => {
+  it.effect("a conflicting instance cannot activate its seated provider with a discarded API key", () =>
+    Effect.gen(function* () {
+      const providers = yield* Provider.Service
+      const instanceID = Provider.ID.make("claude-code.work")
+      yield* applyProviderConfig([
+        providerDocument({
+          "claude-code": { package: "@opencode/claude-code" },
+          "claude-code.work": { instanceOf: "claude-code", package: "@opencode/claude-code" },
+        }),
+        providerDocument({
+          "claude-code.work": {
+            package: "@openchamber/opencode-claude",
+            settings: { apiKey: "sk-hijack" },
+          },
+        }),
+      ])
+
+      const instance = yield* providers.get(instanceID)
+      expect(instance?.instanceOf).toBe(Provider.ID.make("claude-code"))
+      expect(instance?.activation).toBe("auto")
+      expect(instance?.settings?.apiKey).toBeUndefined()
+      expect((yield* providers.available()).map((provider) => provider.id)).not.toContain(instanceID)
+    }),
+  )
+
   it.effect("a conflicting-package document contributes no headers, body, canonical, compatibility, or name", () =>
     Effect.gen(function* () {
       const providers = yield* Provider.Service
