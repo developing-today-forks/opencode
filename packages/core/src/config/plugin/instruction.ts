@@ -330,7 +330,11 @@ function isRedirectResponse(response: HttpClientResponse.HttpClientResponse) {
  *
  * A redirect is followed only when the destination
  * - resolves against the current URL (a malformed `Location` fails closed),
- * - uses http: or https:, and
+ * - uses http: or https:,
+ * - does not downgrade an https: fetch to http:, same-host or cross-host,
+ *   so trusted instruction text never crosses a plaintext hop the user did
+ *   not choose (an http: source the user configured keeps redirecting to
+ *   http: or upgrading to https:), and
  * - does not move the fetch from a non-local origin into the local network:
  *   a destination whose host is a local or private address is rejected
  *   unless the URL issuing the redirect is itself local or private. A
@@ -354,6 +358,8 @@ export function resolveInstructionRedirect(current: string, location: string): s
     throw new Error(`instruction url redirect to unsupported protocol: ${destination.protocol}`)
   if (isLocalOrPrivateHost(destination.hostname) && !isLocalOrPrivateHost(new URL(current).hostname))
     throw new Error(`instruction url redirect to a local or private destination is not allowed: ${destination.hostname}`)
+  if (new URL(current).protocol === "https:" && destination.protocol === "http:")
+    throw new Error(`instruction url redirect from https to http is not allowed: ${destination.toString()}`)
   return destination.toString()
 }
 
@@ -398,12 +404,13 @@ function isNonPublicIPv6(host: string): boolean {
   if (g0 >= 0xfe80 && g0 <= 0xfebf) return true // fe80::/10 link-local
   if (g0 >= 0xfc00 && g0 <= 0xfdff) return true // fc00::/7 unique-local
   if (g0 >= 0xff00) return true // multicast
-  // IPv4-mapped (::ffff:0:0/96) and NAT64 well-known (64:ff9b::/96)
-  // destinations are classified by the IPv4 address they embed.
-  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0xffff)
-    return isNonPublicIPv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`)
-  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0)
-    return isNonPublicIPv4(`${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`)
+  // IPv4-mapped (::ffff:0:0/96), deprecated IPv4-compatible (::/96) and
+  // NAT64 well-known (64:ff9b::/96) destinations are classified by the
+  // IPv4 address they embed, so [::7f00:1] is loopback like 127.0.0.1.
+  const embedded = `${g6 >> 8}.${g6 & 0xff}.${g7 >> 8}.${g7 & 0xff}`
+  if (g0 === 0 && g1 === 0 && g2 === 0 && g3 === 0 && g4 === 0 && (g5 === 0xffff || g5 === 0))
+    return isNonPublicIPv4(embedded)
+  if (g0 === 0x64 && g1 === 0xff9b && g2 === 0 && g3 === 0 && g4 === 0 && g5 === 0) return isNonPublicIPv4(embedded)
   return false
 }
 

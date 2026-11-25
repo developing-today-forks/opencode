@@ -686,7 +686,15 @@ describe("ConfigInstructionPlugin.Plugin", () => {
     // Allowed: same-origin relative, public cross-origin, public IP literal.
     expect(resolve("https://example.test/a.md", "/b.md")).toBe("https://example.test/b.md")
     expect(resolve("https://a.example.test/a.md", "https://b.example.test/b.md")).toBe("https://b.example.test/b.md")
-    expect(resolve("https://example.test/a.md", "http://1.1.1.1/b.md")).toBe("http://1.1.1.1/b.md")
+    expect(resolve("https://example.test/a.md", "https://1.1.1.1/b.md")).toBe("https://1.1.1.1/b.md")
+    // Allowed: http sources keep redirecting to http, and may upgrade to https.
+    expect(resolve("http://example.test/a.md", "http://example.test/b.md")).toBe("http://example.test/b.md")
+    expect(resolve("http://example.test/a.md", "https://example.test/b.md")).toBe("https://example.test/b.md")
+    expect(resolve("http://a.example.test/a.md", "http://b.example.test/b.md")).toBe("http://b.example.test/b.md")
+    // Blocked: an https source downgrading to http, same-host or cross-host.
+    expect(() => resolve("https://example.test/a.md", "http://example.test/b.md")).toThrow("https to http")
+    expect(() => resolve("https://a.example.test/a.md", "http://b.example.test/b.md")).toThrow("https to http")
+    expect(() => resolve("https://example.test/a.md", "http://1.1.1.1/b.md")).toThrow("https to http")
     // Allowed: a deliberately configured local source may redirect within the local network.
     expect(resolve("http://127.0.0.1:4011/a.md", "http://127.0.0.1:4022/b.md")).toBe("http://127.0.0.1:4022/b.md")
     expect(resolve("http://localhost:4011/a.md", "/b.md")).toBe("http://localhost:4011/b.md")
@@ -702,6 +710,10 @@ describe("ConfigInstructionPlugin.Plugin", () => {
       "http://[fe80::1]/secret.md",
       "http://[fd00::1]/secret.md",
       "http://[::ffff:127.0.0.1]/secret.md",
+      "http://[64:ff9b::7f00:1]/secret.md",
+      "http://[::7f00:1]/secret.md",
+      "http://[::127.0.0.1]/secret.md",
+      "http://[::a00:5]/secret.md",
       "http://0.0.0.0/secret.md",
     ])
       expect(() => resolve("https://example.test/a.md", location)).toThrow("local or private")
@@ -725,9 +737,30 @@ describe("ConfigInstructionPlugin.Plugin", () => {
       "[::1]",
       "[fe80::1]",
       "[fd00::1]",
+      // Embedded IPv4: mapped, NAT64 and IPv4-compatible forms of private addresses.
+      "[::ffff:127.0.0.1]",
+      "[::ffff:a00:1]",
+      "[64:ff9b::7f00:1]",
+      "[64:ff9b::10.0.0.1]",
+      "[::7f00:1]",
+      "[::127.0.0.1]",
+      "[::a9fe:a9fe]",
+      "[::192.168.0.1]",
     ])
       expect(local(host)).toBe(true)
-    for (const host of ["example.com", "example.test", "1.1.1.1", "172.32.0.1", "100.128.0.1", "[2606:4700:4700::1111]"])
+    for (const host of [
+      "example.com",
+      "example.test",
+      "1.1.1.1",
+      "172.32.0.1",
+      "100.128.0.1",
+      "[2606:4700:4700::1111]",
+      // Embedded IPv4: mapped, NAT64 and IPv4-compatible forms of a public address stay public.
+      "[::ffff:1.1.1.1]",
+      "[64:ff9b::101:101]",
+      "[::101:101]",
+      "[::8.8.8.8]",
+    ])
       expect(local(host)).toBe(false)
   })
 
