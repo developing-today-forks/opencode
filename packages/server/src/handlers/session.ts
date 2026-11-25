@@ -183,6 +183,14 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               .pipe(
                 Effect.catchTag("Session.NotFoundError", missingSession),
                 Effect.catchTag(
+                  "Session.AlreadyExistsError",
+                  (error) =>
+                    new ConflictError({
+                      message: `Session already exists with different create fields: ${error.sessionID}`,
+                      resource: error.sessionID,
+                    }),
+                ),
+                Effect.catchTag(
                   "ModelGovernance.DeniedError",
                   (error) => new InvalidRequestError({ message: error.message }),
                 ),

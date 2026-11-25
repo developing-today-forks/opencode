@@ -1105,6 +1105,16 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "ConflictError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
+                }
+              }
+            }
           }
         },
         "description": "Create a session at the requested location. The location payload takes precedence over the directory query parameter, which names the root session's directory; directory cannot be combined with a parentID, because a parentID creates a linked child session at its parent's location. Detached sessions have no interactive question tool, and their child sessions inherit detached mode.",
@@ -10778,6 +10788,16 @@
                       "$ref": "#/components/schemas/LocationNotFoundErrorEncoded"
                     }
                   ]
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "ConflictError",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConflictErrorEncoded"
                 }
               }
             }

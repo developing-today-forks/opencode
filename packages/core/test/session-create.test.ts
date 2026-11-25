@@ -1050,12 +1050,13 @@ describe("Session.create", () => {
     }),
   )
 
-  it.effect("returns the existing Session when one ID is reused with different create arguments", () =>
+  it.effect("fails with a typed conflict when one ID is reused with different create arguments", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service
       const created = yield* session.create({ id, location })
       const changed = [
         { id, location: Location.Ref.make({ directory: AbsolutePath.make("/other") }) },
+        { id, location, title: "Different title" },
         { id, location, agent: Agent.ID.make("build") },
         {
           id,
@@ -1065,8 +1066,40 @@ describe("Session.create", () => {
       ]
 
       for (const input of changed) {
-        expect(yield* session.create(input)).toEqual(created)
+        expect(yield* Effect.flip(session.create(input))).toEqual(new Session.AlreadyExistsError({ sessionID: id }))
       }
+      // An exact retry stays idempotent and returns the recorded session.
+      expect(yield* session.create({ id, location })).toEqual(created)
+      expect((yield* session.list()).data).toHaveLength(1)
+    }),
+  )
+
+  it.effect("treats a model without a variant as an exact retry of the recorded default variant", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const model = Model.Ref.make({ id: Model.ID.make("sonnet"), providerID: Provider.ID.anthropic })
+      const created = yield* session.create({ id, location, model })
+
+      // The recorded session materializes the omitted variant as "default";
+      // retrying with the variant omitted or spelled out stays idempotent.
+      expect(yield* session.create({ id, location, model })).toEqual(created)
+      expect(
+        yield* session.create({
+          id,
+          location,
+          model: Model.Ref.make({ ...model, variant: Model.VariantID.make("default") }),
+        }),
+      ).toEqual(created)
+      // A differing non-default variant is still a conflict.
+      expect(
+        yield* Effect.flip(
+          session.create({
+            id,
+            location,
+            model: Model.Ref.make({ ...model, variant: Model.VariantID.make("high") }),
+          }),
+        ),
+      ).toEqual(new Session.AlreadyExistsError({ sessionID: id }))
       expect((yield* session.list()).data).toHaveLength(1)
     }),
   )
