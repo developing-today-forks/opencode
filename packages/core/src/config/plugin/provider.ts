@@ -102,7 +102,7 @@ export const Plugin = define({
           : overlayProvider(providers, providerID, item, undefined, {
               conflict,
               // An instance is available once its own account is connected, unless config supplies the key.
-              activate: !instances.has(Provider.ID.make(providerID)) || item.settings?.apiKey !== undefined,
+              activate: !conflict && (!instances.has(Provider.ID.make(providerID)) || item.settings?.apiKey !== undefined),
             })
         const definitions = new Map<string, { readonly inherit: boolean; readonly base?: Model.Info }>()
         for (const [id, config] of Object.entries(item.models ?? {})) {
@@ -283,6 +283,7 @@ function overlayProvider(
   const source = providers.get(canonical ?? current?.provider.canonical ?? providerID)
   const changed = canonical !== undefined && canonical !== current?.provider.canonical
   providers.update(providerID, (provider) => {
+    if (conflict) return
     if (changed && source && source.provider !== provider)
       Object.assign(provider, structuredClone(source.provider), {
         id: provider.id,
@@ -291,7 +292,6 @@ function overlayProvider(
     if (integrationID) provider.integrationID = integrationID
     if (options.activate ?? true) provider.activation = "enabled"
     if (canonical !== undefined) provider.canonical = canonical
-    if (conflict) return
     if (item.name) provider.name = item.name
     if (item.package !== undefined) provider.package = item.package
     if (item.compatibility !== undefined) provider.compatibility = { ...provider.compatibility, ...item.compatibility }
