@@ -1074,6 +1074,36 @@ describe("Session.create", () => {
     }),
   )
 
+  it.effect("treats a model without a variant as an exact retry of the recorded default variant", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const model = Model.Ref.make({ id: Model.ID.make("sonnet"), providerID: Provider.ID.anthropic })
+      const created = yield* session.create({ id, location, model })
+
+      // The recorded session materializes the omitted variant as "default";
+      // retrying with the variant omitted or spelled out stays idempotent.
+      expect(yield* session.create({ id, location, model })).toEqual(created)
+      expect(
+        yield* session.create({
+          id,
+          location,
+          model: Model.Ref.make({ ...model, variant: Model.VariantID.make("default") }),
+        }),
+      ).toEqual(created)
+      // A differing non-default variant is still a conflict.
+      expect(
+        yield* Effect.flip(
+          session.create({
+            id,
+            location,
+            model: Model.Ref.make({ ...model, variant: Model.VariantID.make("high") }),
+          }),
+        ),
+      ).toEqual(new Session.AlreadyExistsError({ sessionID: id }))
+      expect((yield* session.list()).data).toHaveLength(1)
+    }),
+  )
+
   it.effect("returns one recorded session to concurrent exact retries", () =>
     Effect.gen(function* () {
       const session = yield* Session.Service

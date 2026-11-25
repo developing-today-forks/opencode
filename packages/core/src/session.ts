@@ -445,7 +445,10 @@ const layer = Layer.effect(
             (input.model !== undefined &&
               (input.model.id !== recorded.model?.id ||
                 input.model.providerID !== recorded.model?.providerID ||
-                input.model.variant !== recorded.model?.variant)) ||
+                // fromRow materializes a stored model's missing variant as
+                // "default", so normalize both sides the same way: an omitted
+                // variant is an exact retry, not a conflict (#2796).
+                (input.model.variant ?? "default") !== (recorded.model?.variant ?? "default"))) ||
             (input.metadata !== undefined && !Equal.equals(input.metadata, recorded.metadata)) ||
             (input.permissions !== undefined && !Equal.equals(input.permissions, recorded.permissions)) ||
             (input.subagentPolicy !== undefined && !Equal.equals(input.subagentPolicy, recorded.subagentPolicy)) ||
