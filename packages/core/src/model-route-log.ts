@@ -1,6 +1,7 @@
 export * as ModelRouteLog from "./model-route-log.js"
 
-import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql } from "drizzle-orm"
+import { createHash } from "node:crypto"
+import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm"
 import { Effect, Layer, Queue } from "effect"
 import { AIError, isRetryable, type HttpContext } from "@opencode/ai/effect"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
@@ -1312,3 +1313,131 @@ export const offerUsage = (db: Database.Interface["db"], since: number, routeID?
       routeID === undefined ? sql`` : sql` and d.route_id = ${routeID}`
     } group by d.route_id, j.value`,
   )
+
+/** How the rollup read (#2795) buckets time. `none` folds the whole window into one bucket. */
+export type RollupBucket = "none" | "day" | "hour" | "hourOfDay" | "dayOfWeek"
+/** Dimensions the rollup read can group by. `credential` is served as an opaque key, never the id. */
+export type RollupDimension = "provider" | "model" | "variant" | "credential"
+export const ROLLUP_BUCKETS: readonly RollupBucket[] = ["none", "day", "hour", "hourOfDay", "dayOfWeek"]
+export const ROLLUP_DIMENSIONS: readonly RollupDimension[] = ["provider", "model", "variant", "credential"]
+
+export interface RollupFilter {
+  /** Window start, ms epoch, inclusive. */
+  readonly since: number
+  /** Window end, ms epoch, exclusive, so adjacent windows never count a row twice. */
+  readonly until?: number
+  readonly bucket?: RollupBucket
+  readonly group?: readonly RollupDimension[]
+  /** Which clock the time buckets use: the server's local time zone, or UTC (the default). */
+  readonly clock?: "local" | "utc"
+}
+
+export interface RollupRow {
+  /** `YYYY-MM-DD` for day, `YYYY-MM-DDTHH` for hour, 0-23 for hourOfDay, 0-6 (Sunday 0) for
+   * dayOfWeek, null for none. */
+  readonly bucket: string | number | null
+  readonly providerID?: string
+  readonly modelID?: string
+  readonly variant?: string | null
+  /** First 16 hex characters of the SHA-256 of the credential id: a reader that already holds
+   * the id can match its own rows, and the id itself never leaves the server. Null when the
+   * ledger row carries no credential. */
+  readonly credentialKey?: string | null
+  readonly attempts: number
+  readonly successes: number
+  readonly tokensInput: number
+  readonly tokensOutput: number
+  readonly tokensReasoning: number
+  readonly tokensCacheRead: number
+  readonly tokensCacheWrite: number
+  /** input + output + cache read + cache write, summed only over rows that record all four:
+   * the same arithmetic as the readers' `SUM(a + b + c + d)` it replaces. */
+  readonly tokensCombined: number
+  readonly costUsd: number
+  /** Rows that carry a cost, so a reader can tell "free" from "unpriced". */
+  readonly costRows: number
+  /** Rows that carry a credential id (the count, never the id). */
+  readonly credentialRows: number
+  readonly first: number | null
+  readonly last: number | null
+}
+
+/** The digest the rollup read serves in place of a credential id. Exported so a reader's tests
+ * and the server agree on one definition. */
+export const credentialKey = (credentialID: string) =>
+  createHash("sha256").update(credentialID).digest("hex").slice(0, 16)
+
+const rollupBucketSql = (bucket: RollupBucket, clock: "local" | "utc") => {
+  const ts =
+    clock === "local"
+      ? sql`${RouteAttemptTable.time_started} / 1000, 'unixepoch', 'localtime'`
+      : sql`${RouteAttemptTable.time_started} / 1000, 'unixepoch'`
+  switch (bucket) {
+    case "day":
+      return sql`strftime('%Y-%m-%d', ${ts})`
+    case "hour":
+      return sql`strftime('%Y-%m-%dT%H', ${ts})`
+    case "hourOfDay":
+      return sql`cast(strftime('%H', ${ts}) as integer)`
+    case "dayOfWeek":
+      return sql`cast(strftime('%w', ${ts}) as integer)`
+    case "none":
+      return sql`null`
+  }
+}
+
+const rollupDimensionSql: Record<RollupDimension, { column: SQL; alias: string }> = {
+  provider: { column: sql`${RouteAttemptTable.provider_id}`, alias: "providerID" },
+  model: { column: sql`${RouteAttemptTable.model_id}`, alias: "modelID" },
+  variant: { column: sql`${RouteAttemptTable.variant}`, alias: "variant" },
+  credential: { column: sql`${RouteAttemptTable.credential_id}`, alias: "credentialID" },
+}
+
+type RollupRawRow = Omit<RollupRow, "credentialKey"> & { readonly credentialID?: string | null }
+
+/** Day, hour or calendar-position buckets of attempt and token totals over a window, grouped by
+ * any of provider, model, variant and credential (#2795). This is the shape the PM-stack
+ * aggregator computed with its own SQL over opencode.db: it reads this instead. Credential ids
+ * are grouped on inside the query and replaced by `credentialKey` before anything is returned,
+ * so the #2746 narrowing (no credential ids on the read surface) holds. */
+export const attemptRollup = (db: Database.Interface["db"], filter: RollupFilter) => {
+  const bucket = rollupBucketSql(filter.bucket ?? "none", filter.clock ?? "utc")
+  const dims = ROLLUP_DIMENSIONS.filter((dim) => filter.group?.includes(dim)).map((dim) => rollupDimensionSql[dim])
+  const selectDims = dims.map((dim) => sql`, ${dim.column} as ${sql.raw(`"${dim.alias}"`)}`)
+  const groupBy = [sql`1`, ...dims.map((_, index) => sql.raw(String(index + 2)))]
+  return db
+    .all(
+      sql`select ${bucket} as "bucket"${sql.join(selectDims, sql``)},
+        count(*) as "attempts",
+        coalesce(sum(case when ${RouteAttemptTable.outcome} = 'success' then 1 else 0 end), 0) as "successes",
+        coalesce(sum(${RouteAttemptTable.tokens_input}), 0) as "tokensInput",
+        coalesce(sum(${RouteAttemptTable.tokens_output}), 0) as "tokensOutput",
+        coalesce(sum(${RouteAttemptTable.tokens_reasoning}), 0) as "tokensReasoning",
+        coalesce(sum(${RouteAttemptTable.tokens_cache_read}), 0) as "tokensCacheRead",
+        coalesce(sum(${RouteAttemptTable.tokens_cache_write}), 0) as "tokensCacheWrite",
+        coalesce(sum(${RouteAttemptTable.tokens_input} + ${RouteAttemptTable.tokens_output} + ${RouteAttemptTable.tokens_cache_read} + ${RouteAttemptTable.tokens_cache_write}), 0) as "tokensCombined",
+        coalesce(sum(${RouteAttemptTable.cost_usd}), 0) as "costUsd",
+        count(${RouteAttemptTable.cost_usd}) as "costRows",
+        count(${RouteAttemptTable.credential_id}) as "credentialRows",
+        min(${RouteAttemptTable.time_started}) as "first",
+        max(${RouteAttemptTable.time_started}) as "last"
+      from ${RouteAttemptTable}
+      where ${RouteAttemptTable.time_started} >= ${filter.since}${
+        filter.until === undefined ? sql`` : sql` and ${RouteAttemptTable.time_started} < ${filter.until}`
+      }
+      group by ${sql.join(groupBy, sql`, `)}
+      order by ${sql.join(groupBy, sql`, `)}`,
+    )
+    .pipe(
+      Effect.map((rows) =>
+        (rows as RollupRawRow[])
+          // An empty window still yields one aggregate row under bucket "none" with no group: drop it.
+          .filter((row) => row.attempts > 0)
+          .map(({ credentialID, ...row }): RollupRow =>
+            credentialID === undefined
+              ? row
+              : { ...row, credentialKey: credentialID === null ? null : credentialKey(credentialID) },
+          ),
+      ),
+    )
+}

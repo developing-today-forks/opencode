@@ -29,6 +29,24 @@ const StatsQuery = Schema.Struct({
   }),
 })
 
+const RollupQuery = Schema.Struct({
+  since: Schema.NumberFromString.pipe(Schema.optional).annotate({
+    description: "Window start (ms epoch), inclusive. Defaults to 24 hours ago.",
+  }),
+  until: Schema.NumberFromString.pipe(Schema.optional).annotate({
+    description: "Window end (ms epoch), exclusive, so adjacent windows never count a row twice. Defaults to no end.",
+  }),
+  bucket: Schema.Literals(["none", "day", "hour", "hourOfDay", "dayOfWeek"]).pipe(Schema.optional).annotate({
+    description: "Time bucket: none (the whole window), day, hour, hourOfDay (0-23) or dayOfWeek (0-6, Sunday 0). Defaults to none.",
+  }),
+  group: Schema.String.pipe(Schema.optional).annotate({
+    description: "Comma-separated dimensions to group by: provider, model, variant, credential. Credential is served as an opaque key, never the id.",
+  }),
+  clock: Schema.Literals(["local", "utc"]).pipe(Schema.optional).annotate({
+    description: "Clock the time buckets use: the server's local time zone or UTC. Defaults to utc.",
+  }),
+})
+
 const DecisionQuery = Schema.Struct({
   since: Schema.NumberFromString.pipe(Schema.optional).annotate({
     description: "Window start (ms epoch). Defaults to 24 hours ago.",
@@ -104,6 +122,20 @@ export const RouteGroup = HttpApiGroup.make("server.route")
         summary: "Route attempt aggregates",
         description:
           "The aggregate view over the route_attempt ledger for a time window (#2497): per provider/model attempt and token totals, the error breakdown, and the window's coverage (distinct providers, models, sessions, and routes). Read-only; the same shapes the current direct database readers compute.",
+      }),
+    ),
+  )
+  .add(
+    HttpApiEndpoint.get("route.attempt.rollup", "/api/route/attempts/rollup", {
+      query: RollupQuery,
+      success: Schema.Struct({ data: Schema.Array(RouteAttempt.RollupRow) }),
+      error: InvalidRequestError,
+    }).annotateMerge(
+      OpenApi.annotations({
+        identifier: "route.attempt.rollup",
+        summary: "Route attempt rollup",
+        description:
+          "Attempt and token totals over the route_attempt ledger in time buckets (day, hour, hour of day, day of week, or the whole window), grouped by any of provider, model, variant and credential (#2795). The PM-stack aggregator reads this instead of opening opencode.db. Credentials are served only as an opaque key; the id never leaves the server.",
       }),
     ),
   )
