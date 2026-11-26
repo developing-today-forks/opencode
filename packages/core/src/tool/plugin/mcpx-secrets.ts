@@ -26,6 +26,32 @@ export class DaemonHTTPError extends Error {
   }
 }
 
+/**
+ * The daemon answered with a 2xx status but a body that is not JSON (#2808):
+ * something answered at the endpoint, but it did not speak the daemon
+ * protocol — a wrong MCPX_DAEMON_ENDPOINT, a stale socket claimed by another
+ * process, or a proxy error page. Distinct from DaemonHTTPError (daemon
+ * refused) and DaemonUnreachableError (nothing answered): the daemon path
+ * must not fall back to the CLI on an answer it cannot interpret, and the
+ * message names the path and status so the misbehaving endpoint is visible
+ * instead of a bare JSON parse message. The body preview is bounded.
+ */
+export class DaemonMalformedResponseError extends Error {
+  readonly status: number
+  readonly path: string
+  readonly body: string
+
+  constructor(path: string, status: number, text: string) {
+    const preview = text.slice(0, 256)
+    super(
+      `mcpx daemon returned HTTP ${status} for ${path} with a non-JSON body (the daemon endpoint may be misconfigured): ${preview}${text.length > preview.length ? "… [truncated]" : ""}`,
+    )
+    this.status = status
+    this.path = path
+    this.body = preview
+  }
+}
+
 /** No daemon answered, so nothing was sent. Only this lets mcpx_exec fall back to the CLI. */
 export class DaemonUnreachableError extends Error {}
 
