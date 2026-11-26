@@ -179,6 +179,7 @@ const Group = HttpApiGroup.make("mock")
     HttpApiEndpoint.post("credentialCreate", "/api/credential", {
       payload: JsonPayload,
       success: Json,
+      error: MockInternal.pipe(HttpApiSchema.status(500)),
     }),
   )
   .add(
