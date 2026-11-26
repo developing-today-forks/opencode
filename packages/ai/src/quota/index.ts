@@ -33,6 +33,7 @@ export {
   parseCodingPlanWindows,
   normalizeOpenDesignCredential,
   fetchOpenDesignSessionQuota,
+  SESSION_EXPIRED_ERROR as OPENDESIGN_SESSION_EXPIRED_ERROR,
   type OpenDesignCredential,
 } from "./providers/opendesign.js"
 export { parseGroqResetSeconds, NO_QUOTA_SURFACE } from "./providers/groq.js"

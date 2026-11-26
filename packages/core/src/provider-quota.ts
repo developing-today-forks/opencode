@@ -6,6 +6,7 @@ import { SharedCache } from "./shared-cache.js"
 import {
   fetchOpenDesignSessionQuota,
   normalizeOpenDesignCredential,
+  OPENDESIGN_SESSION_EXPIRED_ERROR,
   type QuotaContext,
   type QuotaResult,
 } from "@opencode/ai/quota"
@@ -30,6 +31,19 @@ const emptyContext = (fetchImpl?: FetchImpl): QuotaContext => ({
  */
 export const sessionCookieQuotaTtlMillis = 30_000
 
+/**
+ * How long a failed answer is reused when the failure may pass on its own (an upstream 5xx, a timeout, a
+ * dropped connection, an unreadable body), so the quota recovers soon after upstream does (opencode#2869).
+ * An expired session keeps the full TTL: it stays failed until the cookie changes, and a changed cookie is a
+ * new key anyway, so retrying it sooner would only call upstream again for the same refusal.
+ */
+export const sessionCookieQuotaRetryMillis = 5_000
+
+const reusedFor = (result: QuotaResult) =>
+  result.ok || result.error === OPENDESIGN_SESSION_EXPIRED_ERROR
+    ? sessionCookieQuotaTtlMillis
+    : sessionCookieQuotaRetryMillis
+
 const answers = new Map<string, { readonly expiresAt: number; readonly result: Promise<QuotaResult> }>()
 
 const shared = (key: string, now: number, fetchQuota: () => Promise<QuotaResult>) => {
@@ -38,10 +52,17 @@ const shared = (key: string, now: number, fetchQuota: () => Promise<QuotaResult>
   if (cached) return cached.result
   const result = fetchQuota()
   answers.set(key, { expiresAt: now + sessionCookieQuotaTtlMillis, result })
-  // A rejected fetch is not an answer: drop it so the next caller retries.
-  result.catch(() => {
-    if (answers.get(key)?.result === result) answers.delete(key)
-  })
+  result.then(
+    // Callers in flight shared the fetch; once it settles, a failure that may pass is kept only briefly.
+    (answer) => {
+      const entry = answers.get(key)
+      if (entry?.result === result) answers.set(key, { expiresAt: now + reusedFor(answer), result })
+    },
+    // A rejected fetch is not an answer: drop it so the next caller retries.
+    () => {
+      if (answers.get(key)?.result === result) answers.delete(key)
+    },
+  )
   return result
 }
 
