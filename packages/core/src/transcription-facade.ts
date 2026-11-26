@@ -635,8 +635,18 @@ export const transcriptionModelEntries = (enabledProviders?: ReadonlySet<string>
 
 export type Error = FacadeError
 
+export interface TranscribeOptions {
+  /** Test seam (#2842): overrides the 120-second provider timeout
+   * (REQUEST_TIMEOUT) so the timeout classification can be exercised
+   * without waiting two minutes. Production callers omit it. */
+  readonly requestTimeout?: string
+}
+
 export interface Interface {
-  readonly transcribe: (input: ParsedTranscriptionRequest) => Effect.Effect<TranscriptionResponse, Error>
+  readonly transcribe: (
+    input: ParsedTranscriptionRequest,
+    options?: TranscribeOptions,
+  ) => Effect.Effect<TranscriptionResponse, Error>
   /**
    * Phase-2 streaming (§7/§8.5): the outer effect performs the
    * setup failures a batch call reports before any byte (missing
@@ -705,7 +715,10 @@ const usageTokens = (
 /** Maps a provider failure to the §2.4 envelope shape: quota and
  * rate-limit failures keep the provider's message (reset hint
  * included) at 429; capability failures the request schema promised
- * to fail typed land at 400; everything else is an upstream 502. */
+ * to fail typed land at 400; the façade's own provider timeout
+ * (#2842) lands at 504 — it is an upstream stall, not a capability
+ * failure, and must stay retryable; everything else is an
+ * upstream 502. */
 const classifyFailure = (failure: unknown): FacadeErrorShape => {
   if (failure instanceof AIError) {
     const reason = failure.reason as { _tag?: string; message?: string; operation?: string }
@@ -713,6 +726,11 @@ const classifyFailure = (failure: unknown): FacadeErrorShape => {
     if (reason instanceof QuotaExceededError) return shape(429, "quota_exceeded", message)
     if (reason instanceof RateLimitError) return shape(429, "rate_limit", message)
     if (reason instanceof UnsupportedOperationError) {
+      // #2842: media.timeout is the façade's own timeoutOrElse
+      // construction (an UnsupportedOperationError in shape only);
+      // it must be handled before the capability catch-all below,
+      // never reported as a 400 unsupported_operation.
+      if (reason.operation === "media.timeout") return shape(504, "timeout", message)
       if (reason.operation === "media.timestamps") return shape(400, "timestamps_not_supported", message)
       if (reason.operation === "media.diarize") return shape(400, "diarize_not_supported", message)
       if (reason.operation === "media.stream") return shape(400, "stream_not_supported", message)
@@ -729,7 +747,7 @@ export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const client = yield* TranscriptionClient.Service
-    const transcribe: Interface["transcribe"] = (input) =>
+    const transcribe: Interface["transcribe"] = (input, options) =>
       Effect.gen(function* () {
         const { registration } = input
         const startedAt = Date.now()
@@ -778,7 +796,7 @@ export const layer = Layer.effect(
             )
             .pipe(
               Effect.timeoutOrElse({
-                duration: REQUEST_TIMEOUT,
+                duration: options?.requestTimeout ?? REQUEST_TIMEOUT,
                 orElse: () =>
                   Effect.fail(
                     new AIError({
