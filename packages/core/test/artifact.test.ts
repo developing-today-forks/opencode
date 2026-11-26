@@ -1,6 +1,7 @@
+import fs from "node:fs/promises"
 import path from "node:path"
 import { describe, expect } from "bun:test"
-import { Effect, Layer, Stream } from "effect"
+import { Effect, Exit, Layer, Stream } from "effect"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Artifact } from "@opencode/core/artifact"
 import { Config } from "@opencode/core/config"
@@ -210,6 +211,31 @@ describe("experimental.artifacts service and tools", () => {
           })
           .pipe(Effect.flip)
         expect(traversal).toBeInstanceOf(Artifact.InvalidError)
+      }).pipe(Effect.provide(buildLayer(true, dir)))
+    }),
+  )
+
+  // Windows does not enforce POSIX directory modes, and root bypasses them.
+  const liveOrSkip = process.platform === "win32" || process.getuid?.() === 0 ? it.live.skip : it.live
+  liveOrSkip("local read fails instead of returning a partial file map when a nested directory cannot be enumerated", () =>
+    Effect.gen(function* () {
+      const dir = (yield* tmpdirScoped("opencode-artifact-partial-")).path
+      yield* Effect.gen(function* () {
+        const artifacts = yield* Artifact.Service
+        const created = yield* artifacts.create({
+          title: "Nested report",
+          files: { "index.html": "<h1>hi</h1>", "assets/app.js": "console.log('v1')" },
+          provider: Artifact.LocalProviderID,
+        })
+        const before = yield* artifacts.get(created.id)
+        expect(Object.keys(before.files).toSorted()).toEqual(["assets/app.js", "index.html"])
+
+        const nested = path.join(dir, ".data", "artifacts", created.id, "assets")
+        yield* Effect.promise(() => fs.chmod(nested, 0o000))
+        const read = yield* artifacts.get(created.id).pipe(Effect.flip, Effect.exit)
+        yield* Effect.promise(() => fs.chmod(nested, 0o755))
+        expect(Exit.isSuccess(read)).toBe(true)
+        if (Exit.isSuccess(read)) expect(read.value).toBeInstanceOf(Artifact.ProviderError)
       }).pipe(Effect.provide(buildLayer(true, dir)))
     }),
   )

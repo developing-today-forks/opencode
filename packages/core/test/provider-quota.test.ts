@@ -45,19 +45,19 @@ const captureLogs = <A, E, R>(effect: Effect.Effect<A, E, R>) => {
   )
 }
 
-const storeCookie = () =>
+const storeCookie = (cookie = FIXTURE_COOKIE, workspaceID = FIXTURE_WORKSPACE, activate?: boolean) =>
   Effect.gen(function* () {
     const credentials = yield* Credential.Service
-    yield* credentials.create({
+    return yield* credentials.create({
       integrationID: Integration.ID.make("opendesign"),
       label: "Open Design",
-      value: Credential.SessionCookie.make({
-        type: "session-cookie",
-        cookie: FIXTURE_COOKIE,
-        workspaceID: FIXTURE_WORKSPACE,
-      }),
+      value: Credential.SessionCookie.make({ type: "session-cookie", cookie, workspaceID }),
+      ...(activate === undefined ? {} : { activate }),
     })
   })
+
+/** The session cookies the stub upstream was called with, in order. */
+const cookiesSeen = (seen: ReadonlyArray<{ cookie: string | null }>) => seen.map((request) => request.cookie)
 
 describe("ProviderQuota.sessionCookie", () => {
   it.effect(
@@ -106,6 +106,64 @@ describe("ProviderQuota.sessionCookie", () => {
       expect(yield* ProviderQuota.sessionCookie("opendesign", { fetchImpl: stub.fetchImpl })).toBeUndefined()
       expect(yield* ProviderQuota.sessionCookie("openai", { fetchImpl: stub.fetchImpl })).toBeUndefined()
       expect(stub.seen).toEqual([])
+    }),
+  )
+
+  it.effect("answers from the active cookie, not a newer deselected one (opencode#2804)", () =>
+    Effect.gen(function* () {
+      yield* storeCookie("active-older-cookie", "wrk_active")
+      // Stored later, but not selected.
+      yield* storeCookie("inactive-newer-cookie", "wrk_inactive", false)
+      const stub = upstream({ status: 200, body: usagePayload })
+      expect(yield* ProviderQuota.sessionCookie("opendesign", { fetchImpl: stub.fetchImpl })).toBeDefined()
+      expect(stub.seen.length).toBeGreaterThan(0)
+      expect(cookiesSeen(stub.seen).every((cookie) => cookie === "better-auth.session_token=active-older-cookie")).toBe(
+        true,
+      )
+    }),
+  )
+
+  it.effect("resolves undefined when the active credential is not a session cookie (opencode#2804)", () =>
+    Effect.gen(function* () {
+      yield* storeCookie("deselected-cookie", "wrk_deselected")
+      const credentials = yield* Credential.Service
+      yield* credentials.create({
+        integrationID: Integration.ID.make("opendesign"),
+        label: "API key",
+        value: Credential.Key.make({ type: "key", key: "fixture-api-key" }),
+      })
+      const stub = upstream({ status: 200, body: usagePayload })
+      expect(yield* ProviderQuota.sessionCookie("opendesign", { fetchImpl: stub.fetchImpl })).toBeUndefined()
+      expect(stub.seen).toEqual([])
+    }),
+  )
+
+  it.effect("reuses one upstream fetch for repeated and concurrent calls (opencode#2804)", () =>
+    Effect.gen(function* () {
+      yield* storeCookie("shared-fetch-cookie", "wrk_shared")
+      const stub = upstream({ status: 200, body: usagePayload })
+      const call = ProviderQuota.sessionCookie("opendesign", { fetchImpl: stub.fetchImpl })
+      const concurrent = yield* Effect.all([call, call, call], { concurrency: "unbounded" })
+      const again = yield* call
+      // One session check plus one usage read, however many callers asked.
+      expect(stub.seen).toHaveLength(2)
+      for (const value of [...concurrent, again]) expect(value).toEqual(concurrent[0])
+    }),
+  )
+
+  it.effect("fetches fresh after the selection changes (opencode#2804)", () =>
+    Effect.gen(function* () {
+      const first = yield* storeCookie("reselect-first-cookie", "wrk_first")
+      yield* storeCookie("reselect-second-cookie", "wrk_second")
+      const stub = upstream({ status: 200, body: usagePayload })
+      const call = ProviderQuota.sessionCookie("opendesign", { fetchImpl: stub.fetchImpl })
+      yield* call
+      const credentials = yield* Credential.Service
+      yield* credentials.activate(first.id)
+      yield* call
+      expect(cookiesSeen(stub.seen)).toContain("better-auth.session_token=reselect-second-cookie")
+      expect(cookiesSeen(stub.seen)).toContain("better-auth.session_token=reselect-first-cookie")
+      expect(stub.seen).toHaveLength(4)
     }),
   )
 })

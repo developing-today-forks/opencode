@@ -519,6 +519,7 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
       const filePath = path.join(paths.state, "session.json")
       const state = {
         pending: false,
+        unreadable: undefined as string | undefined,
       }
 
       function save() {
@@ -527,6 +528,8 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
           return
         }
         state.pending = false
+        if (state.unreadable)
+          throw new Error(`Refusing to overwrite unreadable session pin store ${filePath}: ${state.unreadable}`)
         void writeJsonAtomic(filePath, {
           pinned: sessionStore.pinned,
         })
@@ -542,10 +545,22 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
               pinned.filter((item): item is string => typeof item === "string"),
             )
         })
-        .catch(() => {})
+        .catch((error: unknown) => {
+          if ((error as NodeJS.ErrnoException)?.code === "ENOENT") return
+          state.unreadable = error instanceof Error ? error.message : String(error)
+        })
         .finally(() => {
           setSessionStore("ready", true)
-          if (state.pending) save()
+          if (!state.pending) return
+          // #2856: a pin change made before the store loaded is flushed here,
+          // after its caller returned, so a refusal to overwrite an unreadable
+          // store would otherwise surface as an unhandled rejection. Report it
+          // on the toast surface; save() still refuses before any write.
+          try {
+            save()
+          } catch (error) {
+            toast.error(error)
+          }
         })
 
       const slots = createMemo(() => {

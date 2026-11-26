@@ -676,6 +676,33 @@ describe("MCP OAuth", () => {
       }
     })
 
+    test("names the origin when the metadata body is not JSON", async () => {
+      const url = "https://issuer.example.com/.well-known/oauth-authorization-server"
+      const error = asError(
+        await McpOAuth.configuredDiscovery({
+          config: configured(url),
+          fetchFn: async () =>
+            new Response("<html><body>captive portal</body></html>", {
+              status: 200,
+              headers: { "content-type": "text/html" },
+            }),
+        }).catch((error: unknown) => error),
+      )
+      expect(error.message).toContain("Could not parse OAuth authorization server metadata from https://issuer.example.com")
+      expect(error.message).not.toMatch(/^Unexpected token/)
+    })
+
+    test("names the origin when the metadata body has the wrong shape", async () => {
+      const url = "https://issuer.example.com/.well-known/oauth-authorization-server"
+      const error = asError(
+        await McpOAuth.configuredDiscovery({
+          config: configured(url),
+          fetchFn: async () => Response.json({ not: "metadata" }),
+        }).catch((error: unknown) => error),
+      )
+      expect(error.message).toContain("Could not parse OAuth authorization server metadata from https://issuer.example.com")
+    })
+
     test("fails instead of hanging on a silent endpoint", async () => {
       const server = Bun.serve({ port: 0, fetch: () => new Promise(() => {}) })
       try {

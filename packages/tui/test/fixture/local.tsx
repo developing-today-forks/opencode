@@ -11,7 +11,7 @@ import { LocationProvider, useLocation } from "../../src/context/location"
 import { PermissionProvider } from "../../src/context/permission"
 import { RouteProvider, useRoute } from "../../src/context/route"
 import { ThemeProvider } from "../../src/context/theme"
-import { ToastProvider } from "../../src/ui/toast"
+import { ToastProvider, useToast } from "../../src/ui/toast"
 import { DialogProvider, useDialog } from "../../src/ui/dialog"
 import type { ModelPreference } from "../../src/model-preference"
 import { tmpdir } from "./fixture"
@@ -25,12 +25,17 @@ export async function renderLocal(
     agents?: AgentInfo[]
     sessions?: SessionInfo[]
     preferences?: Partial<ModelPreference>
+    sessionJson?: string
     args?: Args
     fetch?: FetchHandler
+    /** Runs once, synchronously, when the probe first mounts: before the
+     * session pin store has finished loading. */
+    onMount?: (local: ReturnType<typeof useLocal>) => void
   } = {},
 ) {
   const temporary = await tmpdir()
   await Bun.write(path.join(temporary.path, "model.json"), JSON.stringify(input.preferences ?? {}))
+  if (input.sessionJson !== undefined) await Bun.write(path.join(temporary.path, "session.json"), input.sessionJson)
   const events = createEventStream()
   const calls = createFetch(async (url, request) => {
     const response = await input.fetch?.(url, request)
@@ -46,6 +51,7 @@ export async function renderLocal(
   let data!: ReturnType<typeof useData>
   let location!: ReturnType<typeof useLocation>
   let dialog!: ReturnType<typeof useDialog>
+  let toast!: ReturnType<typeof useToast>
 
   function Probe() {
     local = useLocal()
@@ -53,6 +59,8 @@ export async function renderLocal(
     data = useData()
     location = useLocation()
     dialog = useDialog()
+    toast = useToast()
+    input.onMount?.(local)
     return <box />
   }
 
@@ -97,6 +105,7 @@ export async function renderLocal(
     data,
     location,
     dialog,
+    toast,
     events,
     state: temporary.path,
     async [Symbol.asyncDispose]() {

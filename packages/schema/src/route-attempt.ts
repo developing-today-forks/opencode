@@ -38,12 +38,14 @@ export const Attempt = Schema.Struct({
 export type Attempt = typeof Attempt.Type
 
 /** Per provider/model totals over a window: attempt counts in the ledger's own failure semantics
- * (content-policy rejections counted separately, never as failures, #1084), token totals, cost,
- * and the distinct-session count that is the target's coverage of the window. */
+ * (content-policy rejections counted separately, never as failures, #1084), latency and token
+ * averages, token totals, cost, and the distinct-session count that is the target's coverage. */
 export const TargetTotal = Schema.Struct({
   providerID: Schema.String,
   modelID: Schema.String,
   attempts: Schema.Number,
+  avgFirstTokenMs: Schema.NullOr(Schema.Number),
+  avgTokensPerSecond: Schema.NullOr(Schema.Number),
   successes: Schema.Number,
   failures: Schema.Number,
   policyRejections: Schema.Number,
@@ -61,8 +63,8 @@ export const TargetTotal = Schema.Struct({
 }).annotate({ identifier: "RouteAttempt.TargetTotal" })
 export type TargetTotal = typeof TargetTotal.Type
 
-/** Failures grouped by exact tag, code and HTTP status, with the latest message of each group —
- * the same shape core's errorBreakdown computes for the route_stats tool. */
+/** Failures grouped by exact tag, code and HTTP status, with a truncated latest error message.
+ * The separate raw provider response body is never served. */
 export const ErrorBreakdown = Schema.Struct({
   providerID: Schema.String,
   modelID: Schema.String,
@@ -74,6 +76,14 @@ export const ErrorBreakdown = Schema.Struct({
   lastMessage: Schema.NullOr(Schema.String),
 }).annotate({ identifier: "RouteAttempt.ErrorBreakdown" })
 export type ErrorBreakdown = typeof ErrorBreakdown.Type
+
+export const HedgeAccuracy = Schema.Struct({
+  providerID: Schema.String,
+  modelID: Schema.String,
+  hedges: Schema.Number,
+  wins: Schema.Number,
+}).annotate({ identifier: "RouteAttempt.HedgeAccuracy" })
+export type HedgeAccuracy = typeof HedgeAccuracy.Type
 
 /** What part of the ledger a window covers: totals and distinct dimensions, so a reader can tell
  * a complete window from a partial one without opening the database file. */
@@ -104,9 +114,11 @@ export const Decision = Schema.Struct({
 }).annotate({ identifier: "RouteAttempt.Decision" })
 export type Decision = typeof Decision.Type
 
-/** The aggregate view over a window: per-target totals, the error breakdown, and coverage. */
+/** The aggregate view over a window: per-target totals and latency, hedge outcomes, redacted
+ * error groups, and coverage. */
 export const Stats = Schema.Struct({
   targets: Schema.Array(TargetTotal),
+  hedges: Schema.Array(HedgeAccuracy),
   errors: Schema.Array(ErrorBreakdown),
   coverage: Coverage,
 }).annotate({ identifier: "RouteAttempt.Stats" })

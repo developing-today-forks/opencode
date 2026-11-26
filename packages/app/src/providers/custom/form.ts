@@ -78,6 +78,9 @@ type ValidateArgs = {
   t: Translator
   disabledProviders: string[]
   existingProviderIDs: Set<string>
+  /** The provider being edited, if any: its own ID is exempt from the
+   * duplicate-ID check, since saving an edit patches the same provider. */
+  editingProviderID?: string
 }
 
 export function validateCustomProvider(input: ValidateArgs) {
@@ -107,7 +110,7 @@ export function validateCustomProvider(input: ValidateArgs) {
 
   const existsError = idError
     ? undefined
-    : input.existingProviderIDs.has(providerID) && !disabled
+    : input.existingProviderIDs.has(providerID) && providerID !== input.editingProviderID && !disabled
       ? input.t("provider.custom.error.providerID.exists")
       : undefined
 
@@ -213,3 +216,49 @@ export const emptyCustomProviderForm = (): FormState => ({
   headers: [headerRow()],
   err: {},
 })
+
+/** The subset of a persisted provider config entry the edit form can
+ * prefill, as read back from the config documents (`config.get`). Loosely
+ * typed on purpose: the config schema carries settings as JSON values, so
+ * the base URL is only taken when it really is a string. */
+export type CustomProviderConfigSource = {
+  name: string
+  env?: readonly string[]
+  settings?: { baseURL?: unknown }
+  headers?: Record<string, string>
+  models?: Record<string, { name?: string }>
+}
+
+/**
+ * The edit form for a saved custom provider, prefilled from its persisted
+ * config entry. The API key itself is never in config: an `{env:NAME}`
+ * reference is restored from the entry's `env` list, and a plain key stays
+ * in the credential store — the field starts empty, which the save path
+ * treats as "keep the stored key" (a new key replaces it, and the dialog's
+ * clear action removes it).
+ */
+export const customProviderFormFromConfig = (providerID: string, config: CustomProviderConfigSource): FormState => {
+  const models = Object.entries(config.models ?? {}).map(([id, model]) => ({
+    row: nextRow(),
+    id,
+    name: model.name ?? "",
+    err: {},
+  }))
+
+  const headers = Object.entries(config.headers ?? {}).map(([key, value]) => ({
+    row: nextRow(),
+    key,
+    value,
+    err: {},
+  }))
+
+  return {
+    providerID,
+    name: config.name,
+    baseURL: typeof config.settings?.baseURL === "string" ? config.settings.baseURL : "",
+    apiKey: config.env?.[0] ? `{env:${config.env[0]}}` : "",
+    models: models.length ? models : [modelRow()],
+    headers: headers.length ? headers : [headerRow()],
+    err: {},
+  }
+}

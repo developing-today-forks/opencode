@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { mkdtempSync, rmSync, truncateSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, renameSync, rmSync, statSync, symlinkSync, truncateSync, writeFileSync } from "node:fs"
 import os from "node:os"
 import { Message, Media } from "@opencode/ai/effect"
 import { Model } from "@opencode/core/model"
@@ -933,8 +933,15 @@ Earlier work
         messageID: id("tool-uri-call"),
         id: Tool.CallID.make("call_tool_uri"),
       }
-      const authorizeRead: FileAccess.Interface["authorizeRead"] = (path) =>
-        Effect.succeed({ absolute: AbsolutePath.make(path), resource: path } as FileAccess.Target)
+      // Faithful to the real FileAccess.authorizeRead: an existing file's target carries its identity.
+      const authorizeRead: FileAccess.Interface["authorizeRead"] = (path) => {
+        const info = statSync(path)
+        return Effect.succeed({
+          absolute: AbsolutePath.make(path),
+          resource: path,
+          fileIdentity: { dev: info.dev, ino: info.ino },
+        } as FileAccess.Target)
+      }
       const snapshot = await Effect.runPromise(
         materializeToolResult(
           [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain", name: "hello.txt" }],
@@ -1037,6 +1044,133 @@ Earlier work
         name: "read",
         result: { type: "text", value: expect.stringContaining("(exceeds 20971520 byte limit)") },
       })
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("does not snapshot a tool-result file swapped after authorization", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "tool-result-swap-"))
+    const context: FileAccess.Invocation = {
+      sessionID: SessionSchema.ID.make("ses_tool_swap"),
+      agent: build,
+      messageID: id("tool-swap-call"),
+      id: Tool.CallID.make("call_tool_swap"),
+    }
+    const outsideBase64 = Buffer.from("outside bytes").toString("base64")
+    try {
+      // Rename-over: the authorized file is replaced by a different file at the same path between
+      // authorization and the snapshot read. The snapshot must refuse, never serve the outside bytes.
+      const filePath = path.join(directory, "hello.txt")
+      writeFileSync(filePath, "authorized bytes")
+      const replacementPath = path.join(directory, "replacement.txt")
+      writeFileSync(replacementPath, "outside bytes")
+      const authorizeRenamed: FileAccess.Interface["authorizeRead"] = (file) => {
+        const info = statSync(file)
+        renameSync(replacementPath, file)
+        return Effect.succeed({
+          absolute: AbsolutePath.make(file),
+          resource: file,
+          fileIdentity: { dev: info.dev, ino: info.ino },
+        } as FileAccess.Target)
+      }
+      const renamed = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain", name: "hello.txt" }],
+          context,
+          authorizeRenamed,
+        ),
+      )
+      expect(renamed[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("file was replaced after authorization"),
+      })
+      expect(JSON.stringify(renamed)).not.toContain(outsideBase64)
+
+      // Parent-directory symlink swap: a parent component of the authorized path is replaced by a
+      // symlink to an outside directory holding a same-named file with outside bytes.
+      const parent = path.join(directory, "parent")
+      mkdirSync(parent)
+      const nestedPath = path.join(parent, "nested.txt")
+      writeFileSync(nestedPath, "authorized bytes")
+      const outside = path.join(directory, "outside")
+      mkdirSync(outside)
+      writeFileSync(path.join(outside, "nested.txt"), "outside bytes")
+      const authorizeParentSwapped: FileAccess.Interface["authorizeRead"] = (file) => {
+        const info = statSync(file)
+        renameSync(parent, path.join(directory, "parent-moved"))
+        symlinkSync(outside, parent, "dir")
+        return Effect.succeed({
+          absolute: AbsolutePath.make(file),
+          resource: file,
+          fileIdentity: { dev: info.dev, ino: info.ino },
+        } as FileAccess.Target)
+      }
+      const swapped = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(nestedPath).href, mime: "text/plain", name: "nested.txt" }],
+          context,
+          authorizeParentSwapped,
+        ),
+      )
+      expect(swapped[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("file was replaced after authorization"),
+      })
+      expect(JSON.stringify(swapped)).not.toContain(outsideBase64)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("does not snapshot a tool-result file whose authorization carries no identity", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "tool-result-unbound-"))
+    const context: FileAccess.Invocation = {
+      sessionID: SessionSchema.ID.make("ses_tool_unbound"),
+      agent: build,
+      messageID: id("tool-unbound-call"),
+      id: Tool.CallID.make("call_tool_unbound"),
+    }
+    try {
+      // Missing identity: the target names an existing file but carries no authorized identity, so
+      // the read cannot be bound to the checked object and must refuse rather than serve its bytes.
+      const filePath = path.join(directory, "hello.txt")
+      writeFileSync(filePath, "authorized bytes")
+      const authorizeIdentityless: FileAccess.Interface["authorizeRead"] = (file) =>
+        Effect.succeed({ absolute: AbsolutePath.make(file), resource: file } as FileAccess.Target)
+      const unbound = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain", name: "hello.txt" }],
+          context,
+          authorizeIdentityless,
+        ),
+      )
+      expect(unbound[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("file was replaced after authorization"),
+      })
+      expect(JSON.stringify(unbound)).not.toContain(Buffer.from("authorized bytes").toString("base64"))
+
+      // Create-after-authorize: the file did not exist when authorization ran (an identity-less
+      // target is all authorization can return for it) and is created before the snapshot read.
+      // The created bytes were never authorized and must not be snapshotted.
+      const createdPath = path.join(directory, "created.txt")
+      const authorizeCreated: FileAccess.Interface["authorizeRead"] = (file) => {
+        writeFileSync(file, "outside bytes")
+        return Effect.succeed({ absolute: AbsolutePath.make(file), resource: file } as FileAccess.Target)
+      }
+      const created = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(createdPath).href, mime: "text/plain", name: "created.txt" }],
+          context,
+          authorizeCreated,
+        ),
+      )
+      expect(created[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("file was replaced after authorization"),
+      })
+      expect(JSON.stringify(created)).not.toContain(Buffer.from("outside bytes").toString("base64"))
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }

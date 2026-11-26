@@ -13,6 +13,10 @@ import { useIntegrations } from "@/providers/catalog/integrations"
 import { createEffect, createMemo, createSignal, on, untrack, type Component, For, type JSX, Show } from "solid-js"
 import { useLanguage } from "@/runtime/i18n/language"
 import { useServerSDK } from "@/runtime/server/client"
+import { useData } from "@/runtime/server/current"
+import { DialogCustomProvider } from "@/providers/custom/dialog"
+import { CUSTOM_PROVIDER_PACKAGE, type CustomProviderConfig } from "@/providers/custom/form"
+import { removeCustomProvider } from "@/providers/custom/remove"
 import { formatServerError } from "@/runtime/server/errors"
 import { CONSOLE_INTEGRATION } from "@/providers/connect/dialog-machine"
 import { DialogConnectProvider, useProviderConnectController } from "@/providers/connect/dialog"
@@ -56,6 +60,7 @@ export const SettingsProviders: Component<{
   const dialog = useDialog()
   const language = useLanguage()
   const serverSdk = useServerSDK()
+  const data = useData()
   const providers = useProviders(() => props.directory)
   const integrations = useIntegrations(() => props.directory)
   const providerConnect = useProviderConnectController()
@@ -296,6 +301,121 @@ export const SettingsProviders: Component<{
 
   const canManageAccounts = (item: ProviderItem) => providerAccounts(integration(item)).length > 0
 
+  // Saved custom providers (created through the V2 custom-provider flow)
+  // and their persisted config entries, merged from the config documents in
+  // priority order (later documents win). Edit and remove are offered for
+  // exactly these providers: their definition lives in config, so both
+  // round-trip through the existing config and credential APIs. A provider
+  // whose entry came from a hand-written config with the same package is
+  // indistinguishable here and gets the same actions, which is the intended
+  // behavior — it is the same lifecycle.
+  const [customConfig, setCustomConfig] = createSignal<ReadonlyMap<string, CustomProviderConfig>>(new Map())
+
+  createEffect(() => {
+    if (serverSdk.connection.status() !== "connected") return
+
+    void serverSdk.api.config
+      .get({ location: props.directory ? { directory: props.directory } : undefined })
+      .then((entries) => {
+        const merged = new Map<string, CustomProviderConfig>()
+
+        for (const entry of entries) {
+          if (entry.type !== "document") continue
+
+          for (const [id, provider] of Object.entries(entry.info.providers ?? {})) {
+            if (provider.package !== CUSTOM_PROVIDER_PACKAGE || !provider.name) continue
+
+            merged.set(id, {
+              name: provider.name,
+              package: CUSTOM_PROVIDER_PACKAGE,
+              ...(provider.env?.length ? { env: [...provider.env] } : {}),
+              settings: {
+                baseURL: typeof provider.settings?.baseURL === "string" ? provider.settings.baseURL : "",
+              },
+              ...(provider.headers && Object.keys(provider.headers).length ? { headers: { ...provider.headers } } : {}),
+              models: Object.fromEntries(
+                Object.entries(provider.models ?? {}).map(([modelID, model]) => [modelID, { name: model.name ?? modelID }]),
+              ),
+            })
+          }
+        }
+
+        setCustomConfig(merged)
+      })
+      .catch(() => undefined)
+  })
+
+  const reloadCatalogs = async () => {
+    const location = props.directory ? { directory: props.directory } : undefined
+
+    if (!location) await data.location.syncInfo()
+    const ref = location ?? data.location.default()
+
+    await Promise.all([
+      data.location.integration.sync(ref),
+      data.location.provider.sync(ref),
+      data.location.model.sync(ref),
+    ]).catch(() => undefined)
+  }
+
+  const editCustom = (item: ProviderItem) => {
+    const config = customConfig().get(item.id)
+
+    if (!config) return
+
+    void dialog.show(() => <DialogCustomProvider directory={props.directory} provider={{ id: item.id, config }} />)
+  }
+
+  const removeCustom = (item: ProviderItem, name: string) => {
+    void dialog.push(() => (
+      <DialogConfirmProviderRemoval
+        title={language.t("provider.custom.remove.title", { provider: name })}
+        description={language.t("provider.custom.remove.description")}
+        action={language.t("provider.custom.remove.action")}
+        onConfirm={async () => {
+          const credentialIDs =
+            integration(item)
+              ?.connections.filter((connection) => connection.type === "credential")
+              .map((connection) => connection.id) ?? []
+
+          const result = await removeCustomProvider({
+            providerID: item.id,
+            credentialIDs,
+            api: {
+              updateConfig: (input) => serverSdk.api.experimental.config.update(input),
+              removeCredential: (input) => serverSdk.api.credential.remove(input),
+              reload: reloadCatalogs,
+            },
+          })
+
+          if (result.ok) {
+            setCustomConfig((current) => {
+              const next = new Map(current)
+              next.delete(item.id)
+
+              return next
+            })
+            showToast({
+              variant: "success",
+              icon: "circle-check",
+              title: language.t("provider.custom.removed", { provider: name }),
+            })
+
+            return
+          }
+
+          showToast({
+            title: language.t(
+              result.stage === "credential"
+                ? "provider.custom.error.removeCredentialFailed"
+                : "provider.custom.error.removeFailed",
+            ),
+          })
+        }}
+      />
+    ))
+  }
+
   const note = (id: string) => PROVIDER_NOTES.find((item) => item.match(id))?.key
 
   const disconnect = (item: ProviderItem, name: string) => {
@@ -512,23 +632,26 @@ export const SettingsProviders: Component<{
                             </div>
                           </div>
                           <Show
-                            when={canManageAccounts(item)}
+                            when={customConfig().has(item.id)}
                             fallback={
                               <Show
-                                when={canDisconnect(item)}
+                                when={canManageAccounts(item)}
+                                fallback={
+                                  <Show
+                                    when={canDisconnect(item)}
                                 fallback={
                                   <span class="settings-provider-env-hint">
                                     {language.t("settings.providers.connected.environmentDescription")}
                                   </span>
                                 }
                               >
-                                <Button size="normal" variant="ghost-muted" onClick={() => disconnect(item, item.name)}>
-                                  {language.t("common.disconnect")}
-                                </Button>
-                              </Show>
-                            }
-                          >
-                            <Show when={activeProviderAccount(integration(item))?.status}>
+                                    <Button size="normal" variant="ghost-muted" onClick={() => disconnect(item, item.name)}>
+                                      {language.t("common.disconnect")}
+                                    </Button>
+                                  </Show>
+                                }
+                              >
+                                <Show when={activeProviderAccount(integration(item))?.status}>
                               {(status) => (
                                 <Button
                                   size="normal"
@@ -541,7 +664,18 @@ export const SettingsProviders: Component<{
                                 </Button>
                               )}
                             </Show>
-                            <AccountMenu provider={item} />
+                                <AccountMenu provider={item} />
+                              </Show>
+                            }
+                          >
+                            <div class="flex gap-2">
+                              <Button size="normal" variant="ghost-muted" onClick={() => editCustom(item)}>
+                                {language.t("common.edit")}
+                              </Button>
+                              <Button size="normal" variant="ghost-muted" onClick={() => removeCustom(item, item.name)}>
+                                {language.t("provider.custom.remove.action")}
+                              </Button>
+                            </div>
                           </Show>
                         </div>
                       }

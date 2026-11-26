@@ -2,9 +2,11 @@ export * as ConfigDiscovery from "./discovery.js"
 
 import os from "os"
 import path from "path"
-import { Effect } from "effect"
+import { Effect, Option, Schema } from "effect"
+import { ChildProcess } from "effect/process"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
+import { AppProcess } from "@opencode/util/process"
 import { Location } from "../location.js"
 import { Project } from "../project.js"
 import { AbsolutePath } from "../schema.js"
@@ -50,12 +52,29 @@ const preferenceMetadata = new Set([
   "_manualProfile",
 ])
 
-/** Removes MDM payload metadata from `plutil -convert json` output. */
+/** Removes MDM payload metadata from `plutil -convert json` output, rejecting malformed JSON. */
 export function stripPreferenceMetadata(json: string) {
-  const parsed: unknown = JSON.parse(json)
+  const decoded = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))(json)
+  if (Option.isNone(decoded)) return
+  const parsed = decoded.value
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return json
   return JSON.stringify(Object.fromEntries(Object.entries(parsed).filter(([key]) => !preferenceMetadata.has(key))))
 }
+
+/** Conversion and malformed stdout are both best-effort managed-preferences failures. */
+export const readPreferences = Effect.fn("ConfigDiscovery.readPreferences")(function* (plist: AbsolutePath) {
+  const processes = yield* AppProcess.Service
+  const result = yield* processes
+    .run(ChildProcess.make("plutil", ["-convert", "json", "-o", "-", plist], { stdin: "ignore" }), {
+      timeout: "10 seconds",
+    })
+    .pipe(Effect.flatMap(AppProcess.requireSuccess), Effect.option)
+  const text = Option.isSome(result) ? stripPreferenceMetadata(result.value.stdout.toString()) : undefined
+  if (text === undefined) {
+    yield* Effect.logWarning("failed to convert managed preferences", { source: plist })
+  }
+  return text
+})
 
 /** The project's personal config dir under the global config dir, layered above the repo's own `.opencode` dirs. */
 export const overlay = Effect.fn("ConfigDiscovery.overlay")(function* (options?: Options) {

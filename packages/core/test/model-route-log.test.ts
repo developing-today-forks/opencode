@@ -651,6 +651,31 @@ describe("route usage restore", () => {
 })
 
 describe("route stats tool", () => {
+  it.live("uses the same window and outcome filters for the latest stats error message", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      for (const row of [
+        { time_started: 500, outcome: "failure" as const, error_message: "before window" },
+        { time_started: 1_000, outcome: "failure" as const, error_message: "in window" },
+        { time_started: 2_000, outcome: "success" as const, error_message: "not an error" },
+        { time_started: 6_000, outcome: "failure" as const, error_message: "after window" },
+        { time_started: 7_000, outcome: "success" as const, error_message: "latest success" },
+      ]) {
+        ModelRouteLog.record({
+          kind: "attempt",
+          row: attempt({ provider_id: "stats-window", model_id: "m", ...row }),
+        })
+      }
+      yield* Effect.sleep("100 millis")
+      expect(yield* ModelRouteLog.routeStatsErrors(db, 1_000, 5_000)).toContainEqual(
+        expect.objectContaining({ providerID: "stats-window", count: 1, lastTime: 1_000, lastMessage: "in window" }),
+      )
+      expect(yield* ModelRouteLog.routeStatsErrors(db, 1_000)).toContainEqual(
+        expect.objectContaining({ providerID: "stats-window", count: 2, lastTime: 6_000, lastMessage: "after window" }),
+      )
+    }),
+  )
+
   it.live("reports per-target stats and exact errors, and suggests from them", () =>
     Effect.gen(function* () {
       ModelRoute.resetHealth()
@@ -1979,7 +2004,15 @@ describe("read API over the ledger (#2497)", () => {
       })
 
       const coverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
-      expect(coverage).toMatchObject({ attempts: 3, providers: 2, models: 2, sessions: 2, routes: 1, first: 1_000, last: 5_000 })
+      expect(coverage).toMatchObject({
+        attempts: 3,
+        providers: 2,
+        models: 2,
+        sessions: 2,
+        routes: 1,
+        first: 1_000,
+        last: 5_000,
+      })
 
       const errors = yield* ModelRouteLog.errorBreakdown(db, 0, 5_000)
       expect(errors.find((row) => row.tag === "QuotaExceeded")?.count).toBe(1)
@@ -1994,110 +2027,112 @@ describe("read API over the ledger (#2497)", () => {
 })
 
 describe("rollup read over the ledger (#2795)", () => {
-  it.live("buckets by day, hour of day and day of week, groups by credential as an opaque key, and treats until as exclusive", () =>
-    Effect.gen(function* () {
-      const db = (yield* Database.Service).db
-      const monday = Date.UTC(2026, 0, 5)
-      const hour = 3_600_000
-      const rows: ModelRouteLog.Attempt[] = [
-        attempt({
-          time_started: monday + hour,
-          time_ended: monday + hour + 500,
-          credential_id: "cred_secret_a",
-          tokens_input: 100,
-          tokens_output: 10,
-          cost_usd: 0.5,
-          variant: "high",
-        }),
-        attempt({
-          time_started: monday + hour + 60_000,
-          time_ended: monday + hour + 61_000,
-          credential_id: "cred_secret_a",
-          outcome: "failure",
-          output_started: false,
-          tokens_input: 50,
-          ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "quota" }),
-        }),
-        attempt({ time_started: monday + 3 * hour, time_ended: monday + 3 * hour + 500, tokens_input: 7 }),
-        attempt({
-          time_started: monday + 25 * hour,
-          time_ended: monday + 25 * hour + 500,
-          provider_id: "anthropic",
-          model_id: "claude-x",
-          credential_id: "cred_secret_b",
-          tokens_input: 200,
-          tokens_output: 20,
-          tokens_cache_read: 5,
-          tokens_cache_write: 1,
-          cost_usd: 1.25,
-        }),
-      ]
-      for (const row of rows) ModelRouteLog.record({ kind: "attempt", row })
-      yield* Effect.sleep("100 millis")
+  it.live(
+    "buckets by day, hour of day and day of week, groups by credential as an opaque key, and treats until as exclusive",
+    () =>
+      Effect.gen(function* () {
+        const db = (yield* Database.Service).db
+        const monday = Date.UTC(2026, 0, 5)
+        const hour = 3_600_000
+        const rows: ModelRouteLog.Attempt[] = [
+          attempt({
+            time_started: monday + hour,
+            time_ended: monday + hour + 500,
+            credential_id: "cred_secret_a",
+            tokens_input: 100,
+            tokens_output: 10,
+            cost_usd: 0.5,
+            variant: "high",
+          }),
+          attempt({
+            time_started: monday + hour + 60_000,
+            time_ended: monday + hour + 61_000,
+            credential_id: "cred_secret_a",
+            outcome: "failure",
+            output_started: false,
+            tokens_input: 50,
+            ...ModelRouteLog.failureFields({ _tag: "QuotaExceeded", message: "quota" }),
+          }),
+          attempt({ time_started: monday + 3 * hour, time_ended: monday + 3 * hour + 500, tokens_input: 7 }),
+          attempt({
+            time_started: monday + 25 * hour,
+            time_ended: monday + 25 * hour + 500,
+            provider_id: "anthropic",
+            model_id: "claude-x",
+            credential_id: "cred_secret_b",
+            tokens_input: 200,
+            tokens_output: 20,
+            tokens_cache_read: 5,
+            tokens_cache_write: 1,
+            cost_usd: 1.25,
+          }),
+        ]
+        for (const row of rows) ModelRouteLog.record({ kind: "attempt", row })
+        yield* Effect.sleep("100 millis")
 
-      const byDay = yield* ModelRouteLog.attemptRollup(db, {
-        since: monday,
-        until: monday + 2 * 24 * hour,
-        bucket: "day",
-        group: ["provider", "credential"],
-      })
-      // The id never leaves the rollup: only its digest does.
-      expect(JSON.stringify(byDay)).not.toContain("cred_secret")
-      const keyA = ModelRouteLog.credentialKey("cred_secret_a")
-      const keyB = ModelRouteLog.credentialKey("cred_secret_b")
-      expect(keyA).toMatch(/^[0-9a-f]{16}$/)
-      expect(byDay).toHaveLength(3)
-      expect(byDay.find((row) => row.credentialKey === keyA)).toMatchObject({
-        bucket: "2026-01-05",
-        providerID: "openai",
-        attempts: 2,
-        successes: 1,
-        tokensInput: 150,
-        tokensOutput: 10,
-        // Neither Monday row records cache tokens, so neither enters the four-way sum.
-        tokensCombined: 0,
-        costUsd: 0.5,
-        costRows: 1,
-        credentialRows: 2,
-        first: monday + hour,
-        last: monday + hour + 60_000,
-      })
-      expect(byDay.find((row) => row.bucket === "2026-01-05" && row.credentialKey === null)).toMatchObject({
-        attempts: 1,
-        tokensInput: 7,
-        credentialRows: 0,
-      })
-      expect(byDay.find((row) => row.credentialKey === keyB)).toMatchObject({
-        bucket: "2026-01-06",
-        providerID: "anthropic",
-        attempts: 1,
-        tokensCombined: 226,
-        costUsd: 1.25,
-      })
-      // Dimensions that were not asked for are absent, not null.
-      expect(Object.keys(byDay[0] ?? {})).not.toContain("modelID")
+        const byDay = yield* ModelRouteLog.attemptRollup(db, {
+          since: monday,
+          until: monday + 2 * 24 * hour,
+          bucket: "day",
+          group: ["provider", "credential"],
+        })
+        // The id never leaves the rollup: only its digest does.
+        expect(JSON.stringify(byDay)).not.toContain("cred_secret")
+        const keyA = ModelRouteLog.credentialKey("cred_secret_a")
+        const keyB = ModelRouteLog.credentialKey("cred_secret_b")
+        expect(keyA).toMatch(/^[0-9a-f]{16}$/)
+        expect(byDay).toHaveLength(3)
+        expect(byDay.find((row) => row.credentialKey === keyA)).toMatchObject({
+          bucket: "2026-01-05",
+          providerID: "openai",
+          attempts: 2,
+          successes: 1,
+          tokensInput: 150,
+          tokensOutput: 10,
+          // Neither Monday row records cache tokens, so neither enters the four-way sum.
+          tokensCombined: 0,
+          costUsd: 0.5,
+          costRows: 1,
+          credentialRows: 2,
+          first: monday + hour,
+          last: monday + hour + 60_000,
+        })
+        expect(byDay.find((row) => row.bucket === "2026-01-05" && row.credentialKey === null)).toMatchObject({
+          attempts: 1,
+          tokensInput: 7,
+          credentialRows: 0,
+        })
+        expect(byDay.find((row) => row.credentialKey === keyB)).toMatchObject({
+          bucket: "2026-01-06",
+          providerID: "anthropic",
+          attempts: 1,
+          tokensCombined: 226,
+          costUsd: 1.25,
+        })
+        // Dimensions that were not asked for are absent, not null.
+        expect(Object.keys(byDay[0] ?? {})).not.toContain("modelID")
 
-      // until is exclusive: a window ending exactly at Tuesday's row leaves it out.
-      const beforeTuesday = yield* ModelRouteLog.attemptRollup(db, { since: monday, until: monday + 25 * hour })
-      expect(beforeTuesday).toHaveLength(1)
-      expect(beforeTuesday[0]).toMatchObject({ bucket: null, attempts: 3, credentialRows: 2, costRows: 1 })
+        // until is exclusive: a window ending exactly at Tuesday's row leaves it out.
+        const beforeTuesday = yield* ModelRouteLog.attemptRollup(db, { since: monday, until: monday + 25 * hour })
+        expect(beforeTuesday).toHaveLength(1)
+        expect(beforeTuesday[0]).toMatchObject({ bucket: null, attempts: 3, credentialRows: 2, costRows: 1 })
 
-      const byWeekday = yield* ModelRouteLog.attemptRollup(db, { since: monday, bucket: "dayOfWeek" })
-      expect(byWeekday.map((row) => [row.bucket, row.attempts])).toEqual([
-        [1, 3],
-        [2, 1],
-      ])
+        const byWeekday = yield* ModelRouteLog.attemptRollup(db, { since: monday, bucket: "dayOfWeek" })
+        expect(byWeekday.map((row) => [row.bucket, row.attempts])).toEqual([
+          [1, 3],
+          [2, 1],
+        ])
 
-      const byHourOfDay = yield* ModelRouteLog.attemptRollup(db, { since: monday, bucket: "hourOfDay" })
-      expect(byHourOfDay.map((row) => [row.bucket, row.attempts])).toEqual([
-        [1, 3],
-        [3, 1],
-      ])
+        const byHourOfDay = yield* ModelRouteLog.attemptRollup(db, { since: monday, bucket: "hourOfDay" })
+        expect(byHourOfDay.map((row) => [row.bucket, row.attempts])).toEqual([
+          [1, 3],
+          [3, 1],
+        ])
 
-      const byModel = yield* ModelRouteLog.attemptRollup(db, { since: monday, group: ["model", "variant"] })
-      expect(byModel.find((row) => row.variant === "high")).toMatchObject({ modelID: "gpt-6-luna", attempts: 1 })
+        const byModel = yield* ModelRouteLog.attemptRollup(db, { since: monday, group: ["model", "variant"] })
+        expect(byModel.find((row) => row.variant === "high")).toMatchObject({ modelID: "gpt-6-luna", attempts: 1 })
 
-      expect(yield* ModelRouteLog.attemptRollup(db, { since: monday + 30 * 24 * hour })).toEqual([])
-    }),
+        expect(yield* ModelRouteLog.attemptRollup(db, { since: monday + 30 * 24 * hour })).toEqual([])
+      }),
   )
 })

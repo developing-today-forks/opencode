@@ -58,6 +58,8 @@ export interface MockServerConfig {
   onCredentialUpdate?: (credentialID: string, body: { label?: string }) => void
   // Runs on POST /api/credential with the stored credential's integration and key; the fixture records it.
   onCredentialCreate?: (input: { integrationID: string; key?: string }) => void
+  // Returning true fails POST /api/credential with a 500, as a credential store outage would.
+  credentialCreateFailures?: () => boolean
   // Runs on PATCH /api/experimental/config with the patched provider IDs; the fixture applies the patch.
   onConfigUpdate?: (input: { providerIDs: string[] }) => void
   // Runs on POST /api/integration/:id/connect/key; returning `{ error }` rejects the key with a 400 and that message.
@@ -901,26 +903,30 @@ function mockHandlers(
           Effect.sync(() => config.onIntegrationOAuthCancel?.(ctx.params.attemptID)).pipe(Effect.andThen(noContent)),
         integrationConnectExternal: () => noContent,
         credentialCreate: (ctx) =>
-          Effect.sync(() => {
-            const body = Predicate.isObject(ctx.payload) ? ctx.payload : {}
-            const integrationID = Predicate.isString(body.integrationID) ? body.integrationID : "unknown"
-            const value = Predicate.isObject(body.value) ? body.value : { type: "key", key: "" }
+          Effect.suspend(() =>
+            config.credentialCreateFailures?.()
+              ? Effect.fail(new MockInternal({ message: "Credential create failed" }))
+              : Effect.sync(() => {
+                  const body = Predicate.isObject(ctx.payload) ? ctx.payload : {}
+                  const integrationID = Predicate.isString(body.integrationID) ? body.integrationID : "unknown"
+                  const value = Predicate.isObject(body.value) ? body.value : { type: "key", key: "" }
 
-            config.onCredentialCreate?.({
-              integrationID,
-              key: Predicate.isString(value.key) ? value.key : undefined,
-            })
+                  config.onCredentialCreate?.({
+                    integrationID,
+                    key: Predicate.isString(value.key) ? value.key : undefined,
+                  })
 
-            return {
-              data: {
-                id: `cred_mock_${integrationID}`,
-                integrationID,
-                label: Predicate.isString(body.label) ? body.label : "API key",
-                active: body.activate !== false,
-                value,
-              },
-            }
-          }),
+                  return {
+                    data: {
+                      id: `cred_mock_${integrationID}`,
+                      integrationID,
+                      label: Predicate.isString(body.label) ? body.label : "API key",
+                      active: body.activate !== false,
+                      value,
+                    },
+                  }
+                }),
+          ),
         credentialActivate: (ctx) =>
           Effect.sync(() => config.onCredentialActivate?.(ctx.params.credentialID)).pipe(Effect.andThen(noContent)),
         credentialUpdate: (ctx) =>
