@@ -1,7 +1,7 @@
 import { describe, expect } from "bun:test"
 import fs from "fs/promises"
 import path from "path"
-import { Deferred, Duration, Effect, Fiber, Layer, Schedule, Stream } from "effect"
+import { Deferred, Duration, Effect, Fiber, Layer, Ref, Schedule, Stream } from "effect"
 import { TestClock } from "effect/testing"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Bus } from "@opencode/core/bus"
@@ -12,6 +12,7 @@ import { AbsolutePath } from "@opencode/core/schema"
 import { FSUtil } from "@opencode/util/fs-util"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { tmpdirScoped } from "../fixture/tmpdir"
+import { eventually } from "../lib/eventually"
 import { testEffect } from "../lib/effect"
 
 const services = AppNodeBuilder.build(LayerNode.group([FSUtil.node, Bus.node]))
@@ -102,6 +103,86 @@ describe("FileWatch", () => {
         { directory: AbsolutePath.make(tmp.path), file: target, event: "change" },
         { directory: AbsolutePath.make(tmp.path), file: target, event: "unlink" },
       ])
+    }),
+  )
+
+  it.effect("refuses a watch whose parent resolves outside the location", () =>
+    Effect.gen(function* () {
+      const fileWatch = yield* FileWatch.Service
+      const tmp = yield* tmpdirScoped()
+      const directory = path.join(tmp.path, "location")
+      const sub = path.join(directory, "sub")
+      const outside = path.join(tmp.path, "outside")
+      const target = path.join(sub, "watched.txt")
+      yield* Effect.promise(async () => {
+        await fs.mkdir(sub, { recursive: true })
+        await fs.writeFile(target, "inside")
+        await fs.mkdir(outside, { recursive: true })
+        await fs.writeFile(path.join(outside, "watched.txt"), "outside")
+        await fs.rm(sub, { recursive: true })
+        await fs.symlink(outside, sub)
+      })
+      yield* fileWatch.watch({ location: { directory: AbsolutePath.make(directory) }, file: target })
+      expect(yield* subscriptions).toBe(0)
+    }),
+  )
+
+  it.effect("refuses a watch below a swapped parent even when later path components are missing", () =>
+    Effect.gen(function* () {
+      const fileWatch = yield* FileWatch.Service
+      const tmp = yield* tmpdirScoped()
+      const directory = path.join(tmp.path, "location")
+      const sub = path.join(directory, "sub")
+      const outside = path.join(tmp.path, "outside")
+      const target = path.join(sub, "missing", "watched.txt")
+      yield* Effect.promise(async () => {
+        await fs.mkdir(directory, { recursive: true })
+        await fs.mkdir(outside, { recursive: true })
+        await fs.symlink(outside, sub)
+      })
+      yield* fileWatch.watch({ location: { directory: AbsolutePath.make(directory) }, file: target })
+      expect(yield* subscriptions).toBe(0)
+    }),
+  )
+
+  it.effect("stops publishing after the parent is swapped outside", () =>
+    Effect.gen(function* () {
+      const fileWatch = yield* FileWatch.Service
+      const test = yield* Watcher.Test
+      const bus = yield* Bus.Service
+      const tmp = yield* tmpdirScoped()
+      const directory = path.join(tmp.path, "location")
+      const sub = path.join(directory, "sub")
+      const outside = path.join(tmp.path, "outside")
+      const target = path.join(sub, "watched.txt")
+      yield* Effect.promise(async () => {
+        await fs.mkdir(sub, { recursive: true })
+        await fs.writeFile(target, "inside")
+        await fs.mkdir(outside, { recursive: true })
+        await fs.writeFile(path.join(outside, "watched.txt"), "outside")
+      })
+      const seen = yield* Ref.make(0)
+      yield* bus
+        .subscribe(FileSystem.Event.Changed)
+        .pipe(
+          Stream.filter((event) => event.data.file === target),
+          Stream.runForEach(() => Ref.update(seen, (count) => count + 1)),
+          Effect.forkScoped({ startImmediately: true }),
+        )
+      yield* fileWatch.watch({ location: { directory: AbsolutePath.make(directory) }, file: target })
+      yield* test.emit({ path: target, type: "update" })
+      // Delivery runs through background fibers, so wait for the event instead
+      // of assuming a fixed sleep is enough to observe it.
+      yield* eventually(Ref.get(seen), (count) => count === 1)
+      yield* Effect.promise(async () => {
+        await fs.rm(sub, { recursive: true })
+        await fs.symlink(outside, sub)
+      })
+      yield* Effect.repeat(test.emit({ path: target, type: "update" }), { times: 5 })
+      // Absence has no signal to wait on; give the pipeline a bounded real-time
+      // window to wrongly deliver before asserting nothing arrived.
+      yield* Effect.promise(() => Bun.sleep(250))
+      expect(yield* Ref.get(seen)).toBe(1)
     }),
   )
 })
