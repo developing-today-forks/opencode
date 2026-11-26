@@ -371,6 +371,14 @@ describe("Config", () => {
     ])
   })
 
+  test.each(["not json", "", "{\npartial", 'warning\n{"share":"disabled"}', '{"share":"disabled",}'])(
+    "rejects malformed plutil JSON without throwing: %j",
+    (text) => {
+      // Oracle: plutil promises strict JSON, not JSONC or stdout diagnostics.
+      expect(ConfigDiscovery.stripPreferenceMetadata(text)).toBeUndefined()
+    },
+  )
+
   test("strips MDM payload metadata from managed preferences", () => {
     expect(
       JSON.parse(
@@ -384,7 +392,7 @@ describe("Config", () => {
             _manualProfile: true,
             share: "disabled",
           }),
-        ),
+        )!,
       ),
     ).toEqual({ share: "disabled" })
   })

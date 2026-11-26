@@ -27,7 +27,6 @@ import { ManagedPolicy } from "./managed-policy.js"
 import { Connection } from "@opencode/schema/connection"
 import { WellKnown } from "./wellknown.js"
 import { AppProcess } from "@opencode/util/process"
-import { ChildProcess } from "effect/process"
 
 export function latest<K extends keyof Info>(entries: readonly Entry[], key: K): Info[K] | undefined {
   return entries.findLast((entry): entry is Document => entry.type === "document" && entry.info[key] !== undefined)
@@ -298,21 +297,16 @@ export const layer = (options?: Options) =>
         plist: AbsolutePath,
         references: Set<string>,
       ) {
-        const result = yield* processes
-          .run(ChildProcess.make("plutil", ["-convert", "json", "-o", "-", plist], { stdin: "ignore" }), {
-            timeout: "10 seconds",
-          })
-          .pipe(Effect.flatMap(AppProcess.requireSuccess), Effect.option)
-        if (Option.isNone(result)) {
-          yield* Effect.logWarning("failed to convert managed preferences", { source: plist })
-          return []
-        }
+        const preferences = yield* ConfigDiscovery.readPreferences(plist).pipe(
+          Effect.provideService(AppProcess.Service, processes),
+        )
+        if (preferences === undefined) return []
         references.add(plist)
         const text = yield* ConfigVariable.substitute({
           type: "virtual",
           source: plist,
           dir: path.dirname(plist),
-          text: ConfigDiscovery.stripPreferenceMetadata(result.value.stdout.toString()),
+          text: preferences,
           references,
         })
         const info = yield* parseInfo(text, plist)
