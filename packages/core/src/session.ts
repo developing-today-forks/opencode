@@ -495,7 +495,11 @@ const layer = Layer.effect(
             })
           }
         }
-        const fleetContext = SessionFleetContext.start({
+        // Build the fleet chain before publication but register it only after
+        // the created event wins: a concurrent create that loses the
+        // projection race must not overwrite the winner's registered context,
+        // and a create that fails field comparison leaves no stale entry.
+        const fleetContext = SessionFleetContext.build({
           sessionID,
           parentID: input.parentID,
           environment: SessionFleetContext.capture(),
@@ -551,9 +555,12 @@ const layer = Layer.effect(
           // The projection-race winner is validated with the same comparison
           // as a recorded session: a concurrent create whose supplied fields
           // differ from the winner is a collision, not a retry (#2796).
+          // The prebuilt fleet chain is discarded unregistered, so the
+          // winner's context — registered by its own creation — stands.
           if (differsFromRecorded(projected.session)) return yield* new AlreadyExistsError({ sessionID })
           return projected.session
         }
+        SessionFleetContext.adopt(sessionID, fleetContext)
         if (input.parentID) {
           yield* McpxSubagent.initializeSubagentSession({
             parentSessionID: input.parentID,
@@ -610,6 +617,9 @@ const layer = Layer.effect(
             ...inherited,
           })
           .pipe(Effect.provideService(SessionBlob.ForkMedia, media))
+        // The fork never passes through create, so seed its fleet chain from
+        // the source session only after the fork publication succeeds.
+        SessionFleetContext.start({ sessionID, parentID: parent.id })
         const forked = yield* result.get(sessionID).pipe(Effect.orDie)
         yield* Effect.gen(function* () {
           yield* Plugin.awaitActivation

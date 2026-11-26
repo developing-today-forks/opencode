@@ -35,8 +35,10 @@ export function capture(environment: NodeJS.ProcessEnv = process.env): Environme
   ) as Environment
 }
 
-/** Snapshot the process context once, inherit it in children, and make this session the newest chain link. */
-export function start(input: {
+/** Build the chain for a session without registering it. Registration happens
+ * only after the session's creation event wins, so a concurrent create that
+ * loses the projection race never overwrites the winner's registered context. */
+export function build(input: {
   sessionID: SessionSchema.ID
   parentID?: SessionSchema.ID
   environment?: Environment
@@ -44,14 +46,27 @@ export function start(input: {
   const parent = input.parentID ? sessions.get(input.parentID) : undefined
   const current = parent ?? input.environment ?? capture()
   const ancestry = current.FLEET_CTX_ANCESTRY?.split("/") ?? []
-  const chain = {
+  return {
     ...current,
     FLEET_CTX_OPENCODE_SESSION: input.sessionID,
     ...(input.parentID ? { FLEET_CTX_OPENCODE_PARENT: input.parentID } : {}),
     FLEET_CTX_ANCESTRY: [...ancestry, "opencode"].join("/"),
   }
-  sessions.set(input.sessionID, chain)
+}
+
+/** Register a prebuilt chain (see `build`). The caller must own the session. */
+export function adopt(sessionID: SessionSchema.ID, chain: Environment): Environment {
+  sessions.set(sessionID, chain)
   return chain
+}
+
+/** Snapshot the process context once, inherit it in children, and make this session the newest chain link. */
+export function start(input: {
+  sessionID: SessionSchema.ID
+  parentID?: SessionSchema.ID
+  environment?: Environment
+}): Environment {
+  return adopt(input.sessionID, build(input))
 }
 
 export function id(sessionID: SessionSchema.ID): string | undefined {

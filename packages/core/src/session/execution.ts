@@ -184,7 +184,7 @@ export const layer = Layer.effect(
             const before = yield* jobs.currentGeneration(sessionID)
             const event = yield* bus.publish(
               SessionEvent.Execution.Started,
-              { sessionID, fleetCtxID: SessionFleetContext.id(sessionID) },
+              { sessionID, ...SessionFleetContext.stamp(sessionID) },
               claimOnCommit(sessionID),
             )
             const bound = before?.running ? before : yield* jobs.currentGeneration(sessionID)

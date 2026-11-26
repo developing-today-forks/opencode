@@ -43,4 +43,19 @@ describe("session fleet context", () => {
 
     expect(SessionFleetContext.stamp(sessionID)).toEqual({})
   })
+
+  test("build defers registration until adopt, so a race loser never clobbers the winner", () => {
+    const sessionID = SessionSchema.ID.make("ses_race")
+    const winner = SessionFleetContext.start({ sessionID, environment: { FLEET_CTX_ID: "winner" } })
+
+    // The loser builds its chain but never registers it: the map still holds the winner.
+    const loser = SessionFleetContext.build({ sessionID, environment: { FLEET_CTX_ID: "loser" } })
+    expect(SessionFleetContext.id(sessionID)).toBe("winner")
+
+    SessionFleetContext.adopt(sessionID, winner)
+    expect(SessionFleetContext.id(sessionID)).toBe("winner")
+    expect(loser.FLEET_CTX_ID).toBe("loser")
+
+    SessionFleetContext.end(sessionID)
+  })
 })
