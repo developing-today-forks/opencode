@@ -267,11 +267,48 @@ const merge = <T extends object>(base: T, patch: object): T => {
   return next as T
 }
 
+/**
+ * The identity a generated id stands for: the provider and the exact name the id was
+ * generated from (`plan` when given, otherwise the label — the same precedence the
+ * generator uses). Two names that differ only in case or punctuation slug to the same
+ * id but are not the same plan (#2836).
+ */
+const generatedIdentity = (providerID: string, name: string) => `${providerID}\0${name}`
+const planIdentity = (plan: Plan) => generatedIdentity(plan.providerID, plan.plan ?? plan.label)
+
+/**
+ * Picks the id for a plan upserted without an explicit id. The plain slug stays the id
+ * when it is free or already holds this same plan, so same-plan upserts stay idempotent.
+ * When the slug is taken by a distinct plan, a deterministic hash of the exact identity
+ * disambiguates instead of overwriting that plan's history: re-upserting the distinct
+ * plan finds the same suffixed id again, and a (vanishingly unlikely) suffixed-id
+ * collision with yet another distinct plan falls through to numbered variants.
+ */
+const generatedID = (store: Store, providerID: string, patch: PlanPatch): string => {
+  const name = patch.plan ?? patch.label ?? "plan"
+  const base = slug(`${providerID}-${name}`)
+  const identity = generatedIdentity(providerID, name)
+  // A patch with no name at all addresses the default plan by its generated id alone,
+  // as before: there is no distinct name that could be colliding.
+  const matches = (plan: Plan) =>
+    patch.plan === undefined && patch.label === undefined ? true : planIdentity(plan) === identity
+  const digest = crypto.createHash("sha256").update(identity).digest("hex").slice(0, 8)
+  for (const candidate of [base, `${base}-${digest}`]) {
+    const existing = store.plans.find((plan) => plan.id === candidate)
+    if (!existing || matches(existing)) return candidate
+  }
+  for (let suffix = 2; ; suffix++) {
+    const candidate = `${base}-${digest}-${suffix}`
+    const existing = store.plans.find((plan) => plan.id === candidate)
+    if (!existing || matches(existing)) return candidate
+  }
+}
+
 /** Creates or updates a plan. A new plan starts as an active subscription with no quota until one is given. */
 export const upsertPlan = (store: Store, patch: PlanPatch, now: string): { store: Store; plan: Plan } => {
   const providerID = patch.providerID ?? store.plans.find((plan) => plan.id === patch.id)?.providerID
   if (!providerID) throw new Error("A plan needs a providerID, such as anthropic or openai.")
-  const id = patch.id ?? slug(`${providerID}-${patch.plan ?? patch.label ?? "plan"}`)
+  const id = patch.id ?? generatedID(store, providerID, patch)
   const existing = store.plans.find((plan) => plan.id === id)
   const base = existing ?? {
     id,

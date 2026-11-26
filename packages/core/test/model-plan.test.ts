@@ -123,6 +123,55 @@ describe("ModelPlan store", () => {
     })
   })
 
+  test("distinct plans whose names collide on the generated slug do not overwrite each other (#2836)", () => {
+    const first = ModelPlan.upsertPlan(
+      ModelPlan.emptyStore(),
+      { providerID: "openai", plan: "Pro", status: "expired", verifiedFrom: "billing page" },
+      NOW,
+    )
+    expect(first.plan.id).toBe("openai-pro")
+    const second = ModelPlan.upsertPlan(first.store, { providerID: "openai", plan: "Pro+", status: "active" }, NOW)
+    expect(second.plan.id).not.toBe("openai-pro")
+    expect(second.plan.id.startsWith("openai-pro-")).toBe(true)
+    expect(second.store.plans).toHaveLength(2)
+    // The first plan's history is untouched and the new plan inherits none of its fields.
+    const kept = second.store.plans.find((plan) => plan.id === "openai-pro")
+    expect(kept).toMatchObject({ plan: "Pro", status: "expired", verifiedFrom: "billing page", createdAt: NOW })
+    expect(second.plan).toMatchObject({ plan: "Pro+", status: "active" })
+    expect(second.plan.verifiedFrom).toBeUndefined()
+
+    // Case and separator collisions are distinct plans too.
+    const spaced = ModelPlan.upsertPlan(second.store, { providerID: "anthropic", plan: "Max 20x" }, NOW)
+    const dashed = ModelPlan.upsertPlan(spaced.store, { providerID: "anthropic", plan: "Max-20x" }, NOW)
+    expect(dashed.plan.id).not.toBe(spaced.plan.id)
+    expect(dashed.store.plans.filter((plan) => plan.providerID === "anthropic")).toHaveLength(2)
+    expect(dashed.store.plans.find((plan) => plan.id === spaced.plan.id)?.plan).toBe("Max 20x")
+
+    // Re-upserting the colliding plan updates its own record, not the slug owner's and not a third copy.
+    const again = ModelPlan.upsertPlan(
+      dashed.store,
+      { providerID: "openai", plan: "Pro+", fee: { amount: 20, currency: "USD", period: "monthly" } },
+      "2026-10-15T00:00:00.000Z",
+    )
+    expect(again.plan.id).toBe(second.plan.id)
+    expect(again.store.plans.filter((plan) => plan.providerID === "openai")).toHaveLength(2)
+    expect(again.plan.fee).toEqual({ amount: 20, currency: "USD", period: "monthly" })
+    expect(again.store.plans.find((plan) => plan.id === "openai-pro")?.fee).toBeUndefined()
+  })
+
+  test("re-upserting the same plan by name stays on its generated id (#2836)", () => {
+    const first = ModelPlan.upsertPlan(ModelPlan.emptyStore(), { providerID: "anthropic", plan: "Max 20x" }, NOW)
+    const second = ModelPlan.upsertPlan(
+      first.store,
+      { providerID: "anthropic", plan: "Max 20x", status: "expired" },
+      NOW,
+    )
+    expect(second.plan.id).toBe("anthropic-max-20x")
+    expect(second.store.plans).toHaveLength(1)
+    expect(second.plan.status).toBe("expired")
+    expect(second.plan.createdAt).toBe(NOW)
+  })
+
   test("a null clears a field and an omitted field is kept", () => {
     const { store } = ModelPlan.upsertPlan(
       ModelPlan.emptyStore(),
