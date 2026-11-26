@@ -14,7 +14,7 @@ import {
 } from "solid-js"
 import path from "node:path"
 import { EOL, tmpdir } from "node:os"
-import { mkdir, writeFile } from "node:fs/promises"
+import { writeTextExclusive } from "../../util/persistence"
 import { useRoute, useRouteData } from "../../context/route"
 import { createStore } from "solid-js/store"
 import { useData } from "../../context/data"
@@ -166,8 +166,7 @@ export function Session(props: {
   const clipboard = useClipboard()
   const paths = useTuiPaths()
   const writeExport = async (file: string, content: string) => {
-    await mkdir(path.dirname(file), { recursive: true })
-    await writeFile(file, content)
+    await writeTextExclusive(file, content)
   }
   const route = useRouteData("session")
   const sessionID = route.sessionID
