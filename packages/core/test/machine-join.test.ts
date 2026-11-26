@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { createPublicKey, verify } from "node:crypto"
-import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { chmod, mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { Identity } from "@opencode/core/machine/identity"
@@ -175,6 +175,60 @@ it.effect("fails an unusable key file without replacing it", () =>
     expect(error).toBeInstanceOf(Identity.InvalidKey)
     expect(error.message).toContain("expected a 32-byte key, found 31 bytes")
     expect((yield* Effect.promise(() => readFile(file))).byteLength).toBe(31)
+  }),
+)
+
+it.effect("an interrupted key create leaves no key file, so the next use creates a whole key", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    const directory = path.join(tmp.path, "state")
+    const file = path.join(directory, "machine", "home-key")
+    // The file is opened, then the write fails before any byte lands, as a full disk or a kill would leave it.
+    const interrupted: Identity.WriteTemp = async (temp, _data, options) => {
+      await writeFile(temp, new Uint8Array(0), options)
+      throw Object.assign(new Error("ENOSPC: no space left on device"), { code: "ENOSPC" })
+    }
+    const failure = yield* Effect.promise(() =>
+      Identity.writeNew(file, bytes(32, 5), interrupted).then(
+        () => undefined,
+        (cause: unknown) => cause,
+      ),
+    )
+    expect(failure).toBeInstanceOf(Error)
+    expect(yield* Effect.promise(() => readdir(path.dirname(file)))).toEqual([])
+    const key = yield* publicKey().pipe(Effect.provide(identityLayers(directory), { local: true }))
+    expect(key.byteLength).toBe(32)
+    expect((yield* Effect.promise(() => readFile(file))).byteLength).toBe(32)
+    expect(yield* Effect.promise(() => readdir(path.dirname(file)))).toEqual(["home-key"])
+  }),
+)
+
+it.effect("a key another process created first is kept, and no temporary file is left", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    const file = path.join(tmp.path, "state", "machine", "home-key")
+    expect(yield* Effect.promise(() => Identity.writeNew(file, bytes(32, 6)))).toBe(true)
+    expect(yield* Effect.promise(() => Identity.writeNew(file, bytes(32, 7)))).toBe(false)
+    expect(yield* Effect.promise(() => readFile(file))).toEqual(Buffer.from(bytes(32, 6)))
+    expect(yield* Effect.promise(() => readdir(path.dirname(file)))).toEqual(["home-key"])
+    if (process.platform !== "win32") expect((yield* Effect.promise(() => stat(file))).mode & 0o777).toBe(0o600)
+  }),
+)
+
+it.effect("an empty key file is named as an interrupted create and left in place", () =>
+  Effect.gen(function* () {
+    const tmp = yield* tmpdirScoped()
+    const directory = path.join(tmp.path, "state")
+    const file = path.join(directory, "machine", "home-key")
+    yield* Effect.promise(async () => {
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(file, new Uint8Array(0), { mode: 0o600 })
+    })
+    const error = yield* publicKey().pipe(Effect.provide(identityLayers(directory), { local: true }), Effect.flip)
+    expect(error).toBeInstanceOf(Identity.InvalidKey)
+    expect(error.message).toContain(file)
+    expect(error.message).toContain("interrupted")
+    expect((yield* Effect.promise(() => readFile(file))).byteLength).toBe(0)
   }),
 )
 
