@@ -3,6 +3,9 @@ import { DateTime, Option, Schema, SchemaGetter } from "effect"
 export const PositiveInt = Schema.Int.check(Schema.isGreaterThan(0))
 export const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))
 
+/** Epoch milliseconds representable as a JS Date: integers within ±8640000000000000. Finite values outside this range (e.g. 1e300) decode to an Invalid Date and must be rejected at the boundary. */
+export const EpochMillis = Schema.Int.check(Schema.isBetween({ minimum: -8640000000000000, maximum: 8640000000000000 }))
+
 export const RelativePath = Schema.String.pipe(
   Schema.brand("RelativePath"),
   Schema.annotate({ identifier: "RelativePath" }),

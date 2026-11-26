@@ -101,7 +101,13 @@ export function fromRow(
       busy: row.time_busy === null ? undefined : DateTime.makeUnsafe(row.time_busy),
       idle: row.time_idle === null ? undefined : DateTime.makeUnsafe(row.time_idle),
       viewed: row.time_viewed === null ? undefined : DateTime.makeUnsafe(row.time_viewed),
-      archived: row.time_archived === null ? undefined : DateTime.makeUnsafe(row.time_archived),
+      // Legacy rows can carry an unrepresentable time_archived (written before boundary validation); treat those as unarchived instead of throwing out of makeUnsafe and bricking every read of the session.
+      archived:
+        row.time_archived === null ||
+        !Number.isInteger(row.time_archived) ||
+        Math.abs(row.time_archived) > 8640000000000000
+          ? undefined
+          : DateTime.makeUnsafe(row.time_archived),
     },
   })
 }
