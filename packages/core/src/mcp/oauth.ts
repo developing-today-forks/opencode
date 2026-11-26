@@ -183,8 +183,25 @@ export const configuredDiscovery = async (input: {
         `Response body exceeded ${maxBytes} bytes trying to load OAuth authorization server metadata from ${origin}`,
       ),
   ).catch(onTimeout)
-  const body = JSON.parse(text)
-  const metadata = OAuthMetadataSchema.safeParse(body).data ?? OpenIdProviderDiscoveryMetadataSchema.parse(body)
+  let body: unknown
+  try {
+    body = JSON.parse(text)
+  } catch (error) {
+    throw new Error(
+      `Could not parse OAuth authorization server metadata from ${origin}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    )
+  }
+  const parsed = OAuthMetadataSchema.safeParse(body)
+  const fallback = parsed.success ? undefined : OpenIdProviderDiscoveryMetadataSchema.safeParse(body)
+  const metadata = parsed.data ?? fallback?.data
+  if (!metadata) {
+    const error = fallback && !fallback.success ? fallback.error : undefined
+    throw new Error(
+      `Could not parse OAuth authorization server metadata from ${origin}: ${error ? error.message : "metadata did not match a known schema"}`,
+      error ? { cause: error } : undefined,
+    )
+  }
   return {
     authorizationServerUrl: metadata.issuer,
     authorizationServerMetadata: metadata,
