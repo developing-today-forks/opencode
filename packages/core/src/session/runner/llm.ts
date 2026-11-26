@@ -11,6 +11,7 @@ import { InstructionState } from "../instruction-state.js"
 import { SessionCompaction } from "../compaction.js"
 import { SessionContext } from "../context.js"
 import { SessionEvent } from "../event.js"
+import { SessionFleetContext } from "../fleet-context.js"
 import { SessionInbox } from "../inbox.js"
 import { SessionBackground } from "../background.js"
 import { Job } from "../../job.js"
@@ -630,6 +631,7 @@ const layer = Layer.effect(
           }
           yield* bus.publish(SessionEvent.Tool.Failed, {
             sessionID,
+            ...SessionFleetContext.stamp(sessionID),
             assistantMessageID: message.id,
             id: tool.id,
             error,

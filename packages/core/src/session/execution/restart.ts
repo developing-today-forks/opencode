@@ -24,6 +24,7 @@ import { WriteTool } from "../../tool/plugin/write.js"
 import { VideoGenerateTool } from "../../tool/plugin/video-generate.js"
 import { VideoGeneration } from "../../video-generation.js"
 import { SessionEvent } from "../event.js"
+import { SessionFleetContext } from "../fleet-context.js"
 import { SessionExecution } from "../execution.js"
 import { SessionHistory } from "../history.js"
 import { SessionSchema } from "../schema.js"
@@ -114,7 +115,7 @@ export const layer = (options?: Options) =>
           // counter atomically with the terminal event.
           yield* bus.publish(
             SessionEvent.Execution.Failed,
-            { sessionID, error: RESUME_EXHAUSTED },
+            { sessionID, error: RESUME_EXHAUSTED, ...SessionFleetContext.stamp(sessionID) },
             { commit: () => store.release(sessionID) },
           )
           return false
@@ -334,6 +335,7 @@ export const layer = (options?: Options) =>
             if (!isReadonlyArrayNonEmpty(result.content)) return
             yield* bus.publish(SessionEvent.Tool.Success, {
               sessionID,
+              ...SessionFleetContext.stamp(sessionID),
               assistantMessageID: call.assistantMessageID,
               id: call.part.id,
               content: result.content,
@@ -445,6 +447,7 @@ export const layer = (options?: Options) =>
               if (verdict.kind === "applied") {
                 yield* bus.publish(SessionEvent.Tool.Success, {
                   sessionID,
+                  ...SessionFleetContext.stamp(sessionID),
                   assistantMessageID: call.assistantMessageID,
                   id: call.part.id,
                   content: [
@@ -460,6 +463,7 @@ export const layer = (options?: Options) =>
               }
               yield* bus.publish(SessionEvent.Tool.Failed, {
                 sessionID,
+                ...SessionFleetContext.stamp(sessionID),
                 assistantMessageID: call.assistantMessageID,
                 id: call.part.id,
                 error: interruptedFailure(
@@ -474,6 +478,7 @@ export const layer = (options?: Options) =>
             }
             yield* bus.publish(SessionEvent.Tool.Failed, {
               sessionID,
+              ...SessionFleetContext.stamp(sessionID),
               assistantMessageID: call.assistantMessageID,
               id: call.part.id,
               error: interruptedFailure(

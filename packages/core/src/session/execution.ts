@@ -14,6 +14,7 @@ import { SubagentReport } from "./execution/subagent-report.js"
 import { SessionRunCoordinator } from "./run-coordinator.js"
 import { SessionRunner } from "./runner/index.js"
 import { SessionSchema } from "./schema.js"
+import { SessionFleetContext } from "./fleet-context.js"
 import { SessionStore } from "./store.js"
 import { SessionSynthetic } from "./synthetic.js"
 import { toSessionError } from "./to-session-error.js"
@@ -181,7 +182,11 @@ export const layer = Layer.effect(
             // Bind before the started publication yields to SQLite so a cancel arriving during
             // that window still matches this generation.
             const before = yield* jobs.currentGeneration(sessionID)
-            const event = yield* bus.publish(SessionEvent.Execution.Started, { sessionID }, claimOnCommit(sessionID))
+            const event = yield* bus.publish(
+              SessionEvent.Execution.Started,
+              { sessionID, fleetCtxID: SessionFleetContext.id(sessionID) },
+              claimOnCommit(sessionID),
+            )
             const bound = before?.running ? before : yield* jobs.currentGeneration(sessionID)
             subagentReport.started(sessionID, {
               startedSeq: event.durable.seq,
@@ -199,7 +204,11 @@ export const layer = Layer.effect(
             if (outcome.type === "interrupted" && outcome.reason === "shutdown") {
               subagentReport.clear(sessionID)
               // Shutdown keeps the claim and the running Job row for restart continuity.
-              yield* bus.publish(SessionEvent.Execution.Interrupted, { sessionID, reason: "shutdown" })
+              yield* bus.publish(SessionEvent.Execution.Interrupted, {
+                sessionID,
+                reason: "shutdown",
+                ...SessionFleetContext.stamp(sessionID),
+              })
               return
             }
             // Claim the Job generation before cancelling it so the settlement commit owns its outbox row.
@@ -252,11 +261,20 @@ function publishTerminal(
   outcome: ReturnType<typeof terminal>,
   commit: (seq: number) => Effect.Effect<void>,
 ) {
-  if (outcome.type === "succeeded") return bus.publish(SessionEvent.Execution.Succeeded, { sessionID }, { commit })
+  if (outcome.type === "succeeded")
+    return bus.publish(SessionEvent.Execution.Succeeded, { sessionID, ...SessionFleetContext.stamp(sessionID) }, { commit })
   if (outcome.type === "interrupted") {
-    return bus.publish(SessionEvent.Execution.Interrupted, { sessionID, reason: outcome.reason }, { commit })
+    return bus.publish(
+      SessionEvent.Execution.Interrupted,
+      { sessionID, reason: outcome.reason, ...SessionFleetContext.stamp(sessionID) },
+      { commit },
+    )
   }
-  return bus.publish(SessionEvent.Execution.Failed, { sessionID, error: outcome.error }, { commit })
+  return bus.publish(
+    SessionEvent.Execution.Failed,
+    { sessionID, error: outcome.error, ...SessionFleetContext.stamp(sessionID) },
+    { commit },
+  )
 }
 
 export const node = makeGlobalNode({
