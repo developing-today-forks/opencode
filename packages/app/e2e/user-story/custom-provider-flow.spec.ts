@@ -218,8 +218,8 @@ test("keeps the form and surfaces the partial state when storing the API key fai
 
   await form.getByRole("button", { name: "Save", exact: true }).click()
 
-  // Both stages were attempted, in order: the definition first (without
-  // the secret), then the key as a separate credential create.
+  // Both stages were attempted: the definition (without the secret),
+  // then the key as a separate credential create.
   expect(JSON.stringify((await configPatch).postDataJSON())).not.toContain("sk-test")
   expect((await credentialPost).postDataJSON()).toEqual({
     integrationID: "acme",
@@ -233,7 +233,7 @@ test("keeps the form and surfaces the partial state when storing the API key fai
       { exact: true },
     ),
   ).toBeVisible()
-  expect(configured).toBe(true)
+  await expect.poll(() => configured).toBe(true)
   await expect(page.getByText("acme saved", { exact: true })).toHaveCount(0)
 
   // The dialog stays open with every entered value retained for a retry.
