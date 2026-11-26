@@ -233,6 +233,39 @@ describe("ModelPlan store", () => {
     expect(ModelPlan.readNotes({ limit: 0 }, root).skipped).toBe(1)
   })
 
+  test("a note appended after a torn unterminated tail is not lost (#2821)", () => {
+    const root = dir()
+    ModelPlan.addNote(
+      { text: "first", kind: "experience", providerID: "anthropic" },
+      "2026-10-10T10:00:00.000Z",
+      root,
+    )
+    // A torn append: a fragment with no terminating newline.
+    fs.appendFileSync(path.join(root, "plan-notes.jsonl"), '{"id":"note_torn","at":"2026-10-1')
+    ModelPlan.addNote(
+      { text: "second", kind: "experience", providerID: "anthropic" },
+      "2026-10-11T10:00:00.000Z",
+      root,
+    )
+    const all = ModelPlan.readNotes({}, root)
+    expect(all.notes.map((note) => note.text)).toEqual(["first", "second"])
+    // Only the torn fragment itself is skipped.
+    expect(all.skipped).toBe(1)
+  })
+
+  test("a note appended to a normal newline-terminated file gains no blank line (#2821)", () => {
+    const root = dir()
+    ModelPlan.addNote({ text: "first" }, "2026-10-10T10:00:00.000Z", root)
+    ModelPlan.addNote({ text: "second" }, "2026-10-11T10:00:00.000Z", root)
+    const raw = fs.readFileSync(path.join(root, "plan-notes.jsonl"), "utf8")
+    expect(raw.endsWith("\n")).toBe(true)
+    expect(raw.split("\n")).toHaveLength(3)
+    expect(raw).not.toContain("\n\n")
+    const all = ModelPlan.readNotes({}, root)
+    expect(all.notes.map((note) => note.text)).toEqual(["first", "second"])
+    expect(all.skipped).toBe(0)
+  })
+
   test("staleness counts whole days without going negative, and a blank note is refused", () => {
     const now = Date.parse(NOW)
     expect(ModelPlan.daysSince("2026-10-04", now)).toBe(10)
