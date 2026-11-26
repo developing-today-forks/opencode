@@ -175,4 +175,20 @@ describe("FileAccess.authorizeRead", () => {
       expect(Object.hasOwn(requests[1], "metadata")).toBe(false)
     }).pipe(provide(requests))
   })
+
+  it.live("carries the authorized file's identity on the target for an existing local file", () => {
+    const requests: Permission.AssertInput[] = []
+    return Effect.gen(function* () {
+      const location = yield* Location.Service
+      const file = path.join(location.directory, "identity.txt")
+      yield* Effect.promise(() => fs.writeFile(file, "authorized bytes"))
+      const access = yield* FileAccess.Service
+      const target = yield* access.authorizeRead("identity.txt", invocation)
+      const info = yield* Effect.promise(() => fs.stat(file))
+
+      // The identity is what a later reader binds its open against to detect a post-authorization
+      // swap (#2841); it must be the authorized file object's own dev/ino.
+      expect(target.fileIdentity).toEqual({ dev: info.dev, ino: info.ino })
+    }).pipe(provide(requests))
+  })
 })
