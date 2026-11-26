@@ -1,7 +1,7 @@
 export * as Identity from "./identity.js"
 
 import crypto from "node:crypto"
-import { mkdir, readFile, stat, writeFile } from "node:fs/promises"
+import { link, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import { Global } from "@opencode/util/global"
@@ -88,20 +88,46 @@ const read = (file: string) =>
     catch: (cause) => cause,
   })
 
+/** How {@link writeNew} writes its temporary file: `writeFile`'s shape, swappable so a test can fail it partway. */
+export type WriteTemp = (file: string, data: Uint8Array, options: { flag: "wx"; mode: number }) => Promise<void>
+
+/**
+ * Write a new key file so that its path only ever holds a complete key: the seed goes to a unique temporary file in
+ * the same directory, which is then hard-linked into place. A crash or write error (ENOSPC, say) leaves at most the
+ * temporary file, never a short key at `file`, and the temporary file is removed whatever happens.
+ *
+ * Resolves false, without touching `file`, when a key is already there: another process got there first, and its key
+ * is the one every caller must use.
+ */
+export const writeNew = async (file: string, seed: Uint8Array, write: WriteTemp = writeFile) => {
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
+  const temp = `${file}.${process.pid}.${crypto.randomBytes(8).toString("hex")}.tmp`
+  try {
+    await write(temp, seed, { flag: "wx", mode: 0o600 })
+    try {
+      await link(temp, file)
+      return true
+    } catch (cause) {
+      if (code(cause) === "EEXIST") return false
+      throw cause
+    }
+  } finally {
+    await rm(temp, { force: true })
+  }
+}
+
 const create = (file: string) =>
   Effect.gen(function* () {
     const seed = crypto
       .generateKeyPairSync("ed25519")
       .privateKey.export({ format: "der", type: "pkcs8" })
       .subarray(PKCS8.length)
-    yield* Effect.tryPromise({
-      try: async () => {
-        await mkdir(path.dirname(file), { recursive: true, mode: 0o700 })
-        // `wx` never replaces a key another process wrote first: this call fails and the next one reads that key.
-        await writeFile(file, seed, { flag: "wx", mode: 0o600 })
-      },
+    const created = yield* Effect.tryPromise({
+      try: () => writeNew(file, seed),
       catch: (cause) => invalid(file, `could not be created: ${String(cause)}`),
     })
+    // Another process created the key first: use that one, never a second.
+    if (!created) return yield* read(file)
     return seed
   })
 
@@ -116,6 +142,13 @@ const load = (file: string) =>
         cause instanceof InvalidKey ? cause : invalid(file, `could not be read: ${String(cause)}`),
       ),
     )
+    // Keys are only ever linked into place whole, but an older release wrote them in place, and a crash then left an
+    // empty file. That is no key, so nothing trusts it; still, deleting a file at the key's path is left to a person.
+    if (seed.length === 0)
+      return yield* invalid(
+        file,
+        "it is empty, which looks like a key create that was interrupted before it wrote the key; no key was stored, so delete the file and the next use creates one",
+      )
     if (seed.length !== SEED_BYTES)
       return yield* invalid(file, `expected a ${SEED_BYTES}-byte key, found ${seed.length} bytes`)
     if (process.platform !== "win32") {
