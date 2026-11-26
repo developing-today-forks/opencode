@@ -213,6 +213,22 @@ export const dict = {
   "provider.custom.error.saveFailed": "Couldn't save the provider. Your entries are still here — try again.",
   "provider.custom.error.credentialFailed":
     "The provider was saved, but its API key couldn't be stored. Your entries are still here — try again to finish connecting it.",
+  "provider.custom.edit.title": "Edit Custom Provider",
+  "provider.custom.edit.description": "Update this OpenAI-compatible endpoint, its models, and optional headers.",
+  "provider.custom.updated": "{{provider}} updated",
+  "provider.custom.apiKey.keepPlaceholder": "Leave blank to keep the current API key",
+  "provider.custom.apiKey.clear": "Remove API key",
+  "provider.custom.apiKey.keepKey": "Keep API key",
+  "provider.custom.apiKey.clearNote": "The stored API key will be removed when you save.",
+  "provider.custom.error.keyUpdateFailed":
+    "The provider was saved, but its API key couldn't be updated. Your entries are still here — try again.",
+  "provider.custom.remove.action": "Remove provider",
+  "provider.custom.remove.title": "Remove {{provider}}?",
+  "provider.custom.remove.description":
+    "This deletes the provider definition and its stored API key. Models from this provider will no longer be available.",
+  "provider.custom.removed": "{{provider}} removed",
+  "provider.custom.error.removeFailed": "Couldn't remove the provider. Try again.",
+  "provider.custom.error.removeCredentialFailed": "The provider was removed, but its API key couldn't be deleted.",
 
   "provider.connect.breadcrumb.root": "Connect",
   "provider.connect.breadcrumb.label": "Connect steps",

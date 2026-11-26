@@ -39,6 +39,12 @@ function fakeServer(fail: { config?: boolean; credential?: boolean } = {}) {
       if (fail.credential) throw new Error("credential unavailable")
       credentials.set(input.integrationID, input.value)
     },
+    removeCredentials: async (integrationID) => {
+      calls.push("credential.remove")
+
+      if (fail.credential) throw new Error("credential unavailable")
+      credentials.delete(integrationID)
+    },
     reload: async () => {
       calls.push("reload")
     },
@@ -148,5 +154,85 @@ describe("saveCustomProvider", () => {
 
     if (!result.ok) expect(result.stage).toBe("validation")
     expect(server.calls).toEqual([])
+  })
+})
+
+describe("saveCustomProvider editing", () => {
+  test("an edit patches the same provider ID despite it already existing", async () => {
+    const server = fakeServer()
+
+    const result = await saveCustomProvider({
+      form: form({ name: "Acme Renamed", apiKey: "" }),
+      t,
+      existingProviderIDs: new Set(["acme"]),
+      editingProviderID: "acme",
+      api: server.api,
+    })
+
+    expect(result).toEqual({ ok: true, providerID: "acme" })
+    // No key entered on edit: the stored credential is left untouched.
+    expect(server.calls).toEqual(["config", "reload"])
+    expect(server.configDocument.providers.acme?.name).toBe("Acme Renamed")
+  })
+
+  test("an edit with a new key stores it as the provider credential", async () => {
+    const server = fakeServer()
+    server.credentials.set("acme", { type: "key", key: "sk-old" })
+
+    const result = await saveCustomProvider({
+      form: form({ apiKey: "sk-new" }),
+      t,
+      existingProviderIDs: new Set(["acme"]),
+      editingProviderID: "acme",
+      api: server.api,
+    })
+
+    expect(result).toEqual({ ok: true, providerID: "acme" })
+    expect(server.calls).toEqual(["config", "credential", "reload"])
+    expect(server.resolvedAfterReload("acme")?.settings.apiKey).toBe("sk-new")
+  })
+
+  test("an edit that clears the key removes the stored credential after the config patch", async () => {
+    const server = fakeServer()
+    server.credentials.set("acme", { type: "key", key: "sk-old" })
+
+    const result = await saveCustomProvider({
+      form: form({ apiKey: "" }),
+      t,
+      existingProviderIDs: new Set(["acme"]),
+      editingProviderID: "acme",
+      clearKey: true,
+      api: server.api,
+    })
+
+    expect(result).toEqual({ ok: true, providerID: "acme" })
+    expect(server.calls).toEqual(["config", "credential.remove", "reload"])
+    expect(server.credentials.size).toBe(0)
+    expect(server.resolvedAfterReload("acme")?.settings.apiKey).toBeUndefined()
+  })
+
+  test("a failed key clear reports the credential stage with the config saved", async () => {
+    const server = fakeServer({ credential: true })
+    server.credentials.set("acme", { type: "key", key: "sk-old" })
+
+    const result = await saveCustomProvider({
+      form: form({ apiKey: "" }),
+      t,
+      existingProviderIDs: new Set(["acme"]),
+      editingProviderID: "acme",
+      clearKey: true,
+      api: server.api,
+    })
+
+    expect(result.ok).toBe(false)
+
+    if (!result.ok && result.stage === "credential") {
+      expect(result.configSaved).toBe(true)
+    } else {
+      throw new Error("expected a credential-stage failure")
+    }
+
+    expect(server.configDocument.providers.acme?.name).toBe("Acme")
+    expect(server.credentials.get("acme")).toEqual({ type: "key", key: "sk-old" })
   })
 })
