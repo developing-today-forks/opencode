@@ -4,6 +4,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
 import { Array, Context, Effect, Layer, Schema } from "effect"
+import { stat } from "node:fs/promises"
 import path from "path"
 import { Environment } from "./environment/index.js"
 import { Flag } from "./flag.js"
@@ -41,8 +42,21 @@ export interface ExternalDirectoryAuthorization {
   readonly save: string
 }
 
+/**
+ * The identity of the file object an existing local target names, captured when the target is authorized.
+ * A later read can compare the file it actually opened against this identity to detect a post-authorization
+ * swap (the path re-pointed at a different file). A delete-and-recreate that recycles the same inode is
+ * indistinguishable by this measure — the same bound the sibling bindings in #2750 / #2744 accept.
+ */
+export interface FileIdentity {
+  readonly dev: number
+  readonly ino: number
+}
+
 export interface Target {
   readonly absolute: AbsolutePath
+  /** Identity of the authorized file object, for an existing local target that carries one. */
+  readonly fileIdentity?: FileIdentity
   /** Location-relative for internal paths, absolute for external paths. */
   readonly resource: string
   readonly externalDirectory?: ExternalDirectoryAuthorization
@@ -335,11 +349,20 @@ const layer = Layer.effect(
       if (located.environment.id !== environment.id) return yield* machineTarget(located, kind)
       const resolved = yield* resolveLocal(located.absolute, kind, enabled)
       if (!resolved.exists) return resolved.target
+      // Capture the authorized file's identity so a consumer that reads later can bind its read to this
+      // object instead of trusting the path name (#2841). A stat failure leaves the target without an
+      // identity; the consumer's own open then surfaces the real error as before.
+      const identity = yield* Effect.tryPromise({ try: () => stat(resolved.canonical), catch: (error) => error }).pipe(
+        Effect.map((info): FileIdentity => ({ dev: info.dev, ino: info.ino })),
+        Effect.orElseSucceed(() => undefined),
+      )
+      const bound = identity ? { fileIdentity: identity } : {}
       if (resolved.target.externalDirectory)
-        return { ...resolved.target, absolute: AbsolutePath.make(resolved.canonical) } satisfies Target
+        return { ...resolved.target, ...bound, absolute: AbsolutePath.make(resolved.canonical) } satisfies Target
       const relative = slash(path.relative(resolved.workingCanonical, resolved.canonical) || ".")
       return {
         ...resolved.target,
+        ...bound,
         absolute: AbsolutePath.make(resolved.canonical),
         resource: enabled ? MachinePath.local(relative) : relative,
       } satisfies Target
