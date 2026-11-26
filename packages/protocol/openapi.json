@@ -1382,16 +1382,6 @@
               }
             }
           },
-          "409": {
-            "description": "ConflictError",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ConflictErrorEncoded"
-                }
-              }
-            }
-          }
         },
         "description": "Import a projected session transcript at the requested location. Accepts transcripts exported by earlier releases. If parentID is supplied, the parent session must already exist; import parents before children.",
         "summary": "Import session",
@@ -10055,7 +10045,7 @@
             }
           }
         },
-        "description": "The aggregate view over the route_attempt ledger for a time window (#2497): per provider/model attempt and token totals, the error breakdown, and the window's coverage (distinct providers, models, sessions, and routes). Read-only; the same shapes the current direct database readers compute.",
+        "description": "The aggregate view over the route_attempt ledger for a time window (#2497): per provider/model attempt, token, and latency totals; hedge counts and wins; error groups with up to 300 characters of the latest error message and last-seen time; and window coverage. Credentials and raw provider error bodies are not served.",
         "summary": "Route attempt aggregates"
       }
     },
@@ -30502,6 +30492,41 @@
         "required": ["providerID", "modelID", "tag", "code", "status", "count", "lastTime", "lastMessage"],
         "additionalProperties": false
       },
+      "RouteAttempt.HedgeAccuracy": {
+        "type": "object",
+        "properties": {
+          "providerID": {
+            "type": "string"
+          },
+          "modelID": {
+            "type": "string"
+          },
+          "hedges": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "wins": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          }
+        },
+        "required": ["providerID", "modelID", "hedges", "wins"],
+        "additionalProperties": false
+      },
       "RouteAttempt.Stats": {
         "type": "object",
         "properties": {
@@ -30509,6 +30534,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/RouteAttempt.TargetTotal"
+            }
+          },
+          "hedges": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RouteAttempt.HedgeAccuracy"
             }
           },
           "errors": {
@@ -30521,7 +30552,7 @@
             "$ref": "#/components/schemas/RouteAttempt.Coverage"
           }
         },
-        "required": ["targets", "errors", "coverage"],
+        "required": ["targets", "hedges", "errors", "coverage"],
         "additionalProperties": false
       },
       "RouteAttempt.TargetTotal": {
@@ -30541,6 +30572,34 @@
               {
                 "type": "string",
                 "enum": ["Infinity", "-Infinity", "NaN"]
+              }
+            ]
+          },
+          "avgFirstTokenMs": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "avgTokensPerSecond": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "string",
+                "enum": ["Infinity", "-Infinity", "NaN"]
+              },
+              {
+                "type": "null"
               }
             ]
           },
@@ -30709,6 +30768,8 @@
           "providerID",
           "modelID",
           "attempts",
+          "avgFirstTokenMs",
+          "avgTokensPerSecond",
           "successes",
           "failures",
           "policyRejections",

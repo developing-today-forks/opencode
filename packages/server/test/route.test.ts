@@ -195,6 +195,7 @@ it.live("serves the route-attempt read API over HTTP: empty ledger, aggregate sh
     expect(yield* Effect.promise(() => stats.json())).toEqual({
       data: {
         targets: [],
+        hedges: [],
         errors: [],
         coverage: { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
       },
@@ -263,7 +264,12 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         output_started: false,
         tokens_input: 50,
         error_tag: "QuotaExceeded",
-        error_message: "quota",
+        error_code: "rate_limit",
+        error_status: 429,
+        error_message: "upstream quota exceeded",
+        error_body: "raw provider body that must never be served",
+        hedged: true,
+        assistant_message_id: "msg_hedge",
       },
       {
         time_started: 4_000,
@@ -275,6 +281,10 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
         outcome: "success",
         output_started: true,
         tokens_input: 200,
+        hedged: true,
+        assistant_message_id: "msg_hedge",
+        first_token_ms: 800,
+        tokens_per_second: 20,
       },
       {
         time_started: 9_000,
@@ -317,9 +327,6 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
     // parity when it serves exactly what these functions return for the same window.
     const expectedAttempts = yield* ModelRouteLog.filteredAttempts(db, { since: 0 })
     const expectedFiltered = yield* ModelRouteLog.filteredAttempts(db, { since: 0, providerID: "anthropic" })
-    const expectedTargets = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
-    const expectedErrors = yield* ModelRouteLog.errorBreakdown(db, 0, 5_000)
-    const expectedCoverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
     const expectedDecisions = yield* ModelRouteLog.filteredDecisions(db, { since: 0, routeID: "luna" })
     expect(expectedAttempts).toHaveLength(4)
     expect(expectedDecisions).toHaveLength(1)
@@ -353,17 +360,97 @@ it.live("serves populated route attempts, stats and decisions over HTTP in parit
     expect(listFiltered.status).toBe(200)
     expect(JSON.parse(listFiltered.text)).toEqual({ data: expectedFiltered.map((row) => wire({ ...row })) })
 
+    for (const index of Array.from({ length: 51 }, (_, index) => index)) {
+      yield* db
+        .insert(RouteAttemptTable)
+        .values({
+          time_started: 1_100 + index,
+          time_ended: 1_200 + index,
+          route_id: "luna",
+          provider_id: `error-provider-${index}`,
+          model_id: `error-model-${index}`,
+          outcome: "failure",
+          output_started: false,
+          error_tag: `ProviderError${index}`,
+          error_code: `ERR_${index}`,
+          error_status: 500,
+        })
+        .run()
+    }
+    const secondErrorMessage = `second upstream message ${"x".repeat(320)}`
+    yield* db
+      .insert(RouteAttemptTable)
+      .values({
+        time_started: 4_500,
+        time_ended: 4_600,
+        route_id: "luna",
+        provider_id: "openai",
+        model_id: "gpt-6-luna",
+        outcome: "failure",
+        output_started: false,
+        error_tag: "QuotaExceeded",
+        error_code: "rate_limit",
+        error_status: 429,
+        error_message: secondErrorMessage,
+      })
+      .run()
+    const latestErrorAttempt = yield* ModelRouteLog.filteredAttempts(db, {
+      since: 4_500,
+      until: 4_500,
+      providerID: "openai",
+      modelID: "gpt-6-luna",
+      limit: 1,
+    })
+    expect(latestErrorAttempt[0]?.errorMessage).toBe(secondErrorMessage)
+    const expectedTargets = yield* ModelRouteLog.targetTotals(db, 0, 5_000)
+    const expectedCoverage = yield* ModelRouteLog.ledgerCoverage(db, 0, 5_000)
     const stats = yield* get("/api/route/attempts/stats?since=0&until=5000")
     expect(stats.status).toBe(200)
     const statsBody = JSON.parse(stats.text) as {
       data: {
-        targets: { providerID: string; modelID: string }[]
-        errors: unknown[]
+        targets: {
+          providerID: string
+          modelID: string
+          avgFirstTokenMs: number | null
+          avgTokensPerSecond: number | null
+        }[]
+        hedges: { providerID: string; modelID: string; hedges: number; wins: number }[]
+        errors: {
+          providerID: string
+          modelID: string
+          tag: string | null
+          code: string | null
+          status: number | null
+          count: number
+          lastTime: number
+          lastMessage: string | null
+        }[]
         coverage: unknown
       }
     }
     expect([...statsBody.data.targets].sort(byTarget)).toEqual([...expectedTargets].sort(byTarget))
-    expect(statsBody.data.errors).toEqual(expectedErrors)
+    expect(statsBody.data.targets.find((target) => target.providerID === "anthropic")).toMatchObject({
+      avgFirstTokenMs: 800,
+      avgTokensPerSecond: 20,
+    })
+    expect([...statsBody.data.hedges].sort(byTarget)).toEqual(
+      [
+        { providerID: "anthropic", modelID: "claude-x", hedges: 1, wins: 1 },
+        { providerID: "openai", modelID: "gpt-6-luna", hedges: 1, wins: 0 },
+      ].sort(byTarget),
+    )
+    expect(statsBody.data.errors).toHaveLength(50)
+    expect(statsBody.data.errors[0]).toEqual({
+      providerID: "openai",
+      modelID: "gpt-6-luna",
+      tag: "QuotaExceeded",
+      code: "rate_limit",
+      status: 429,
+      count: 2,
+      lastTime: 4_500,
+      lastMessage: secondErrorMessage.slice(0, 300),
+    })
+    expect(stats.text).not.toContain("raw provider body that must never be served")
     expect(statsBody.data.coverage).toEqual(
       expectedCoverage ?? { attempts: 0, providers: 0, models: 0, sessions: 0, routes: 0, first: null, last: null },
     )
