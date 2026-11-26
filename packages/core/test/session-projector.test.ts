@@ -2902,4 +2902,69 @@ describe("SessionProjector authoritative usage correction (#2408)", () => {
         })
       }),
   )
+
+  describe("fromRow timestamps (opencode#2870)", () => {
+    const storedRow = Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const stored = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
+      if (!stored) return yield* Effect.die("Session row missing")
+      return stored
+    })
+
+    it.effect("reads optional timestamps that no Date can hold as absent instead of throwing", () =>
+      Effect.gen(function* () {
+        const db = yield* seedSession()
+        yield* db.run(
+          sql`update session_v2 set time_busy = ${1e300}, time_idle = ${1.5}, time_viewed = ${-1e300} where id = ${sessionID}`,
+        )
+        const time = fromRow(yield* storedRow).time
+        expect(time.busy).toBeUndefined()
+        expect(time.idle).toBeUndefined()
+        expect(time.viewed).toBeUndefined()
+      }),
+    )
+
+    it.effect("falls back to the sibling, then the epoch, for an unrepresentable created or updated time", () =>
+      Effect.gen(function* () {
+        const db = yield* seedSession({ time_created: 1_700_000_000_000, time_updated: 1_700_000_500_000 })
+        yield* db.run(sql`update session_v2 set time_created = ${1e300} where id = ${sessionID}`)
+        let time = fromRow(yield* storedRow).time
+        expect(DateTime.toEpochMillis(time.created)).toBe(1_700_000_500_000)
+        expect(DateTime.toEpochMillis(time.updated)).toBe(1_700_000_500_000)
+
+        yield* db.run(
+          sql`update session_v2 set time_created = ${1_700_000_000_000}, time_updated = ${2.5} where id = ${sessionID}`,
+        )
+        time = fromRow(yield* storedRow).time
+        expect(DateTime.toEpochMillis(time.created)).toBe(1_700_000_000_000)
+        expect(DateTime.toEpochMillis(time.updated)).toBe(1_700_000_000_000)
+
+        yield* db.run(
+          sql`update session_v2 set time_created = ${-1e300}, time_updated = ${1e300} where id = ${sessionID}`,
+        )
+        time = fromRow(yield* storedRow).time
+        expect(DateTime.toEpochMillis(time.created)).toBe(0)
+        expect(DateTime.toEpochMillis(time.updated)).toBe(0)
+      }),
+    )
+
+    it.effect("keeps valid timestamps and null optional ones as they were", () =>
+      Effect.gen(function* () {
+        const db = yield* seedSession({
+          time_created: 1_700_000_000_000,
+          time_updated: 1_700_000_500_000,
+          time_busy: 1_700_000_100_000,
+          time_idle: null,
+          time_viewed: 1_700_000_200_000,
+        })
+        const time = fromRow(yield* storedRow).time
+        expect(DateTime.toEpochMillis(time.created)).toBe(1_700_000_000_000)
+        expect(DateTime.toEpochMillis(time.updated)).toBe(1_700_000_500_000)
+        expect(time.busy && DateTime.toEpochMillis(time.busy)).toBe(1_700_000_100_000)
+        expect(time.idle).toBeUndefined()
+        expect(time.viewed && DateTime.toEpochMillis(time.viewed)).toBe(1_700_000_200_000)
+        expect(time.archived).toBeUndefined()
+      }),
+    )
+  })
 })
