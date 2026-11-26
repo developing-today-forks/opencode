@@ -192,11 +192,16 @@ else
     fi
 
     package_name="$package_scope/cli-$target"
-    http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/$package_scope%2fcli-$target/$specific_version" || true)
+    # Fetch the npm packument (not just the HTTP status): its dist.integrity /
+    # dist.shasum fields are the published digest the downloaded tarball is
+    # verified against in verify_tarball before anything is extracted.
+    packument=$(curl -s -w "\n%{http_code}" "https://registry.npmjs.org/$package_scope%2fcli-$target/$specific_version" || true)
+    http_status=$(printf '%s' "$packument" | tail -n 1)
     # Older clients install the minimum release before they can migrate package names.
     if [ "$http_status" = "404" ] && [ -n "$requested_version" ]; then
         package_name="@opencode-ai/cli-$target"
-        http_status=$(curl -s -o /dev/null -w "%{http_code}" "https://registry.npmjs.org/@opencode-ai%2fcli-$target/$specific_version" || true)
+        packument=$(curl -s -w "\n%{http_code}" "https://registry.npmjs.org/@opencode-ai%2fcli-$target/$specific_version" || true)
+        http_status=$(printf '%s' "$packument" | tail -n 1)
     fi
     if [ "$http_status" = "404" ]; then
         echo -e "${RED}Error: Version ${specific_version} is not available for $target${NC}"
@@ -205,6 +210,13 @@ else
     fi
     if [ "$http_status" != "200" ]; then
         echo -e "${RED}Failed to fetch package information${NC}"
+        exit 1
+    fi
+
+    expected_integrity=$(printf '%s' "$packument" | sed -n 's/.*"integrity":"\([^"]*\)".*/\1/p' | head -n 1)
+    expected_shasum=$(printf '%s' "$packument" | sed -n 's/.*"shasum":"\([^"]*\)".*/\1/p' | head -n 1)
+    if [ -z "$expected_integrity" ] && [ -z "$expected_shasum" ]; then
+        echo -e "${RED}Error: Integrity check failed: the npm registry metadata for $package_name@$specific_version publishes no digest (dist.integrity/dist.shasum), so the tarball cannot be verified. Install aborted.${NC}" >&2
         exit 1
     fi
 
@@ -328,6 +340,74 @@ download_with_progress() {
     return $ret
 }
 
+# Verify a downloaded tarball against the digest published in the npm
+# packument (dist.integrity, a sha512 SRI string, preferred; dist.shasum, a
+# sha1 hex digest, as fallback). Fails closed: a mismatch, an unsupported or
+# missing digest, or the absence of any tool that can compute the digest all
+# abort the install before the archive is extracted.
+verify_tarball() {
+    local file="$1"
+    local integrity="${expected_integrity:-}"
+    local shasum="${expected_shasum:-}"
+
+    if [ -n "$integrity" ]; then
+        case "$integrity" in
+            sha512-*) ;;
+            *)
+                echo -e "${RED}Error: Integrity check failed: unsupported dist.integrity value '$integrity'. Install aborted.${NC}" >&2
+                exit 1
+                ;;
+        esac
+        local expected_b64="${integrity#sha512-}"
+        local actual_b64=""
+        if command -v openssl >/dev/null 2>&1; then
+            actual_b64=$(openssl dgst -sha512 -binary "$file" | openssl base64 -A)
+        elif command -v sha512sum >/dev/null 2>&1 || command -v shasum >/dev/null 2>&1; then
+            local hex=""
+            if command -v sha512sum >/dev/null 2>&1; then
+                hex=$(sha512sum "$file" | awk '{print $1}')
+            else
+                hex=$(shasum -a 512 "$file" | awk '{print $1}')
+            fi
+            if command -v base64 >/dev/null 2>&1; then
+                actual_b64=$(printf "$(printf '%s' "$hex" | sed 's/../\\x&/g')" | base64 | tr -d '\n')
+            fi
+        fi
+        if [ -z "$actual_b64" ]; then
+            echo -e "${RED}Error: Integrity check failed: no tool available to compute the tarball's sha512 digest (need openssl or sha512sum/shasum + base64). Install aborted.${NC}" >&2
+            exit 1
+        fi
+        if [ "$actual_b64" != "$expected_b64" ]; then
+            echo -e "${RED}Error: Integrity check failed: the downloaded tarball's sha512 digest does not match dist.integrity published by the npm registry. The archive may be corrupted or tampered with. Install aborted.${NC}" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    if [ -n "$shasum" ]; then
+        local actual_sha1=""
+        if command -v sha1sum >/dev/null 2>&1; then
+            actual_sha1=$(sha1sum "$file" | awk '{print $1}')
+        elif command -v shasum >/dev/null 2>&1; then
+            actual_sha1=$(shasum -a 1 "$file" | awk '{print $1}')
+        elif command -v openssl >/dev/null 2>&1; then
+            actual_sha1=$(openssl dgst -sha1 "$file" | awk '{print $NF}')
+        fi
+        if [ -z "$actual_sha1" ]; then
+            echo -e "${RED}Error: Integrity check failed: no tool available to compute the tarball's sha1 digest (need sha1sum, shasum, or openssl). Install aborted.${NC}" >&2
+            exit 1
+        fi
+        if [ "$actual_sha1" != "$shasum" ]; then
+            echo -e "${RED}Error: Integrity check failed: the downloaded tarball's sha1 digest does not match dist.shasum published by the npm registry. The archive may be corrupted or tampered with. Install aborted.${NC}" >&2
+            exit 1
+        fi
+        return 0
+    fi
+
+    echo -e "${RED}Error: Integrity check failed: no digest (dist.integrity/dist.shasum) is available for the downloaded tarball, so it cannot be verified. Install aborted.${NC}" >&2
+    exit 1
+}
+
 download_and_install() {
     print_message info "\n${MUTED}Installing ${NC}$APP ${MUTED}version: ${NC}$specific_version"
     local tmp_dir="${TMPDIR:-/tmp}/opencode_install_$$"
@@ -350,6 +430,8 @@ download_and_install() {
             exit "$ret"
         fi
     fi
+
+    verify_tarball "$tmp_dir/$filename"
 
     tar -xzf "$tmp_dir/$filename" -C "$tmp_dir"
     local installed_binary="$APP"

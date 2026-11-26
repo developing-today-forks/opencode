@@ -55,14 +55,29 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
       const queue: Session.ID[] = [Session.ID.make(rootID)]
       while (queue.length > 0) {
         const current = queue.shift() as Session.ID
-        const children = yield* session
-          .list({ parentID: current })
-          .pipe(Effect.orElseSucceed(() => ({ data: [] as const })))
-        for (const child of children.data) {
-          if (seen.has(child.id)) continue
-          seen.add(child.id)
-          ids.push(child.id)
-          queue.push(child.id)
+        // session.list is paginated: an omitted limit uses the core default
+        // page (50) and a non-empty page always carries a next cursor, so a
+        // single call silently drops every child past the first page — and
+        // that child's whole subtree with it (#2832). Follow every page for
+        // this parent: a short page is the last one, and a repeated cursor
+        // stops the walk instead of looping.
+        const pageSize = 50
+        const seenCursors = new Set<string>()
+        let cursor: Session.ListCursor | undefined
+        while (true) {
+          const page = yield* session
+            .list(cursor === undefined ? { parentID: current, limit: pageSize } : { cursor, limit: pageSize })
+            .pipe(Effect.orElseSucceed(() => ({ data: [] as const, cursor: { next: undefined } })))
+          for (const child of page.data) {
+            if (seen.has(child.id)) continue
+            seen.add(child.id)
+            ids.push(child.id)
+            queue.push(child.id)
+          }
+          const next = page.cursor.next
+          if (next === undefined || page.data.length < pageSize || seenCursors.has(next)) break
+          seenCursors.add(next)
+          cursor = next
         }
       }
       return ids
@@ -182,6 +197,14 @@ export const SessionHandler = HttpApiBuilder.group(Api, "server.session", (handl
               })
               .pipe(
                 Effect.catchTag("Session.NotFoundError", missingSession),
+                Effect.catchTag(
+                  "Session.AlreadyExistsError",
+                  (error) =>
+                    new ConflictError({
+                      message: `Session already exists with different create fields: ${error.sessionID}`,
+                      resource: error.sessionID,
+                    }),
+                ),
                 Effect.catchTag(
                   "ModelGovernance.DeniedError",
                   (error) => new InvalidRequestError({ message: error.message }),

@@ -205,7 +205,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
           }),
         }),
         success: Schema.Struct({ data: PublicSessionInfo }),
-        error: [SessionNotFoundError, InvalidRequestError],
+        error: [ConflictError, SessionNotFoundError, InvalidRequestError],
       }).annotateMerge(
         OpenApi.annotations({
           identifier: "session.create",

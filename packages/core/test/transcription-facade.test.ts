@@ -391,6 +391,34 @@ describe("TranscriptionFacade parity (§4)", () => {
     }
   })
 
+  test("a provider that never answers hits the façade timeout and surfaces 504 timeout, never 400 unsupported_operation (#2842)", async () => {
+    const events: ModelRouteLog.Event[] = []
+    ModelRouteLog.setSink((event) => events.push(event))
+    process.env.OPENAI_API_KEY = "test-key"
+    try {
+      const parsed = parse({ model: "openai/whisper-1" })
+      if (!parsed.ok) throw new Error(parsed.error.message)
+      const failure = await Effect.runPromise(
+        Effect.gen(function* () {
+          const facade = yield* TranscriptionFacade.Service
+          return yield* Effect.result(facade.transcribe(parsed.value, { requestTimeout: "100 millis" }))
+        }).pipe(Effect.provide(facadeWithStub(() => Effect.never))),
+      )
+      expect(failure._tag).toBe("Failure")
+      if (failure._tag === "Failure") {
+        expect(failure.failure.status).toBe(504)
+        expect(failure.failure.code).toBe("timeout")
+        expect(failure.failure.message).toContain("timed out")
+      }
+      const attempts = events.filter((event) => event.kind === "attempt")
+      expect(attempts).toHaveLength(1)
+      expect(attempts[0]?.row).toMatchObject({ provider_id: "openai", model_id: "whisper-1", outcome: "failure" })
+    } finally {
+      ModelRouteLog.setSink(undefined)
+      delete process.env.OPENAI_API_KEY
+    }
+  })
+
   test("a missing provider key fails typed and still records the attempt", async () => {
     const events: ModelRouteLog.Event[] = []
     ModelRouteLog.setSink((event) => events.push(event))

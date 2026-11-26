@@ -598,10 +598,17 @@ function replaceDirectoryFiles(baseDir: string, files: Readonly<Record<string, U
 }
 
 function readDirectoryFiles(baseDir: string) {
-  return Effect.promise(async () => {
+  return Effect.tryPromise(async () => {
     const out: Record<string, Uint8Array> = {}
     const walk = async (current: string, prefix: string): Promise<void> => {
-      const entries = await fs.readdir(current, { withFileTypes: true }).catch(() => [])
+      const entries = await fs.readdir(current, { withFileTypes: true }).catch((err: unknown) => {
+        // A missing artifact root reads as an empty artifact. Any other
+        // enumeration failure — including a nested directory that cannot be
+        // read — fails the read instead of silently omitting that subtree
+        // and returning a partial file map as success.
+        if (prefix === "" && (err as { code?: unknown } | null)?.code === "ENOENT") return []
+        throw err
+      })
       await Promise.all(
         entries.map(async (entry) => {
           const rel = prefix ? `${prefix}/${entry.name}` : entry.name

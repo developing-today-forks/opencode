@@ -766,7 +766,7 @@ export function make(options: ClientOptions) {
               detached: input?.["detached"],
             },
             successStatus: 200,
-            declaredStatuses: [400, 401, 404],
+            declaredStatuses: [400, 401, 404, 409],
             empty: false,
           },
           requestOptions,
