@@ -45,7 +45,7 @@ export * as TranscriptionFacade from "./transcription-facade.js"
  * live only in the request-scoped input; nothing is written to the
  * session store, the ledger, or logs.
  */
-import { Context, Effect, Layer, Schema, Stream } from "effect"
+import { Context, Duration, Effect, Layer, Schema, Stream } from "effect"
 import { makeLocationNode } from "@opencode/util/effect/app-node"
 import {
   AIError,
@@ -639,7 +639,7 @@ export interface TranscribeOptions {
   /** Test seam (#2842): overrides the 120-second provider timeout
    * (REQUEST_TIMEOUT) so the timeout classification can be exercised
    * without waiting two minutes. Production callers omit it. */
-  readonly requestTimeout?: string
+  readonly requestTimeout?: Duration.Input
 }
 
 export interface Interface {
