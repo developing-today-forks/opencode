@@ -20,11 +20,33 @@ export type AuthoritativeUsage = {
   readonly cacheWrite: number
 }
 
+/** The largest epoch-millisecond magnitude a JavaScript Date can hold (ECMA-262 time value range). */
+const maxEpochMillis = 8_640_000_000_000_000
+
+/**
+ * A stored epoch-millisecond column as a DateTime, or undefined when the value can't be one. Legacy or
+ * corrupt rows can hold a non-integer or out-of-range number (written before boundary validation), and
+ * DateTime.makeUnsafe throws on those, which would brick every read of the session (opencode#2820, #2870).
+ */
+const representable = (millis: number | null) =>
+  millis === null || !Number.isInteger(millis) || Math.abs(millis) > maxEpochMillis
+    ? undefined
+    : DateTime.makeUnsafe(millis)
+
+/**
+ * A required timestamp: its own value when representable, else its sibling's (created and updated stand in
+ * for each other), else the epoch, so a session with a corrupt row still reads and sorts as oldest.
+ */
+const required = (own: DateTime.Utc | undefined, sibling: DateTime.Utc | undefined) =>
+  own ?? sibling ?? DateTime.makeUnsafe(0)
+
 export function fromRow(
   row: typeof SessionTable.$inferSelect,
   authoritative?: AuthoritativeUsage,
   serving?: ModelUsage.LastServing | null,
 ): SessionSchema.Info {
+  const created = representable(row.time_created)
+  const updated = representable(row.time_updated)
   return SessionSchema.Info.make({
     id: row.id,
     projectID: row.project_id,
@@ -96,18 +118,12 @@ export function fromRow(
     revert: row.revert ? decodeRevert(row.revert) : undefined,
     outcome: row.idle_outcome ?? undefined,
     time: {
-      created: DateTime.makeUnsafe(row.time_created),
-      updated: DateTime.makeUnsafe(row.time_updated),
-      busy: row.time_busy === null ? undefined : DateTime.makeUnsafe(row.time_busy),
-      idle: row.time_idle === null ? undefined : DateTime.makeUnsafe(row.time_idle),
-      viewed: row.time_viewed === null ? undefined : DateTime.makeUnsafe(row.time_viewed),
-      // Legacy rows can carry an unrepresentable time_archived (written before boundary validation); treat those as unarchived instead of throwing out of makeUnsafe and bricking every read of the session.
-      archived:
-        row.time_archived === null ||
-        !Number.isInteger(row.time_archived) ||
-        Math.abs(row.time_archived) > 8640000000000000
-          ? undefined
-          : DateTime.makeUnsafe(row.time_archived),
+      created: required(created, updated),
+      updated: required(updated, created),
+      busy: representable(row.time_busy),
+      idle: representable(row.time_idle),
+      viewed: representable(row.time_viewed),
+      archived: representable(row.time_archived),
     },
   })
 }
