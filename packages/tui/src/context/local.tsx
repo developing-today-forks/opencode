@@ -551,7 +551,16 @@ export const { use: useLocal, provider: LocalProvider } = createSimpleContext({
         })
         .finally(() => {
           setSessionStore("ready", true)
-          if (state.pending) save()
+          if (!state.pending) return
+          // #2856: a pin change made before the store loaded is flushed here,
+          // after its caller returned, so a refusal to overwrite an unreadable
+          // store would otherwise surface as an unhandled rejection. Report it
+          // on the toast surface; save() still refuses before any write.
+          try {
+            save()
+          } catch (error) {
+            toast.error(error)
+          }
         })
 
       const slots = createMemo(() => {
