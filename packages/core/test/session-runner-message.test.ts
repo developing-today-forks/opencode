@@ -933,8 +933,15 @@ Earlier work
         messageID: id("tool-uri-call"),
         id: Tool.CallID.make("call_tool_uri"),
       }
-      const authorizeRead: FileAccess.Interface["authorizeRead"] = (path) =>
-        Effect.succeed({ absolute: AbsolutePath.make(path), resource: path } as FileAccess.Target)
+      // Faithful to the real FileAccess.authorizeRead: an existing file's target carries its identity.
+      const authorizeRead: FileAccess.Interface["authorizeRead"] = (path) => {
+        const info = statSync(path)
+        return Effect.succeed({
+          absolute: AbsolutePath.make(path),
+          resource: path,
+          fileIdentity: { dev: info.dev, ino: info.ino },
+        } as FileAccess.Target)
+      }
       const snapshot = await Effect.runPromise(
         materializeToolResult(
           [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain", name: "hello.txt" }],
@@ -1111,6 +1118,59 @@ Earlier work
         text: expect.stringContaining("file was replaced after authorization"),
       })
       expect(JSON.stringify(swapped)).not.toContain(outsideBase64)
+    } finally {
+      rmSync(directory, { recursive: true, force: true })
+    }
+  })
+
+  test("does not snapshot a tool-result file whose authorization carries no identity", async () => {
+    const directory = mkdtempSync(path.join(os.tmpdir(), "tool-result-unbound-"))
+    const context: FileAccess.Invocation = {
+      sessionID: SessionSchema.ID.make("ses_tool_unbound"),
+      agent: build,
+      messageID: id("tool-unbound-call"),
+      id: Tool.CallID.make("call_tool_unbound"),
+    }
+    try {
+      // Missing identity: the target names an existing file but carries no authorized identity, so
+      // the read cannot be bound to the checked object and must refuse rather than serve its bytes.
+      const filePath = path.join(directory, "hello.txt")
+      writeFileSync(filePath, "authorized bytes")
+      const authorizeIdentityless: FileAccess.Interface["authorizeRead"] = (file) =>
+        Effect.succeed({ absolute: AbsolutePath.make(file), resource: file } as FileAccess.Target)
+      const unbound = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(filePath).href, mime: "text/plain", name: "hello.txt" }],
+          context,
+          authorizeIdentityless,
+        ),
+      )
+      expect(unbound[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("file was replaced after authorization"),
+      })
+      expect(JSON.stringify(unbound)).not.toContain(Buffer.from("authorized bytes").toString("base64"))
+
+      // Create-after-authorize: the file did not exist when authorization ran (an identity-less
+      // target is all authorization can return for it) and is created before the snapshot read.
+      // The created bytes were never authorized and must not be snapshotted.
+      const createdPath = path.join(directory, "created.txt")
+      const authorizeCreated: FileAccess.Interface["authorizeRead"] = (file) => {
+        writeFileSync(file, "outside bytes")
+        return Effect.succeed({ absolute: AbsolutePath.make(file), resource: file } as FileAccess.Target)
+      }
+      const created = await Effect.runPromise(
+        materializeToolResult(
+          [{ type: "file", uri: pathToFileURL(createdPath).href, mime: "text/plain", name: "created.txt" }],
+          context,
+          authorizeCreated,
+        ),
+      )
+      expect(created[0]).toMatchObject({
+        type: "text",
+        text: expect.stringContaining("file was replaced after authorization"),
+      })
+      expect(JSON.stringify(created)).not.toContain(Buffer.from("outside bytes").toString("base64"))
     } finally {
       rmSync(directory, { recursive: true, force: true })
     }
