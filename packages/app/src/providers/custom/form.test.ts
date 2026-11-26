@@ -1,5 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { CUSTOM_PROVIDER_PACKAGE, emptyCustomProviderForm, validateCustomProvider, type FormState } from "./form"
+import {
+  CUSTOM_PROVIDER_PACKAGE,
+  customProviderFormFromConfig,
+  emptyCustomProviderForm,
+  validateCustomProvider,
+  type FormState,
+} from "./form"
 
 const t = (key: string) => key
 
@@ -86,5 +92,81 @@ describe("validateCustomProvider", () => {
     expect(result.result).toBeUndefined()
     expect(result.models[1].id).toBe("provider.custom.error.duplicate")
     expect(result.headers[1].key).toBe("provider.custom.error.duplicate")
+  })
+
+  test("exempts the provider being edited from the duplicate-ID check", () => {
+    const editing = validateCustomProvider({
+      form: form(),
+      t,
+      disabledProviders: [],
+      existingProviderIDs: new Set(["acme", "other"]),
+      editingProviderID: "acme",
+    })
+
+    expect(editing.err.providerID).toBeUndefined()
+    expect(editing.result?.providerID).toBe("acme")
+
+    // A different existing ID is still rejected while editing.
+    const clash = validateCustomProvider({
+      form: form({ providerID: "other" }),
+      t,
+      disabledProviders: [],
+      existingProviderIDs: new Set(["acme", "other"]),
+      editingProviderID: "acme",
+    })
+
+    expect(clash.err.providerID).toBe("provider.custom.error.providerID.exists")
+    expect(clash.result).toBeUndefined()
+  })
+})
+
+describe("customProviderFormFromConfig", () => {
+  test("prefills the edit form from a saved provider config and round-trips through validation", () => {
+    const prefilled = customProviderFormFromConfig("acme", {
+      name: "Acme",
+      env: ["ACME_API_KEY"],
+      settings: { baseURL: "https://api.acme.example/v1" },
+      headers: { "X-Team": "blue" },
+      models: { "acme-1": { name: "Acme 1" }, "acme-2": { name: "Acme 2" } },
+    })
+
+    expect(prefilled.providerID).toBe("acme")
+    expect(prefilled.name).toBe("Acme")
+    expect(prefilled.baseURL).toBe("https://api.acme.example/v1")
+    expect(prefilled.apiKey).toBe("{env:ACME_API_KEY}")
+    expect(prefilled.models.map((m) => [m.id, m.name])).toEqual([
+      ["acme-1", "Acme 1"],
+      ["acme-2", "Acme 2"],
+    ])
+    expect(prefilled.headers.map((h) => [h.key, h.value])).toEqual([["X-Team", "blue"]])
+
+    const validated = validateCustomProvider({
+      form: prefilled,
+      t,
+      disabledProviders: [],
+      existingProviderIDs: new Set(["acme"]),
+      editingProviderID: "acme",
+    })
+
+    expect(validated.result?.config).toEqual({
+      name: "Acme",
+      package: CUSTOM_PROVIDER_PACKAGE,
+      env: ["ACME_API_KEY"],
+      settings: { baseURL: "https://api.acme.example/v1" },
+      headers: { "X-Team": "blue" },
+      models: { "acme-1": { name: "Acme 1" }, "acme-2": { name: "Acme 2" } },
+    })
+  })
+
+  test("a provider saved with a plain key prefills an empty key field (the key stays in the credential store)", () => {
+    const prefilled = customProviderFormFromConfig("acme", {
+      name: "Acme",
+      settings: { baseURL: "https://api.acme.example/v1" },
+      models: { "acme-1": { name: "Acme 1" } },
+    })
+
+    expect(prefilled.apiKey).toBe("")
+    expect(prefilled.headers).toHaveLength(1)
+    expect(prefilled.headers[0]).toMatchObject({ key: "", value: "" })
   })
 })

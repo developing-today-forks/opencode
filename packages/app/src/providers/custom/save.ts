@@ -24,6 +24,10 @@ import { validateCustomProvider, type CustomProviderConfig, type FormState } fro
 export interface CustomProviderApi {
   updateConfig(input: { providers: Record<string, CustomProviderConfig> }): Promise<unknown>
   createCredential(input: { integrationID: string; value: { type: "key"; key: string } }): Promise<unknown>
+  /** Removes every credential stored under the provider's own integration
+   * ID. Used by an edit that clears the key: after the config patch, the
+   * stored key is deleted so the provider continues without one. */
+  removeCredentials?(integrationID: string): Promise<unknown>
   /** Reloads the catalogs after a successful save; best-effort by contract —
    * the persisted config and credential are the source of truth. */
   reload?(providerID: string): Promise<unknown> | unknown
@@ -48,6 +52,12 @@ export async function saveCustomProvider(input: {
   t: Translator
   existingProviderIDs: Set<string>
   disabledProviders?: string[]
+  /** The provider being edited, if this save is an edit: the duplicate-ID
+   * check exempts it, an empty key field keeps the stored credential, a new
+   * key replaces it (a created credential becomes the active one), and
+   * `clearKey` removes it. */
+  editingProviderID?: string
+  clearKey?: boolean
   api: CustomProviderApi
 }): Promise<SaveCustomProviderResult> {
   const validated = validateCustomProvider({
@@ -55,6 +65,7 @@ export async function saveCustomProvider(input: {
     t: input.t,
     disabledProviders: input.disabledProviders ?? [],
     existingProviderIDs: input.existingProviderIDs,
+    editingProviderID: input.editingProviderID,
   })
 
   if (!validated.result)
@@ -71,6 +82,12 @@ export async function saveCustomProvider(input: {
   if (key) {
     try {
       await input.api.createCredential({ integrationID: providerID, value: { type: "key", key } })
+    } catch (error) {
+      return { ok: false, stage: "credential", providerID, configSaved: true, error }
+    }
+  } else if (input.clearKey && input.api.removeCredentials) {
+    try {
+      await input.api.removeCredentials(providerID)
     } catch (error) {
       return { ok: false, stage: "credential", providerID, configSaved: true, error }
     }
