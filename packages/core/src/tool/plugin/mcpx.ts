@@ -23,6 +23,7 @@ import {
 export * as McpxProjection from "./mcpx-projection.js"
 import {
   DaemonHTTPError,
+  DaemonMalformedResponseError,
   DaemonTimeoutError,
   DaemonUnreachableError,
   ensureScriptReady,
@@ -243,9 +244,10 @@ export const daemonErrorBodyMaxBytes = 16 * 1024
 /** How long an ensureDaemon health probe may go unanswered (see daemonRequestTimeoutMs). */
 const daemonHealthTimeoutMs = 1_000
 
-// No answer at all is DaemonUnreachableError; a non-2xx answer is DaemonHTTPError. Only the first lets mcpx_exec fall
-// back to the CLI, because only then did the daemon not receive the request. A timeout is neither: the request may
-// already be executing, so it surfaces as DaemonTimeoutError and is never replayed through the CLI.
+// No answer at all is DaemonUnreachableError; a non-2xx answer is DaemonHTTPError; a 2xx answer whose body is not
+// JSON is DaemonMalformedResponseError (#2808). Only the first lets mcpx_exec fall back to the CLI, because only
+// then did the daemon not receive the request. A timeout is neither: the request may already be executing, so it
+// surfaces as DaemonTimeoutError and is never replayed through the CLI.
 const send = async (request: () => Promise<Response>, path: string, timeoutMs: number): Promise<any> => {
   let res: Response
   try {
@@ -278,7 +280,14 @@ const send = async (request: () => Promise<Response>, path: string, timeoutMs: n
       )
     throw error
   })
-  return JSON.parse(text)
+  try {
+    return JSON.parse(text)
+  } catch {
+    // A 2xx non-JSON body means whatever answered at the endpoint is not
+    // speaking the daemon protocol (#2808); surface it as a typed daemon
+    // error naming the path/status instead of a raw SyntaxError.
+    throw new DaemonMalformedResponseError(path, res.status, text)
+  }
 }
 
 export const callDaemon = async (
