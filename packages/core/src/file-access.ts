@@ -351,7 +351,9 @@ const layer = Layer.effect(
       if (!resolved.exists) return resolved.target
       // Capture the authorized file's identity so a consumer that reads later can bind its read to this
       // object instead of trusting the path name (#2841). A stat failure leaves the target without an
-      // identity; the consumer's own open then surfaces the real error as before.
+      // identity; consumers that snapshot the file (the tool-result reader) refuse an identity-less
+      // target rather than serving unbound bytes, and other consumers' own opens surface errors as
+      // before.
       const identity = yield* Effect.tryPromise({ try: () => stat(resolved.canonical), catch: (error) => error }).pipe(
         Effect.map((info): FileIdentity => ({ dev: info.dev, ino: info.ino })),
         Effect.orElseSucceed(() => undefined),
