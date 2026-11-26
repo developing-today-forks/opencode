@@ -149,6 +149,69 @@ describe("CodexSync", () => {
     ),
   )
 
+  it.effect("never syncs an unmatched account into a base credential with a different account ID", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const credentials = yield* Credential.Service
+        const authPath = path.join(tmp.path, "auth.json")
+        const stored = jwt({ iat: 1000, exp: 2000 })
+        const created = yield* credentials.create({
+          integrationID,
+          value: oauth({
+            access: stored,
+            refresh: "refresh-1",
+            expires: 2_000_000,
+            metadata: { accountID: "acc-1" },
+          }),
+        })
+        const newer = jwt({ iat: 3000, exp: 4000 })
+        yield* Effect.promise(() => fs.writeFile(authPath, authFile(tokenFields(newer, "refresh-2", "acc-2"))))
+        const sync = yield* CodexSync.make(authPath)
+        expect(yield* sync.syncOnce()).toBe("account-mismatch")
+        const saved = yield* credentials.list(integrationID)
+        expect(saved).toHaveLength(1)
+        expect(saved[0]?.id).toBe(created.id)
+        expect(saved[0]?.value).toEqual(
+          oauth({ access: stored, refresh: "refresh-1", expires: 2_000_000, metadata: { accountID: "acc-1" } }),
+        )
+      }),
+    ),
+  )
+
+  it.effect("keeps the base fallback for a legacy auth file without an account ID", () =>
+    withTempDir((tmp) =>
+      Effect.gen(function* () {
+        const credentials = yield* Credential.Service
+        const authPath = path.join(tmp.path, "auth.json")
+        const stored = jwt({ iat: 1000, exp: 2000 })
+        const created = yield* credentials.create({
+          integrationID,
+          value: oauth({
+            access: stored,
+            refresh: "refresh-1",
+            expires: 2_000_000,
+            metadata: { accountID: "acc-1" },
+          }),
+        })
+        const next = jwt({ iat: 3000, exp: 4000 })
+        yield* Effect.promise(() => fs.writeFile(authPath, authFile(tokenFields(next, "refresh-2"))))
+        const sync = yield* CodexSync.make(authPath)
+        expect(yield* sync.syncOnce()).toBe("updated")
+        const saved = yield* credentials.list(integrationID)
+        expect(saved).toHaveLength(1)
+        expect(saved[0]?.id).toBe(created.id)
+        expect(saved[0]?.value).toEqual(
+          oauth({
+            access: next,
+            refresh: "refresh-2",
+            expires: 4_000_000,
+            metadata: { accountID: "acc-1", [Credential.externalRefreshMetadataKey]: true },
+          }),
+        )
+      }),
+    ),
+  )
+
   it.effect("leaves a newer stored lineage untouched and reports diverged", () =>
     withTempDir((tmp) =>
       Effect.gen(function* () {
