@@ -348,7 +348,30 @@ export const addNote = (input: NoteInput, now: string, dataDir?: string): Note =
     ...(input.poolID ? { poolID: input.poolID } : {}),
   })
   fs.mkdirSync(directory(dataDir), { recursive: true })
-  fs.appendFileSync(noteFile(dataDir), `${JSON.stringify(note)}\n`)
+  const file = noteFile(dataDir)
+  // Newline repair (#2821): if an earlier append was torn (killed mid-write, ENOSPC,
+  // power loss), the file ends in an unterminated fragment. Appending the new note's
+  // JSON straight onto that fragment would join them into one line, which readNotes
+  // counts as a single skipped line — the new note would be lost even though its
+  // write succeeded. Terminate the fragment first so the new note starts a fresh
+  // line and the torn tail costs only itself (one skipped line).
+  let prefix = ""
+  try {
+    const size = fs.statSync(file).size
+    if (size > 0) {
+      const descriptor = fs.openSync(file, "r")
+      try {
+        const last = Buffer.alloc(1)
+        fs.readSync(descriptor, last, 0, 1, size - 1)
+        if (last[0] !== 0x0a) prefix = "\n"
+      } finally {
+        fs.closeSync(descriptor)
+      }
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error
+  }
+  fs.appendFileSync(file, `${prefix}${JSON.stringify(note)}\n`)
   return note
 }
 
