@@ -51,23 +51,24 @@ const boundedRead = async (target: FileAccess.Target) => {
   // Bind the read to the file object authorization checked (#2841): opening the authorized path by name
   // alone would follow a post-authorization swap (a replaced file, or a parent directory replaced by a
   // symlink) and snapshot bytes that were never authorized — the check-then-open-by-name class fixed for
-  // fs.read in #2750 and for uploads in #2744. When the target carries the authorized identity, the path
-  // must still resolve to itself and the opened handle must be that same object; either mismatch refuses
-  // the snapshot and the caller falls back with the explicit fallback text. Once the handle is open, the
-  // read is bound to the verified inode. A delete-and-recreate that recycles the same inode is
-  // indistinguishable by this measure — the bound #2750 documents.
-  if (target.fileIdentity) {
-    if ((await realpath(target.absolute)) !== target.absolute)
-      throw new Error("file was replaced after authorization")
-  }
+  // fs.read in #2750 and for uploads in #2744. The binding is mandatory, not best-effort: authorization
+  // of an existing local file always captures its identity (FileAccess.readTarget), so a target without
+  // one — the file did not exist at authorization time, its stat failed, or the authorizer does not
+  // capture identity — cannot be bound to the checked object, and the snapshot refuses rather than
+  // serving unbound bytes (a file created after authorization is exactly the swap this guards against).
+  // When an identity is present, the path must still resolve to itself and the opened handle must be
+  // that same object; either mismatch refuses the snapshot and the caller falls back with the explicit
+  // fallback text. Once the handle is open, the read is bound to the verified inode. A
+  // delete-and-recreate that recycles the same inode is indistinguishable by this measure — the bound
+  // #2750 documents.
+  if (!target.fileIdentity) throw new Error("file was replaced after authorization")
+  if ((await realpath(target.absolute)) !== target.absolute)
+    throw new Error("file was replaced after authorization")
   const handle = await open(target.absolute, constants.O_RDONLY | constants.O_NONBLOCK | (constants.O_NOFOLLOW ?? 0))
   try {
     const info = await handle.stat()
     if (!info.isFile()) throw new Error("target is not a regular file")
-    if (
-      target.fileIdentity &&
-      (info.dev !== target.fileIdentity.dev || info.ino !== target.fileIdentity.ino)
-    )
+    if (info.dev !== target.fileIdentity.dev || info.ino !== target.fileIdentity.ino)
       throw new Error("file was replaced after authorization")
     if (info.size > MAX_TOOL_URI_BYTES) throw new Error(`exceeds ${MAX_TOOL_URI_BYTES} byte limit`)
     const chunks: Buffer[] = []
