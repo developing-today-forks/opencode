@@ -2,6 +2,7 @@ export * as ModelRouteLog from "./model-route-log.js"
 
 import { createHash } from "node:crypto"
 import { and, asc, count, desc, eq, gt, gte, inArray, isNotNull, isNull, lte, ne, or, sql, type SQL } from "drizzle-orm"
+import { alias } from "drizzle-orm/sqlite-core"
 import { Effect, Layer, Queue } from "effect"
 import { AIError, isRetryable, type HttpContext } from "@opencode/ai/effect"
 import { RequestExecutor, type StreamOptions } from "@opencode/ai/route"
@@ -784,7 +785,7 @@ export interface HedgeAccuracy {
  * `hedged` rows that share an assistant message: one `hedged-out` loser and one `success` winner.
  * This is the record of what hedging predicted against how it turned out.
  */
-export const hedgeAccuracy = (db: Database.Interface["db"], since: number, routeID?: string) =>
+export const hedgeAccuracy = (db: Database.Interface["db"], since: number, routeID?: string, until?: number) =>
   db
     .select({
       providerID: RouteAttemptTable.provider_id,
@@ -796,6 +797,7 @@ export const hedgeAccuracy = (db: Database.Interface["db"], since: number, route
     .where(
       and(
         gte(RouteAttemptTable.time_started, since),
+        until === undefined ? undefined : lte(RouteAttemptTable.time_started, until),
         sql`${RouteAttemptTable.hedged} is true`,
         sql`${RouteAttemptTable.assistant_message_id} is not null`,
         sql`exists (select 1 from route_attempt rival where rival.assistant_message_id = ${RouteAttemptTable.assistant_message_id} and rival.hedged is true and (rival.provider_id != ${RouteAttemptTable.provider_id} or rival.model_id != ${RouteAttemptTable.model_id}))`,
@@ -985,6 +987,8 @@ export const targetTotals = (db: Database.Interface["db"], since: number, until?
       providerID: RouteAttemptTable.provider_id,
       modelID: RouteAttemptTable.model_id,
       attempts: count(),
+      avgFirstTokenMs: sql<number | null>`round(avg(${RouteAttemptTable.first_token_ms}))`,
+      avgTokensPerSecond: sql<number | null>`avg(${RouteAttemptTable.tokens_per_second})`,
       successes: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} = 'success' then 1 else 0 end), 0)`,
       failures: sql<number>`coalesce(sum(case when ${RouteAttemptTable.outcome} in ('failure','timeout') and (${RouteAttemptTable.error_tag} is null or ${RouteAttemptTable.error_tag} != 'ContentPolicy') then 1 else 0 end), 0)`,
       policyRejections: sql<number>`coalesce(sum(case when ${RouteAttemptTable.error_tag} = 'ContentPolicy' then 1 else 0 end), 0)`,
@@ -1008,7 +1012,40 @@ export const targetTotals = (db: Database.Interface["db"], since: number, until?
       ),
     )
     .groupBy(RouteAttemptTable.provider_id, RouteAttemptTable.model_id)
+    .orderBy(desc(count()))
     .all()
+
+/** Error groups for the public route stats API. The truncated last message matches the existing
+ * read schema; raw provider response bodies and credential ids are never selected. */
+export const routeStatsErrors = (db: Database.Interface["db"], since: number, until?: number) => {
+  const attempts = alias(RouteAttemptTable, "stats_attempt")
+  const latestError = alias(RouteAttemptTable, "stats_error")
+  return db
+    .select({
+      providerID: attempts.provider_id,
+      modelID: attempts.model_id,
+      tag: attempts.error_tag,
+      code: attempts.error_code,
+      status: attempts.error_status,
+      count: count(),
+      lastTime: sql<number>`max(${attempts.time_started})`,
+      lastMessage: sql<
+        string | null
+      >`substr((select ${latestError.error_message} from route_attempt as stats_error where ${latestError.provider_id} = ${attempts.provider_id} and ${latestError.model_id} = ${attempts.model_id} and ${latestError.error_tag} is ${attempts.error_tag} and ${latestError.error_code} is ${attempts.error_code} and ${latestError.error_status} is ${attempts.error_status} and ${and(gte(latestError.time_started, since), until === undefined ? undefined : lte(latestError.time_started, until), sql`${latestError.outcome} != 'success'`)} order by ${latestError.time_started} desc limit 1), 1, 300)`,
+    })
+    .from(attempts)
+    .where(
+      and(
+        gte(attempts.time_started, since),
+        until === undefined ? undefined : lte(attempts.time_started, until),
+        sql`${attempts.outcome} != 'success'`,
+      ),
+    )
+    .groupBy(attempts.provider_id, attempts.model_id, attempts.error_tag, attempts.error_code, attempts.error_status)
+    .orderBy(desc(count()))
+    .limit(50)
+    .all()
+}
 
 export interface LedgerCoverage {
   readonly attempts: number
@@ -1433,10 +1470,11 @@ export const attemptRollup = (db: Database.Interface["db"], filter: RollupFilter
         (rows as RollupRawRow[])
           // An empty window still yields one aggregate row under bucket "none" with no group: drop it.
           .filter((row) => row.attempts > 0)
-          .map(({ credentialID, ...row }): RollupRow =>
-            credentialID === undefined
-              ? row
-              : { ...row, credentialKey: credentialID === null ? null : credentialKey(credentialID) },
+          .map(
+            ({ credentialID, ...row }): RollupRow =>
+              credentialID === undefined
+                ? row
+                : { ...row, credentialKey: credentialID === null ? null : credentialKey(credentialID) },
           ),
       ),
     )

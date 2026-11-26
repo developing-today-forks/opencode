@@ -72,6 +72,7 @@ export type Status =
   | "updated"
   | "unchanged"
   | "diverged"
+  | "account-mismatch"
   | "no-auth-file"
   | "invalid-auth-file"
   | "no-credential"
@@ -177,10 +178,10 @@ export const plan = (current: Credential.OAuth, file: FileTokens): Plan => {
  * The file names its account, and the account is the lineage's identity: the
  * target is the OAuth credential whose stored account ID equals the file's,
  * wherever it lives — the base `openai` integration or an instance door such
- * as `openai.main`. Without an account match (including files that carry no
- * account ID), selection falls back to the base integration's selected
- * credential, as before. One account's tokens are never written into another
- * account's credential.
+ * as `openai.main`. A known mismatch on the selected base credential is not a
+ * fallback: the file's tokens belong to another account. Legacy base
+ * credentials without an account ID, and auth files without an account ID,
+ * retain the base-integration fallback.
  */
 export const selectTarget = (
   credentials: ReadonlyArray<Credential.Info>,
@@ -196,11 +197,22 @@ export const selectTarget = (
       (credential) => credential.value.type === "oauth" && credential.value.metadata?.accountID === file.accountID,
     )
     if (match.length) return match.at(-1)
+    const base = selectedBaseCredential(credentials)
+    if (
+      base?.value.type === "oauth" &&
+      base.value.metadata?.accountID !== undefined &&
+      base.value.metadata.accountID !== file.accountID
+    ) {
+      return undefined
+    }
   }
   // Connection resolution projects an integration's saved list in reverse and
   // selects the first entry, so the selected credential is the list's last.
-  return credentials.filter((credential) => credential.integrationID === integrationID).at(-1)
+  return selectedBaseCredential(credentials)
 }
+
+const selectedBaseCredential = (credentials: ReadonlyArray<Credential.Info>) =>
+  credentials.filter((credential) => credential.integrationID === integrationID).at(-1)
 
 const metadataEqual = (
   a: Readonly<Record<string, unknown>> | undefined,
@@ -230,7 +242,22 @@ export const make = (authPath: string) =>
         )
       const saved = yield* credentials.all()
       const target = selectTarget(saved, file)
-      if (!target) return "no-credential"
+      if (!target) {
+        const base = selectedBaseCredential(saved)
+        if (
+          file.accountID &&
+          base?.value.type === "oauth" &&
+          base.value.metadata?.accountID !== undefined &&
+          base.value.metadata.accountID !== file.accountID
+        ) {
+          yield* Effect.logWarning(
+            "codex credential sync skipped: auth file account does not match the base credential",
+            { credentialID: base.id, integrationID: base.integrationID },
+          )
+          return "account-mismatch"
+        }
+        return "no-credential"
+      }
       if (target.value.type !== "oauth") return "not-oauth"
       const result = plan(target.value, file)
       if (result.action === "unchanged") return "unchanged"

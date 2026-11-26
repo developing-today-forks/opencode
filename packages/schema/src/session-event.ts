@@ -6,7 +6,7 @@ import { Event } from "./event.js"
 import { FinishReason } from "./llm.js"
 import { Content } from "./tool.js"
 import { Model } from "./model.js"
-import { NonNegativeInt, PositiveInt, RelativePath } from "./schema.js"
+import { EpochMillis, NonNegativeInt, PositiveInt, RelativePath } from "./schema.js"
 import { SessionID } from "./session-id.js"
 import { SessionMetadata } from "./session-metadata.js"
 import { SessionSubagentPolicy } from "./session-subagent-policy.js"
@@ -150,7 +150,7 @@ export const Archived = Event.durable({
   schema: {
     ...Base,
     /** Epoch-millisecond archive time when the session was archived elsewhere first, such as a client's own archive carried over; absent means the event's own time. */
-    time: Schema.Finite.pipe(Schema.optional),
+    time: EpochMillis.pipe(Schema.optional),
   },
 })
 export type Archived = typeof Archived.Type

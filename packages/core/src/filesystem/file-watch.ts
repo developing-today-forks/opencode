@@ -20,6 +20,8 @@ import {
 } from "effect"
 import { Bus } from "../bus.js"
 import { Watcher } from "./watcher.js"
+import { realpathSync } from "node:fs"
+import path from "path"
 
 export const TTL = Duration.hours(24)
 export const SWEEP_INTERVAL = Duration.minutes(5)
@@ -68,6 +70,40 @@ export const layer = (options?: Options) =>
       const locations = new Map<string, Map<string, Entry>>()
       const locationKey = (location: Location.Ref) => JSON.stringify([location.directory, location.workspaceID])
 
+      // Symlink-swap confinement (#2830): fs.watch checks confinement with
+      // FileSystem.read, then subscribes by lexical path. A parent directory
+      // swapped for an outside symlink in between subscribes outside the
+      // location. Canonicalize best-effort — realpath of the nearest existing
+      // ancestor with missing components reattached, so a swapped parent
+      // still fails closed — and require containment in the canonical
+      // location directory anchored when the watch starts, so a later root
+      // replacement cannot move the check along with the target. The native
+      // subscription uses the canonical path while published events keep the
+      // requested filename. Nothing existing falls back to the lexical path,
+      // preserving synthetic (non-existent) watch paths.
+      const canonical = (input: string) => {
+        const absolute = path.resolve(input)
+        const missing: string[] = []
+        let current = absolute
+        while (true) {
+          try {
+            return path.join(realpathSync(current), ...missing.reverse())
+          } catch {
+            const parent = path.dirname(current)
+            if (parent === current) return absolute
+            missing.push(path.basename(current))
+            current = parent
+          }
+        }
+      }
+      const confined = (root: string, file: string) => {
+        const real = canonical(file)
+        return FSUtil.contains(root, real) ? real : undefined
+      }
+
+      const refuse = (file: string) =>
+        Effect.logWarning("file watch refused outside location", { file })
+
       const remove = (key: string, file: string) => {
         const files = locations.get(key)
         const entry = files?.get(file)
@@ -84,12 +120,20 @@ export const layer = (options?: Options) =>
           return Scope.close(entry.scope, Exit.void)
         })
 
-      const start = Effect.fnUntraced(function* (key: string, input: Input) {
+      const start = Effect.fnUntraced(function* (key: string, input: Input, root: string, target: string) {
         const child = yield* Scope.fork(scope)
         yield* Effect.gen(function* () {
-          const updates = yield* watcher.subscribe({ path: input.file, type: "file" })
+          // Revalidate immediately before subscribing: the handler's read
+          // check may predate a parent symlink swap.
+          if (!confined(root, input.file)) {
+            yield* refuse(input.file)
+            return
+          }
+          const updates = yield* watcher.subscribe({ path: target, type: "file" })
           yield* Stream.runForEach(updates, () =>
             Effect.gen(function* () {
+              // A swap after subscribing must not publish outside events.
+              if (!confined(root, input.file)) return
               const exists = yield* fs.existsSafe(input.file)
               yield* bus.publish(
                 FileSystem.Event.Changed,
@@ -141,12 +185,20 @@ export const layer = (options?: Options) =>
                 existing.expires = expires
                 return
               }
+              // Refuse synchronously when the path already resolves outside,
+              // so no subscription is established for a swapped parent.
+              const root = canonical(input.location.directory)
+              const target = confined(root, input.file)
+              if (!target) {
+                yield* refuse(input.file)
+                return
+              }
               const full = locations.get(key)
               if (full && full.size >= MAX_PER_LOCATION) {
                 const soonest = [...full].reduce((a, b) => (b[1].expires < a[1].expires ? b : a))
                 yield* stop(key, soonest[0])
               }
-              const entry = { expires, scope: yield* start(key, input) }
+              const entry = { expires, scope: yield* start(key, input, root, target) }
               const files = locations.get(key) ?? new Map<string, Entry>()
               files.set(input.file, entry)
               locations.set(key, files)

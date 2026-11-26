@@ -912,7 +912,7 @@ export function make(options: ClientOptions) {
               resume: input["resume"],
             },
             successStatus: 200,
-            declaredStatuses: [400, 401, 404, 409],
+            declaredStatuses: [400, 401, 404],
             empty: false,
           },
           requestOptions,

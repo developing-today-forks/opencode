@@ -11,7 +11,14 @@ import { useServerSDK } from "@/runtime/server/client"
 import { useIntegrations } from "@/providers/catalog/integrations"
 import { useProviders } from "@/providers/catalog/providers"
 import { showToast } from "@/shell/notifications/toast"
-import { emptyCustomProviderForm, headerRow, modelRow, type FormState } from "./form"
+import {
+  customProviderFormFromConfig,
+  emptyCustomProviderForm,
+  headerRow,
+  modelRow,
+  type CustomProviderConfig,
+  type FormState,
+} from "./form"
 import { saveCustomProvider } from "./save"
 
 /**
@@ -20,10 +27,17 @@ import { saveCustomProvider } from "./save"
  * through the config API and the key through the provider-scoped credential
  * path (see save.ts). A failed save keeps every entered value in place and
  * says which stage failed; only a fully successful save closes the dialog.
+ * With a `provider` prop the same form edits a saved provider instead of
+ * creating one (see save.ts for the edit key semantics).
  */
 export const DialogCustomProvider: Component<{
   directory?: string
   onSaved?: (providerID: string) => void
+  /** The saved provider being edited, with its persisted config entry. When
+   * present, the dialog opens prefilled in edit mode: saving patches the
+   * same provider ID, an empty key field keeps the stored key, a new key
+   * replaces it, and the clear action removes it. */
+  provider?: { id: string; config: CustomProviderConfig }
 }> = (props) => {
   const language = useLanguage()
   const dialog = useDialog()
@@ -32,9 +46,14 @@ export const DialogCustomProvider: Component<{
   const integrations = useIntegrations(() => props.directory)
   const providers = useProviders(() => props.directory)
 
-  const [form, setForm] = createStore<FormState>(emptyCustomProviderForm())
+  const [form, setForm] = createStore<FormState>(
+    props.provider
+      ? customProviderFormFromConfig(props.provider.id, props.provider.config)
+      : emptyCustomProviderForm(),
+  )
   const [pending, setPending] = createSignal(false)
   const [failure, setFailure] = createSignal<string>()
+  const [clearKey, setClearKey] = createSignal(false)
 
   const existingProviderIDs = () => {
     const ids = new Set<string>(integrations.list().map((integration) => integration.id))
@@ -55,9 +74,18 @@ export const DialogCustomProvider: Component<{
       form,
       t: language.t,
       existingProviderIDs: existingProviderIDs(),
+      editingProviderID: props.provider?.id,
+      clearKey: clearKey(),
       api: {
         updateConfig: (input) => sdk.api.experimental.config.update(input),
         createCredential: (input) => sdk.api.credential.create(input),
+        removeCredentials: async (integrationID) => {
+          const integration = await sdk.api.integration.get({ integrationID, location })
+
+          const credentials = integration.data?.connections.filter((item) => item.type === "credential") ?? []
+
+          await Promise.all(credentials.map((credential) => sdk.api.credential.remove({ credentialID: credential.id })))
+        },
         reload: async () => {
           if (!location) await data.location.syncInfo()
           const ref = location ?? data.location.default()
@@ -82,7 +110,9 @@ export const DialogCustomProvider: Component<{
       showToast({
         variant: "success",
         icon: "circle-check",
-        title: language.t("provider.custom.saved", { provider: result.providerID }),
+        title: language.t(props.provider ? "provider.custom.updated" : "provider.custom.saved", {
+          provider: result.providerID,
+        }),
       })
       dialog.close()
       props.onSaved?.(result.providerID)
@@ -101,7 +131,7 @@ export const DialogCustomProvider: Component<{
     // The entered values stay in the form; only the message changes.
     setFailure(
       result.stage === "credential"
-        ? language.t("provider.custom.error.credentialFailed")
+        ? language.t(props.provider ? "provider.custom.error.keyUpdateFailed" : "provider.custom.error.credentialFailed")
         : language.t("provider.custom.error.saveFailed"),
     )
   }
@@ -116,8 +146,8 @@ export const DialogCustomProvider: Component<{
     <Dialog size="large" fit>
       <DialogHeader>
         <DialogTitleGroup
-          title={language.t("provider.custom.title")}
-          description={language.t("provider.custom.description")}
+          title={language.t(props.provider ? "provider.custom.edit.title" : "provider.custom.title")}
+          description={language.t(props.provider ? "provider.custom.edit.description" : "provider.custom.description")}
         />
       </DialogHeader>
       <DialogBody class="px-4 pb-4">
@@ -134,6 +164,7 @@ export const DialogCustomProvider: Component<{
               class="!w-full"
               value={form.providerID}
               invalid={!!form.err.providerID}
+              disabled={!!props.provider}
               autocomplete="off"
               spellcheck={false}
               onInput={(event) => setForm("providerID", event.currentTarget.value)}
@@ -171,11 +202,27 @@ export const DialogCustomProvider: Component<{
               class="!w-full"
               type="password"
               value={form.apiKey}
-              placeholder={language.t("provider.custom.apiKey.placeholder")}
+              placeholder={language.t(
+                props.provider && !props.provider.config.env?.length
+                  ? "provider.custom.apiKey.keepPlaceholder"
+                  : "provider.custom.apiKey.placeholder",
+              )}
               autocomplete="off"
               spellcheck={false}
               onInput={(event) => setForm("apiKey", event.currentTarget.value)}
             />
+            <Show when={props.provider && !props.provider.config.env?.length}>
+              <div class="flex items-center gap-2">
+                <Button type="button" variant="ghost" disabled={pending()} onClick={() => setClearKey((value) => !value)}>
+                  {language.t(clearKey() ? "provider.custom.apiKey.keepKey" : "provider.custom.apiKey.clear")}
+                </Button>
+                <Show when={clearKey()}>
+                  <span class="text-[13px] leading-5 text-v2-text-text-muted">
+                    {language.t("provider.custom.apiKey.clearNote")}
+                  </span>
+                </Show>
+              </div>
+            </Show>
           </Field>
 
           <div class="flex flex-col gap-2">

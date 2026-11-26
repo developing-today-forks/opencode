@@ -2269,6 +2269,8 @@ export type RouteAttemptStatsOutput = {
     readonly providerID: string
     readonly modelID: string
     readonly attempts: number
+    readonly avgFirstTokenMs: number | null
+    readonly avgTokensPerSecond: number | null
     readonly successes: number
     readonly failures: number
     readonly policyRejections: number
@@ -2283,6 +2285,12 @@ export type RouteAttemptStatsOutput = {
     readonly sessions: number
     readonly first: number | null
     readonly last: number | null
+  }>
+  readonly hedges: ReadonlyArray<{
+    readonly providerID: string
+    readonly modelID: string
+    readonly hedges: number
+    readonly wins: number
   }>
   readonly errors: ReadonlyArray<{
     readonly providerID: string

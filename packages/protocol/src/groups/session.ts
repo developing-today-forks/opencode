@@ -7,7 +7,7 @@ import { TokenUsage } from "@opencode/schema/token-usage"
 import { Money } from "@opencode/schema/money"
 import { InstructionEntry } from "@opencode/schema/instruction-entry"
 import { Project } from "@opencode/schema/project"
-import { AbsolutePath, DateTimeUtcFromMillis, NonNegativeInt, PositiveInt } from "@opencode/schema/schema"
+import { AbsolutePath, DateTimeUtcFromMillis, EpochMillis, NonNegativeInt, PositiveInt } from "@opencode/schema/schema"
 import { Event } from "@opencode/schema/event"
 import { SessionLegacy } from "@opencode/schema/session-legacy"
 import { Context, Schema, SchemaGetter, Struct } from "effect"
@@ -375,7 +375,7 @@ export const makeSessionGroup = <I extends HttpApiMiddleware.AnyId, S, FormI ext
               "Archive the session with true or restore it with false. Repeating the current state is a no-op.",
           }),
           experimental: Schema.Struct({
-            archivedAt: Schema.Finite.pipe(Schema.optional).annotate({
+            archivedAt: EpochMillis.pipe(Schema.optional).annotate({
               description:
                 "Experimental: may change without compatibility guarantees. Epoch-millisecond archive time for archived: true, for a session a client archived before carrying it over; ignored otherwise. Omitted means now.",
             }),

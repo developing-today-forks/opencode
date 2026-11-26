@@ -94,3 +94,40 @@ it.live("archives at the experimental archivedAt time and ignores it without arc
     expect(yield* archived(untouched.id)).toBeUndefined()
   }).pipe(Effect.scoped),
 )
+
+it.live("rejects an out-of-range experimental archivedAt and keeps the session readable", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make({
+      app: { version: "test" },
+      database: { path: ":memory:" },
+      fs: { filewatcher: false },
+      models: { fetch: false },
+    })
+    const raw = (path: string, method: string, body?: unknown) =>
+      Effect.promise(() =>
+        handler(
+          new Request(`http://opencode.local${path}`, {
+            method,
+            headers: { "content-type": "application/json" },
+            body: body === undefined ? undefined : JSON.stringify(body),
+          }),
+        ),
+      )
+    const createResponse = yield* raw("/api/session", "POST", {})
+    expect(createResponse.status).toBe(200)
+    const created = Schema.decodeUnknownSync(SessionResponse)(
+      yield* Effect.promise(() => createResponse.json()),
+    ).data
+
+    const rejected = yield* raw(`/api/session/${created.id}`, "PATCH", {
+      archived: true,
+      experimental: { archivedAt: 1e300 },
+    })
+    expect(rejected.status).not.toBe(204)
+
+    const after = yield* raw(`/api/session/${created.id}`, "GET")
+    expect(after.status).toBe(200)
+    const session = Schema.decodeUnknownSync(SessionResponse)(yield* Effect.promise(() => after.json())).data
+    expect(session.time.archived).toBeUndefined()
+  }).pipe(Effect.scoped),
+)

@@ -1382,6 +1382,71 @@ describe("standing renewal retry — the renewal outlives its request (code#8102
     expect(exchanges).toBe(4)
   })
 
+  test("a standing round's stated Retry-After delays the next round by the stated wait, uncapped (#2840)", async () => {
+    const path = CREDENTIALS_PATH
+    const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-ra")]])
+    const standingWaits: Array<number> = []
+    let exchanges = 0
+    let release: (() => void) | undefined
+    const sources: CredentialSources = {
+      env: {},
+      configDir: "/fixture/claude-dir",
+      now: () => NOW,
+      randomValues: (length) => Uint8Array.from({ length }, (_, i) => i % 251),
+      readFile: (readPath) => store.get(readPath),
+      writeFile: async (writePath, contents) => {
+        store.set(writePath, contents)
+      },
+      renameFile: async (from, to) => {
+        store.set(to, store.get(from)!)
+        store.delete(from)
+      },
+      sleep: (ms, unref) => {
+        // The request's own waits pass through; standing-cadence waits
+        // carry the unref marker and are recorded. The wait following
+        // the stated-Retry-After round parks behind a gate, so the
+        // test can prove no exchange happens before it elapses.
+        if (!(unref === true)) return Promise.resolve()
+        standingWaits.push(ms)
+        if (standingWaits.length === 2)
+          return new Promise<void>((resolve) => {
+            release = resolve
+          })
+        return Promise.resolve()
+      },
+      renewalWaitBudgetMs: 1_000,
+      fetchFn: async () => {
+        exchanges += 1
+        // Exchange 1 spends the request's wait budget; exchange 2 is
+        // the first standing round. Both answer 429 stating a wait far
+        // above the 5-minute backoff cap; the endpoint then relents.
+        return exchanges <= 2
+          ? new Response("rate limited", { status: 429, headers: { "Retry-After": "1800" } })
+          : rotated("tok-ra", "ref-standing-rb")
+      },
+    }
+    const error = await apply(sources).catch((cause: unknown) => cause)
+    expect(JSON.stringify(error)).toContain("RateLimit")
+    // The first standing wait is the loop's own initial backoff (no
+    // round has stated a wait yet); the second is the first standing
+    // round's stated Retry-After in full — 1_800_000 ms, NOT silently
+    // capped at the 300_000 ms backoff cap.
+    await waitFor(() => standingWaits.length === 2)
+    expect(standingWaits).toEqual([5_000, 1_800_000])
+    // Parked in the stated wait: no further exchange has happened and
+    // nothing has landed yet.
+    expect(exchanges).toBe(2)
+    expect(JSON.parse(store.get(path)!).claudeAiOauth.accessToken).toBe("tok-old")
+    if (release === undefined) throw new Error("the standing retry never parked on the stated wait")
+    release()
+    await waitFor(() => JSON.parse(store.get(path)!).claudeAiOauth.accessToken === "tok-ra")
+    expect(exchanges).toBe(3)
+    expect(JSON.parse(store.get(path)!).claudeAiOauth).toMatchObject({
+      accessToken: "tok-ra",
+      refreshToken: "ref-standing-rb",
+    })
+  })
+
   test("a genuine rejection stops the standing retry and surfaces the real error", async () => {
     const path = CREDENTIALS_PATH
     const store = new Map<string, string>([[path, blobWith(NOW - 1_000, "ref-standing-c")]])

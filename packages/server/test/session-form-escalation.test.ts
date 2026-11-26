@@ -113,3 +113,85 @@ it.live("a parent can list, get, reply to, and cancel forms owned by its descend
     expect(sidewaysReply.status).toBe(404)
   }).pipe(Effect.scoped),
 )
+
+// Regression test for #2832: descendant traversal must follow the session
+// list's pagination cursor. With more children than the default 50-session
+// page, the first-page-only walk omitted the remaining children — and their
+// whole subtrees — from the root's form list. The oracle is exact: the root
+// lists every pending descendant form exactly once, across more than one
+// page boundary, and nothing outside its subtree.
+it.live("a root lists descendant forms past the first 50-child page, exactly once", () =>
+  Effect.gen(function* () {
+    const handler = yield* ServerFetch.make({
+      app: { version: "test" },
+      database: { path: ":memory:" },
+      fs: { filewatcher: false },
+      models: { fetch: false },
+    })
+    const request = (route: string, init?: RequestInit) =>
+      Effect.promise(() => handler(new Request(`http://opencode.local${route}`, init)))
+    const post = (route: string, body: unknown) =>
+      request(route, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      })
+    const createSession = (body: unknown) =>
+      Effect.gen(function* () {
+        const response = yield* post("/api/session", body)
+        expect(response.status).toBe(200)
+        return Schema.decodeUnknownSync(SessionResponse)(yield* Effect.promise(() => response.json())).data
+      })
+    const createForm = (sessionID: string, title: string) =>
+      Effect.gen(function* () {
+        const response = yield* post(`/api/session/${sessionID}/form`, {
+          title,
+          fields: [{ key: "answer", type: "string" }],
+        })
+        expect(response.status).toBe(200)
+        const body = (yield* Effect.promise(() => response.json())) as {
+          data: { id: string; sessionID: string; title: string }
+        }
+        return body.data
+      })
+    const listFormIDs = (sessionID: string) =>
+      Effect.gen(function* () {
+        const response = yield* request(`/api/session/${sessionID}/form`)
+        expect(response.status).toBe(200)
+        const body = (yield* Effect.promise(() => response.json())) as { data: { id: string }[] }
+        return body.data.map((form) => form.id)
+      })
+
+    const root = yield* createSession({ title: "Root" })
+    const unrelated = yield* createSession({ title: "Unrelated" })
+    // 105 direct children cross two 50-item page boundaries (50 + 50 + 5),
+    // whichever order the pages come in.
+    const children: { id: string }[] = []
+    for (let index = 0; index < 105; index++) {
+      children.push(yield* createSession({ parentID: root.id, title: `Child ${index}` }))
+    }
+    // A grandchild below the first-created child: its form is only reachable
+    // if that child's subtree is traversed at all.
+    const grandchild = yield* createSession({ parentID: children[0].id, title: "Grandchild" })
+
+    const expected: string[] = []
+    for (const child of children) {
+      expected.push((yield* createForm(child.id, `Question from ${child.id}`)).id)
+    }
+    const grandchildForm = yield* createForm(grandchild.id, "Grandchild question")
+    expected.push(grandchildForm.id)
+    const unrelatedForm = yield* createForm(unrelated.id, "Unrelated question")
+
+    const rootForms = yield* listFormIDs(root.id)
+    expect(rootForms).toHaveLength(expected.length)
+    expect(new Set(rootForms).size).toBe(expected.length)
+    expect(rootForms).toEqual(expect.arrayContaining(expected))
+    expect(rootForms).not.toContain(unrelatedForm.id)
+
+    // The first-created child's own view still carries its subtree only.
+    const firstChildForms = yield* listFormIDs(children[0].id)
+    expect(firstChildForms).toHaveLength(2)
+    expect(firstChildForms).toContain(grandchildForm.id)
+    expect(yield* listFormIDs(unrelated.id)).toEqual([unrelatedForm.id])
+  }).pipe(Effect.scoped),
+)

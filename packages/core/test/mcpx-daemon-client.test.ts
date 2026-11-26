@@ -32,6 +32,11 @@ beforeAll(async () => {
       res.end(JSON.stringify({ pad: "x".repeat(McpxTool.daemonResponseMaxBytes) }))
       return
     }
+    if (req.url === "/html") {
+      res.writeHead(200, { "content-type": "text/html" })
+      res.end("<html><body>not the daemon</body></html>")
+      return
+    }
     if (req.url === "/err") {
       res.writeHead(500, { "content-type": "text/plain" })
       res.end("e".repeat(McpxTool.daemonErrorBodyMaxBytes * 2))
@@ -70,6 +75,19 @@ afterEach(() => {
 describe("mcpx daemon client bounds", () => {
   test("small daemon responses are returned unchanged", async () => {
     expect(await McpxTool.callDaemon("/small")).toEqual({ status: "ok" })
+  })
+
+  // #2808: a 2xx non-JSON body used to escape send() as a raw SyntaxError,
+  // hiding endpoint/socket misconfiguration behind a bare parse message.
+  test("a 200 HTML response surfaces as a typed malformed-response error, never a SyntaxError", async () => {
+    const error = await McpxTool.callDaemon("/html").catch((caught) => caught)
+    expect(error).toBeInstanceOf(McpxTool.McpxSecrets.DaemonMalformedResponseError)
+    expect(error).not.toBeInstanceOf(SyntaxError)
+    expect(error).not.toBeInstanceOf(McpxTool.McpxSecrets.DaemonUnreachableError)
+    expect(error.status).toBe(200)
+    expect(error.message).toContain("/html")
+    expect(error.message).toContain("200")
+    expect(error.message).toContain("non-JSON")
   })
 
   test("an over-cap success body is rejected naming the path and the cap", async () => {
