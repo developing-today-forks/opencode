@@ -1015,16 +1015,30 @@ const scheduleStandingRenewal = (
   const standing = (async (): Promise<ClaudeCodeCredential> => {
     let backoff = RENEWAL_BACKOFF_BASE_MS
     let attempt = 0
+    // The endpoint's stated wait from the most recent standing round
+    // (#2840): a round that ends in a 429 stating Retry-After sets the
+    // NEXT round's delay to at least that stated wait, mirroring the
+    // in-request rule in refreshAndPersist (wait =
+    // max(retryAfterMs ?? backoff, 1_000)). The stated wait is NOT
+    // capped by RENEWAL_BACKOFF_CAP_MS — that cap bounds only the
+    // loop's own unstated backoff — so a long stated wait (e.g.
+    // Retry-After: 1800 during a sustained rate-limit window) is
+    // honored in full instead of re-exchanging on the 5-minute cap.
+    let statedWaitMs: number | undefined
     for (;;) {
-      await sleep(backoff)
+      const delay = statedWaitMs === undefined ? backoff : Math.max(statedWaitMs, 1_000)
+      statedWaitMs = undefined
+      await sleep(delay)
       backoff = Math.min(backoff * 2, RENEWAL_BACKOFF_CAP_MS)
       attempt += 1
       try {
         // One exchange per standing round: the rounds themselves are
         // the retry cadence, so a round runs with a zero in-request
         // budget — a 429 ends the round at once and the loop applies
-        // the standing backoff before the next, instead of stacking a
-        // full in-request wait budget inside every round. The round's
+        // the standing cadence (the 429's stated Retry-After when it
+        // stated one, otherwise its own backoff) before the next,
+        // instead of stacking a full in-request wait budget inside
+        // every round. The round's
         // sources are FRESH each round (a wrapper object per round),
         // marked as the loop's own for the synchronous re-entry span.
         const roundSources: CredentialSources = {
@@ -1053,7 +1067,12 @@ const scheduleStandingRenewal = (
           standingRoundSpan.delete(span)
         }
       } catch (cause) {
-        if (cause instanceof ClaudeCodeRefreshRateLimited) continue
+        if (cause instanceof ClaudeCodeRefreshRateLimited) {
+          // Carry the endpoint's stated wait into the next round's
+          // delay (#2840); undefined keeps the loop's own backoff.
+          statedWaitMs = cause.retryAfterMs
+          continue
+        }
         if (cause instanceof ClaudeCodeRefreshRejected || cause instanceof ClaudeCodeRefreshDiscarded) {
           emitRenewalEvent(sources, { kind: "rejected", at: now(), message: cause.message })
           throw cause
