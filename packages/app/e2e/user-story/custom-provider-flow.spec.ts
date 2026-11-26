@@ -152,3 +152,95 @@ test("adds a custom provider, selects its model, and keeps it after a reload", a
   await expect(page.locator('[data-component="composer-editor"]')).toBeEditable()
   await expect(modelControl).toContainText("Acme 1")
 })
+
+// The failure leg of the same story (opencode#2812): the config stage
+// succeeds but storing the API key fails. The dialog must surface the
+// partial state — provider saved, key not stored — keep every entered
+// value for a retry, and never claim success or close.
+test("keeps the form and surfaces the partial state when storing the API key fails", async ({ page }) => {
+  let configured = false
+
+  await openSession(page, {
+    name: "CustomProviderCredentialFailure",
+    provider: {
+      all: [
+        {
+          id: "opencode",
+          name: "OpenCode",
+          models: {
+            "free-model": {
+              id: "free-model",
+              name: "Free Model",
+              cost: { input: 0, output: 0 },
+              limit: { context: 200_000 },
+            },
+          },
+        },
+      ],
+      connected: ["opencode"],
+      default: { providerID: "opencode", modelID: "free-model" },
+    },
+    integrations: [{ id: "opencode", name: "OpenCode", methods: [{ type: "key", label: "API key" }], connections: [] }],
+    credentialCreateFailures: () => true,
+    onConfigUpdate: ({ providerIDs }) => {
+      if (providerIDs.includes("acme")) configured = true
+    },
+  })
+
+  const modelControl = page.locator('[data-component="composer"] [data-action="composer-model"]')
+  await modelControl.click()
+  await page
+    .getByRole("button", { name: "Connect provider", exact: true })
+    .first()
+    .click({ timeout: 5_000 })
+    .catch(() => page.getByRole("button", { name: "See 70+ more providers", exact: true }).click())
+
+  await page.getByRole("button", { name: /Custom Provider/ }).click()
+
+  const form = page.getByRole("dialog").filter({ has: page.getByPlaceholder("https://api.example.com/v1") })
+
+  await expect(form).toBeVisible()
+
+  await form.getByLabel("Provider ID", { exact: true }).fill("acme")
+  await form.getByLabel("Name", { exact: true }).fill("Acme")
+  await form.getByPlaceholder("https://api.example.com/v1").fill("https://api.acme.example/v1")
+  await form.getByLabel("API key", { exact: true }).fill("sk-test")
+  await form.getByPlaceholder("Model ID", { exact: true }).fill("acme-1")
+  await form.getByPlaceholder("Model name", { exact: true }).fill("Acme 1")
+
+  const configPatch = page.waitForRequest(
+    (request) => request.method() === "PATCH" && new URL(request.url()).pathname === "/api/experimental/config",
+  )
+
+  const credentialPost = page.waitForRequest(
+    (request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/credential",
+  )
+
+  await form.getByRole("button", { name: "Save", exact: true }).click()
+
+  // Both stages were attempted, in order: the definition first (without
+  // the secret), then the key as a separate credential create.
+  expect(JSON.stringify((await configPatch).postDataJSON())).not.toContain("sk-test")
+  expect((await credentialPost).postDataJSON()).toEqual({
+    integrationID: "acme",
+    value: { type: "key", key: "sk-test" },
+  })
+
+  // The partial state is surfaced: the provider was saved, its key was not.
+  await expect(
+    form.getByText(
+      "The provider was saved, but its API key couldn't be stored. Your entries are still here — try again to finish connecting it.",
+      { exact: true },
+    ),
+  ).toBeVisible()
+  expect(configured).toBe(true)
+  await expect(page.getByText("acme saved", { exact: true })).toHaveCount(0)
+
+  // The dialog stays open with every entered value retained for a retry.
+  await expect(form.getByLabel("Provider ID", { exact: true })).toHaveValue("acme")
+  await expect(form.getByLabel("Name", { exact: true })).toHaveValue("Acme")
+  await expect(form.getByPlaceholder("https://api.example.com/v1")).toHaveValue("https://api.acme.example/v1")
+  await expect(form.getByLabel("API key", { exact: true })).toHaveValue("sk-test")
+  await expect(form.getByPlaceholder("Model ID", { exact: true })).toHaveValue("acme-1")
+  await expect(form.getByPlaceholder("Model name", { exact: true })).toHaveValue("Acme 1")
+})
