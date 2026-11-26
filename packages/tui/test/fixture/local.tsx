@@ -25,12 +25,14 @@ export async function renderLocal(
     agents?: AgentInfo[]
     sessions?: SessionInfo[]
     preferences?: Partial<ModelPreference>
+    sessionJson?: string
     args?: Args
     fetch?: FetchHandler
   } = {},
 ) {
   const temporary = await tmpdir()
   await Bun.write(path.join(temporary.path, "model.json"), JSON.stringify(input.preferences ?? {}))
+  if (input.sessionJson !== undefined) await Bun.write(path.join(temporary.path, "session.json"), input.sessionJson)
   const events = createEventStream()
   const calls = createFetch(async (url, request) => {
     const response = await input.fetch?.(url, request)
