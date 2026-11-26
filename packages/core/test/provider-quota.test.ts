@@ -1,5 +1,6 @@
 import { describe, expect } from "bun:test"
 import { Effect, Logger } from "effect"
+import { TestClock } from "effect/testing"
 import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
 import { Bus } from "@opencode/core/bus"
@@ -28,6 +29,20 @@ const upstream = (usage: { status: number; body: unknown }) => {
     const cookie = new Headers(init?.headers).get("cookie")
     seen.push({ url, cookie })
     if (url.endsWith("/auth/get-session")) return Response.json({ user: { id: "usr_fixture" } })
+    return Response.json(usage.body, { status: usage.status })
+  }) as typeof fetch
+  return { fetchImpl, seen }
+}
+
+/** A stubbed upstream whose usage endpoint gives each answer in `usages` in turn, then repeats the last. */
+const upstreamSequence = (usages: ReadonlyArray<{ status: number; body: unknown }>) => {
+  const seen: string[] = []
+  let reads = 0
+  const fetchImpl = (async (input: Request | URL | string) => {
+    const url = String(input)
+    seen.push(url)
+    if (url.endsWith("/auth/get-session")) return Response.json({ user: { id: "usr_fixture" } })
+    const usage = usages[Math.min(reads++, usages.length - 1)]!
     return Response.json(usage.body, { status: usage.status })
   }) as typeof fetch
   return { fetchImpl, seen }
@@ -163,6 +178,51 @@ describe("ProviderQuota.sessionCookie", () => {
       yield* call
       expect(cookiesSeen(stub.seen)).toContain("better-auth.session_token=reselect-second-cookie")
       expect(cookiesSeen(stub.seen)).toContain("better-auth.session_token=reselect-first-cookie")
+      expect(stub.seen).toHaveLength(4)
+    }),
+  )
+
+  it.effect("retries a transient upstream failure well before the success TTL ends (opencode#2869)", () =>
+    Effect.gen(function* () {
+      yield* storeCookie("transient-failure-cookie", "wrk_transient")
+      const stub = upstreamSequence([
+        { status: 503, body: {} },
+        { status: 200, body: usagePayload },
+      ])
+      const call = ProviderQuota.sessionCookie("opendesign", { fetchImpl: stub.fetchImpl })
+      // Concurrent callers still share the one failing fetch.
+      const failed = yield* Effect.all([call, call], { concurrency: "unbounded" })
+      for (const value of failed) expect(value).toMatchObject({ ok: false })
+      expect(stub.seen).toHaveLength(2)
+      // Inside the retry window the failure is reused rather than fetched again.
+      expect(yield* call).toMatchObject({ ok: false })
+      expect(stub.seen).toHaveLength(2)
+      yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis)
+      // Upstream recovered, and so does the quota, long before 30 seconds.
+      expect(ProviderQuota.sessionCookieQuotaRetryMillis).toBeLessThan(ProviderQuota.sessionCookieQuotaTtlMillis)
+      expect(yield* call).toMatchObject({ ok: true })
+      expect(stub.seen).toHaveLength(4)
+      // The success is then kept for the full TTL.
+      yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis)
+      expect(yield* call).toMatchObject({ ok: true })
+      expect(stub.seen).toHaveLength(4)
+    }),
+  )
+
+  it.effect("keeps an expired-session answer for the full TTL instead of retrying it (opencode#2869)", () =>
+    Effect.gen(function* () {
+      yield* storeCookie("expired-session-cookie", "wrk_expired")
+      const stub = upstreamSequence([
+        { status: 403, body: {} },
+        { status: 200, body: usagePayload },
+      ])
+      const call = ProviderQuota.sessionCookie("opendesign", { fetchImpl: stub.fetchImpl })
+      expect(yield* call).toMatchObject({ ok: false })
+      yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis)
+      expect(yield* call).toMatchObject({ ok: false })
+      expect(stub.seen).toHaveLength(2)
+      yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaTtlMillis)
+      expect(yield* call).toMatchObject({ ok: true })
       expect(stub.seen).toHaveLength(4)
     }),
   )
