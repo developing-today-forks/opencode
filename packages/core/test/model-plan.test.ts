@@ -161,7 +161,11 @@ describe("ModelPlan store", () => {
 
   test("re-upserting the same plan by name stays on its generated id (#2836)", () => {
     const first = ModelPlan.upsertPlan(ModelPlan.emptyStore(), { providerID: "anthropic", plan: "Max 20x" }, NOW)
-    const second = ModelPlan.upsertPlan(first.store, { providerID: "anthropic", plan: "Max 20x", status: "expired" }, NOW)
+    const second = ModelPlan.upsertPlan(
+      first.store,
+      { providerID: "anthropic", plan: "Max 20x", status: "expired" },
+      NOW,
+    )
     expect(second.plan.id).toBe("anthropic-max-20x")
     expect(second.store.plans).toHaveLength(1)
     expect(second.plan.status).toBe("expired")
