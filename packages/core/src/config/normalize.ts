@@ -828,7 +828,14 @@ function migrateProviders(value: unknown, diagnostics: Diagnostic[]) {
       {
         name,
         destination,
-        provider: canonical(ConfigProvider.Info, ConfigMigrateV1.migrateProvider(name, provider)),
+        provider: canonical(ConfigProvider.Info, {
+          ...ConfigMigrateV1.migrateProvider(name, provider),
+          // Routing declarations also belong to legacy `provider` entries, but
+          // are current config fields rather than V1 provider SDK options.
+          ...(isRecord(raw) && own(raw, "wallScope")
+            ? { wallScope: decodeValue(ConfigProvider.WallScope, raw.wallScope, [...path, "wallScope"], diagnostics) }
+            : {}),
+        }),
       },
     ]
   })

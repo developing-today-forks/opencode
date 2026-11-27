@@ -122,7 +122,13 @@ class ModelConfig extends Schema.Class<ModelConfig>("Config.Model")({
   limit: Limit.pipe(optional),
 }) {}
 
+export const WallScope = Schema.Literals(["per-model", "provider", "account"])
+export type WallScope = typeof WallScope.Type
+
 export class Info extends Schema.Class<Info>("Config.Provider")({
+  wallScope: WallScope.annotate({
+    description: "Override gathered quota wall scope; when absent, infer scope from the reading.",
+  }).pipe(optional),
   canonical: Provider.ID.pipe(optional),
   instanceOf: Provider.ID.annotate({
     description:

@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Logger } from "effect"
+import { Effect, Fiber, Logger } from "effect"
 import { TestClock } from "effect/testing"
 import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
@@ -206,6 +206,45 @@ describe("ProviderQuota.sessionCookie", () => {
       yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis)
       expect(yield* call).toMatchObject({ ok: true })
       expect(stub.seen).toHaveLength(4)
+    }),
+  )
+
+  it.effect("starts a transient failure's retry window when the slow fetch settles, not when it starts (opencode#2873)", () =>
+    Effect.gen(function* () {
+      yield* storeCookie("slow-failure-cookie", "wrk_slow")
+      // The first usage answer is held back until the test releases it, then fails transiently;
+      // later usage reads answer at once with a healthy payload.
+      let releaseUsage: ((response: Response) => void) | undefined
+      const seen: string[] = []
+      let usageReads = 0
+      const fetchImpl = (async (input: Request | URL | string) => {
+        const url = String(input)
+        seen.push(url)
+        if (url.endsWith("/auth/get-session")) return Response.json({ user: { id: "usr_fixture" } })
+        usageReads++
+        if (usageReads === 1)
+          return new Promise<Response>((resolve) => {
+            releaseUsage = resolve
+          })
+        return Response.json(usagePayload)
+      }) as typeof fetch
+      const call = ProviderQuota.sessionCookie("opendesign", { fetchImpl })
+      const fiber = yield* Effect.forkChild(call)
+      // Wait until the fetch is in flight (session answered, usage requested and held).
+      for (let spins = 0; seen.length < 2 && spins < 100; spins++) yield* Effect.yieldNow
+      expect(seen).toHaveLength(2)
+      // The fetch stays in flight past the whole retry window.
+      yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis + 1_000)
+      releaseUsage!(Response.json({}, { status: 503 }))
+      expect(yield* Fiber.join(fiber)).toMatchObject({ ok: false })
+      // The failure settled after a fetch-start retry window would already have ended,
+      // yet it is still reused: no second upstream fetch.
+      expect(yield* call).toMatchObject({ ok: false })
+      expect(seen).toHaveLength(2)
+      // Once the post-settlement retry window passes, the quota is fetched fresh and recovers.
+      yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis)
+      expect(yield* call).toMatchObject({ ok: true })
+      expect(seen).toHaveLength(4)
     }),
   )
 

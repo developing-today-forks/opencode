@@ -49,21 +49,24 @@ const answers = new Map<string, { readonly expiresAt: number; readonly result: P
 const shared = (key: string, now: number, fetchQuota: () => Promise<QuotaResult>) => {
   for (const [stale, entry] of answers) if (entry.expiresAt <= now) answers.delete(stale)
   const cached = answers.get(key)
-  if (cached) return cached.result
+  if (cached) return { result: cached.result, fresh: false }
   const result = fetchQuota()
   answers.set(key, { expiresAt: now + sessionCookieQuotaTtlMillis, result })
-  result.then(
-    // Callers in flight shared the fetch; once it settles, a failure that may pass is kept only briefly.
-    (answer) => {
-      const entry = answers.get(key)
-      if (entry?.result === result) answers.set(key, { expiresAt: now + reusedFor(answer), result })
-    },
-    // A rejected fetch is not an answer: drop it so the next caller retries.
-    () => {
-      if (answers.get(key)?.result === result) answers.delete(key)
-    },
-  )
-  return result
+  // A rejected fetch is not an answer: drop it so the next caller retries.
+  result.catch(() => {
+    if (answers.get(key)?.result === result) answers.delete(key)
+  })
+  return { result, fresh: true }
+}
+
+/**
+ * Stamps a settled answer's reuse window. The window starts when the fetch settles, not when it
+ * started (opencode#2873): a slow transient failure must not expire before it is even cached, or
+ * the next caller refetches at once, while a failure that may pass is still kept only briefly.
+ */
+const settleAnswer = (key: string, result: Promise<QuotaResult>, answer: QuotaResult, settledAt: number) => {
+  const entry = answers.get(key)
+  if (entry?.result === result) answers.set(key, { expiresAt: settledAt + reusedFor(answer), result })
 }
 
 /**
@@ -88,8 +91,11 @@ export const sessionCookie = Effect.fn("ProviderQuota.sessionCookie")(function* 
   if (!credential) return undefined
   const now = yield* Clock.currentTimeMillis
   const key = [providerID, selected.id, cookie.workspaceID, SharedCache.fingerprint(cookie.cookie)].join("\u0000")
-  const result: QuotaResult = yield* Effect.promise(() =>
-    shared(key, now, () => fetchOpenDesignSessionQuota(emptyContext(options?.fetchImpl), credential)),
+  const sharedAnswer = shared(key, now, () =>
+    fetchOpenDesignSessionQuota(emptyContext(options?.fetchImpl), credential),
   )
+  const result: QuotaResult = yield* Effect.promise(() => sharedAnswer.result)
+  // Only the caller that started the fetch stamps its reuse window, at settlement time.
+  if (sharedAnswer.fresh) settleAnswer(key, sharedAnswer.result, result, yield* Clock.currentTimeMillis)
   return result
 })

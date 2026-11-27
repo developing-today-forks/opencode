@@ -2,6 +2,7 @@ export * as ModelRoute from "./model-route.js"
 
 import { Model } from "@opencode/schema/model"
 import type { ConfigModelRoutes } from "@opencode/schema/config/model-routes"
+import type { ConfigProvider } from "@opencode/schema/config/provider"
 import { CacheFormat } from "@opencode/schema/model-compatibility"
 import { Provider } from "@opencode/schema/provider"
 import { DEFAULT_CHUNK_TIMEOUT_MS } from "./provider.js"
@@ -1744,6 +1745,13 @@ export const plantGatheredNearEmptyWall = (
  * reporting cannot wall a provider forever. */
 const gatheredProviderQuota = new Map<string, QuotaGateState>()
 
+// Promoting model-shaped evidence is derived from a Location's declaration.
+// Neither another Location nor removal of that declaration may inherit it.
+const gatheredProviderKey = (target: Model.Ref, location?: string) => {
+  const scope = wallScope(target.providerID, location)
+  return scope === undefined ? target.providerID : JSON.stringify([location ?? "", scope, target.providerID])
+}
+
 /** Feeds one target's gathered reading into the provider gate when the reading
  * is the provider-wide shape (fork #2479): exactly one entry for the provider
  * and no per-model reading for this target — the shape `gatheredQuotaWall`'s
@@ -1759,9 +1767,24 @@ export const observeGatheredProviderWall = (
   now = Date.now(),
   location?: string,
 ): boolean => {
-  const entries = readings.filter((reading) => reading.providerID === target.providerID)
+  const scope = wallScope(target.providerID, location)
+  if (scope === "per-model") return false
+  const entries = readings
+    .filter((reading) => reading.providerID === target.providerID)
+    .map((reading) => {
+      if (scope === undefined) return reading
+      // A declared shared scope overrides model-shaped evidence. Aggregate all
+      // models, not only this target: otherwise a later sibling feed with room
+      // would clear the same provider's full wall, depending on target order.
+      const windows = [...reading.windows, ...Object.values(reading.models).flat()]
+      return {
+        ...reading,
+        windows,
+        measuredAt: windows.reduce((oldest, window) => Math.min(oldest, window.measuredAt), reading.measuredAt),
+      }
+    })
   if (entries.length === 0) return false
-  if (modelWindowReading(entries, target.providerID, target.id as string)) return false
+  if (scope === undefined && modelWindowReading(entries, target.providerID, target.id as string)) return false
   if (entries.length > 1) {
     // All-accounts-full aggregation (code#13693 Slice F, design rule 3): several
     // entries are per-account readings, and a proper subset of full accounts
@@ -1818,8 +1841,8 @@ export const observeGatheredProviderWall = (
       stale: false,
     }
     if (!QuotaSnapshot.isKnownFull(snapshot, now, threshold)) return false
-    const previous = gatheredProviderQuota.get(target.providerID)
-    gatheredProviderQuota.set(target.providerID, { snapshot, target, gated: true })
+    const previous = gatheredProviderQuota.get(gatheredProviderKey(target, location))
+    gatheredProviderQuota.set(gatheredProviderKey(target, location), { snapshot, target, gated: true })
     if (!previous?.gated)
       logHealth(
         target,
@@ -1856,9 +1879,9 @@ export const observeGatheredProviderWall = (
     observedAt: entry.measuredAt,
     stale: false,
   }
-  const previous = gatheredProviderQuota.get(target.providerID)
+  const previous = gatheredProviderQuota.get(gatheredProviderKey(target, location))
   if (QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
-    gatheredProviderQuota.set(target.providerID, { snapshot, target, gated: true })
+    gatheredProviderQuota.set(gatheredProviderKey(target, location), { snapshot, target, gated: true })
     if (!previous?.gated)
       logHealth(
         target,
@@ -1872,7 +1895,7 @@ export const observeGatheredProviderWall = (
   // a percent-less window is missing evidence, not headroom (the plant's own
   // lift rule, at provider scope).
   if (!complete || !previous) return false
-  gatheredProviderQuota.delete(target.providerID)
+  gatheredProviderQuota.delete(gatheredProviderKey(target, location))
   if (previous.gated) logHealth(target, "quota-readmitted", `provider:${target.providerID} (gathered)`)
   return true
 }
@@ -2632,6 +2655,30 @@ export const membershipLimits = (
     if (declared) return declared
   }
   return read(providerID)
+}
+
+/** Declared wall scopes are Location-local and lazy, like membership caps.
+ * Read the concrete provider ID: separately signed-in account aliases can have
+ * different scope declarations from their canonical provider. */
+export type WallScope = ConfigProvider.WallScope
+const wallScopeReaders = new Map<string, (providerID: string) => WallScope | undefined>()
+
+export const onWallScope = (
+  read: (providerID: string) => ConfigProvider.WallScope | undefined,
+  location?: string,
+) => {
+  const key = location ?? ""
+  wallScopeReaders.set(key, read)
+  return () => {
+    if (wallScopeReaders.get(key) === read) wallScopeReaders.delete(key)
+  }
+}
+
+export const wallScope = (providerID: string, location?: string): ConfigProvider.WallScope | undefined => {
+  const read = location !== undefined
+    ? wallScopeReaders.get(location)
+    : wallScopeReaders.get("") ?? (wallScopeReaders.size === 1 ? wallScopeReaders.values().next().value : undefined)
+  return read?.(providerID)
 }
 
 /** The account a provider's requests draw from (#2253): its canonical provider
@@ -3606,6 +3653,7 @@ export const providerQuotaBlocked = (
   now = Date.now(),
   location?: string,
 ): { readonly until: number | null } | undefined => {
+  const scope = wallScope(target.providerID, location)
   const state = providerQuota.get(target.providerID)
   const fed = ((): { readonly until: number | null } | undefined => {
     if (!state) return undefined
@@ -3639,7 +3687,7 @@ export const providerQuotaBlocked = (
   // recomputed from the reading's own observation time — the root-start
   // gate's discipline — so the record lapses when the gatherer stops
   // reporting instead of holding on a derivation-time freshness stamp.
-  const gathered = gatheredProviderQuota.get(target.providerID)
+  const gathered = scope === "per-model" ? undefined : gatheredProviderQuota.get(gatheredProviderKey(target, location))
   if (gathered) {
     if (
       QuotaSnapshot.isKnownFull(
@@ -3653,7 +3701,7 @@ export const providerQuotaBlocked = (
       // not block it — the gate record itself stands for its siblings, and a
       // later quota-class failure of this target revokes the narrowing through
       // the failure stores, with no change to the record.
-      if (providerScopeNarrowed(target, gathered.snapshot.observedAt)) return undefined
+      if (scope === undefined && providerScopeNarrowed(target, gathered.snapshot.observedAt)) return undefined
       gathered.gated = true
       return { until: gathered.snapshot.resetAt }
     }
@@ -3733,7 +3781,9 @@ export const providerRootStartBlocked = (
   // This is the gate the model-scope plant could not reach — route
   // adjustments never enter root-start judgement — which is why fresh
   // session waves kept dealing walled legs of this shape as last resorts.
-  const gathered = gatheredProviderQuota.get(target.providerID)
+  const gathered = wallScope(target.providerID, location) === "per-model"
+    ? undefined
+    : gatheredProviderQuota.get(gatheredProviderKey(target, location))
   if (gathered && QuotaSnapshot.blocksRootStart(judgedSnapshot(gathered.snapshot, now), now, gate.rootStartMaxPct))
     return { until: gathered.snapshot.resetAt }
   return undefined
