@@ -3,6 +3,7 @@ export * as SessionOperation from "./operation.js"
 import type { Session } from "@opencode/schema/session"
 import { Effect } from "effect"
 import { Bus } from "../bus.js"
+import type { Database } from "../database/database.js"
 import { SessionCommand } from "./command.js"
 import { SessionEvent } from "./event.js"
 import { SessionInbox } from "./inbox.js"
@@ -52,13 +53,18 @@ const release = (sessionID: Session.ID, id: SessionMessage.ID) =>
  *
  * A shell is never run twice for one admission: its started event projects
  * to a message under the admission's own ID, and `started` reports it, so a
- * recovered row whose shell already ran is only consumed. A command whose
- * execution is lost after delivery is run again by the recovery sweep
- * (at-least-once); its own prompt admission is the durable record it leaves.
+ * recovered row whose shell already ran is only consumed. A command records
+ * a durable start marker before its definition is invoked: a recovered row
+ * with no marker never started and runs now, while a recovered row with a
+ * marker has an ambiguous prior outcome (its definition may have run side
+ * effects before the crash) and is NOT rerun — an explicit interrupted
+ * notice is surfaced instead, with the command name so it can be retried
+ * intentionally.
  */
 export const run = Effect.fn("SessionOperation.run")(function* (input: {
   session: Session.Info
   operation: SessionInbox.Operation
+  db: Database.Interface["db"]
   bus: Bus.Interface
   notify: Notify
   started: (id: SessionMessage.ID) => Effect.Effect<boolean>
@@ -88,6 +94,21 @@ export const run = Effect.fn("SessionOperation.run")(function* (input: {
       })
       return
     }
+    // Commands: distinguish never-started from started-with-unknown-outcome.
+    // A recovered row with a start marker may have run side effects before
+    // the crash; rerunning it silently could apply them twice, so surface an
+    // explicit interrupted outcome with the command name for intentional
+    // retry instead. A row with no marker never reached its definition and
+    // runs now.
+    if (yield* SessionInbox.hasStarted(input.db, sessionID, operation.id)) {
+      yield* interrupted(input.notify, operation.payload.command, operation.payload.text)
+      return
+    }
+    // The row may already be consumed (a duplicate delivery that lost its
+    // race after the claim was taken); without a pending row there is
+    // nothing to run.
+    if ((yield* SessionInbox.find(input.db, operation.id)) === undefined) return
+    yield* SessionInbox.markStarted(input.db, sessionID, operation.id)
     yield* SessionCommand.execute({
       session: input.session,
       command: operation.payload.command,
@@ -110,4 +131,11 @@ const failed = (notify: Notify, command: string, message: string) =>
     text: `User command failed:\n/${command}\n\n${message}`,
     description: command,
     metadata: { source: "command", state: "error" },
+  })
+
+const interrupted = (notify: Notify, command: string, text: string) =>
+  notify({
+    text: `User command interrupted:\n/${command} ${text}\n\nThe command started but its outcome is unknown — it may have run side effects before the interruption. Retry intentionally with /${command} if needed.`,
+    description: command,
+    metadata: { source: "command", state: "interrupted", retry: `/${command}` },
   })

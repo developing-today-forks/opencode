@@ -110,6 +110,7 @@ export const layer = Layer.effect(
           SessionOperation.run({
             session,
             operation,
+            db,
             bus,
             notify: (note) =>
               synthetic({ sessionID: session.id, ...note, resume: false }).pipe(

@@ -151,6 +151,7 @@ export const SessionInboxTable = sqliteTable(
       .notNull(),
     delivery: text().$type<SessionInbox.Delivery>().notNull(),
     enqueued_seq: integer().notNull(),
+    time_started: integer(),
     time_created: integer()
       .notNull()
       .$default(() => Date.now()),

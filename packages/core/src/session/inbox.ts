@@ -1,6 +1,6 @@
 export * as SessionInbox from "./inbox.js"
 
-import { and, asc, eq, notInArray, or } from "drizzle-orm"
+import { and, asc, eq, isNull, notInArray, or } from "drizzle-orm"
 import { Context, DateTime, Effect, Layer, Schema } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import {
@@ -551,6 +551,48 @@ export type Promotion =
 
 /** An admitted shell or command whose execution has not started yet. */
 export type Operation = Extract<Promotion, { readonly type: "shell" | "command" }>
+
+/**
+ * Records the durable intent that a command operation started executing.
+ * The row reads as pending with no start marker exactly until the first
+ * starter reaches its definition; a row still pending with a start marker
+ * when execution next drains belongs to a start this process lost after
+ * side effects may have run, and recovery must not silently rerun it.
+ * Idempotent: the first start wins, later marks are no-ops.
+ */
+export const markStarted = Effect.fn("SessionInbox.markStarted")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  id: SessionMessage.ID,
+) {
+  yield* db
+    .update(SessionInboxTable)
+    .set({ time_started: Date.now() })
+    .where(
+      and(
+        eq(SessionInboxTable.id, id),
+        eq(SessionInboxTable.session_id, sessionID),
+        isNull(SessionInboxTable.time_started),
+      ),
+    )
+    .run()
+    .pipe(Effect.orDie)
+})
+
+/** Whether the operation's execution started (its start marker is durable). */
+export const hasStarted = Effect.fn("SessionInbox.hasStarted")(function* (
+  db: DatabaseService,
+  sessionID: SessionSchema.ID,
+  id: SessionMessage.ID,
+) {
+  const row = yield* db
+    .select({ time_started: SessionInboxTable.time_started })
+    .from(SessionInboxTable)
+    .where(and(eq(SessionInboxTable.id, id), eq(SessionInboxTable.session_id, sessionID)))
+    .get()
+    .pipe(Effect.orDie)
+  return row?.time_started !== undefined && row?.time_started !== null
+})
 
 const promotion = (row: typeof SessionInboxTable.$inferSelect): Promotion =>
   row.type === "move"
