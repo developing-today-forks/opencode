@@ -57,13 +57,14 @@ export const FileSystemHandler = HttpApiBuilder.group(Api, "server.fs", (handler
           Effect.gen(function* () {
             const fs = yield* FileSystem.Service
             return yield* fs.write({ path: ctx.query.path, data: ctx.payload }).pipe(
-              Effect.mapError(
-                (error) =>
-                  new FileTooLargeError({
+              Effect.mapError((error) => {
+                if (error._tag === "FileSystem.WriteTooLargeError")
+                  return new FileTooLargeError({
                     path: error.path,
                     message: `File too large: ${error.size} bytes exceeds the ${error.max}-byte write limit`,
-                  }),
-              ),
+                  })
+                return new FileNotFoundError({ path: error.path, message: `File not found: ${error.path}` })
+              }),
             )
           }),
         ),

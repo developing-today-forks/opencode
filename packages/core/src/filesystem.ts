@@ -4,6 +4,7 @@ import { makeLocationNode } from "@opencode/util/effect/app-node"
 import path from "path"
 import { Context, Effect, Layer, Option, PlatformError, Schema, Stream } from "effect"
 import { FSUtil } from "@opencode/util/fs-util"
+import { Global } from "@opencode/util/global"
 import { Location } from "./location.js"
 import { AbsolutePath, PositiveInt, RelativePath } from "./schema.js"
 import { FileSystemSearch } from "./filesystem/search.js"
@@ -128,8 +129,8 @@ export interface Interface {
   /** Fails with `NotFoundError` when the path is missing or is not a directory. */
   readonly list: (input?: ListInput) => Effect.Effect<Entry[], NotFoundError>
   readonly find: (input: FindInput) => Effect.Effect<Entry[]>
-  /** Writes a file at an absolute path or one relative to the location; not confined to it. */
-  readonly write: (input: WriteInput) => Effect.Effect<Write, WriteTooLargeError>
+  /** Writes inside the location or advertised OpenCode temp root; rejects every other target. */
+  readonly write: (input: WriteInput) => Effect.Effect<Write, WriteTooLargeError | NotFoundError>
 }
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/FileSystem") {}
@@ -139,6 +140,7 @@ const baseLayer = Layer.effect(
   Effect.gen(function* () {
     const fs = yield* FSUtil.Service
     const location = yield* Location.Service
+    const global = yield* Global.Service
     const search = yield* FileSystemSearch.Service
     // Workspace-placed directories exist only inside the workspace, so a host
     // realpath probe at boot consults the wrong filesystem and would block
@@ -174,6 +176,18 @@ const baseLayer = Layer.effect(
       if (!FSUtil.contains(root, real)) return yield* Effect.fail(new NotFoundError({ path: input }))
       return { absolute, real, directory: location.directory }
     })
+    const realPathOrExistingParent = (candidate: string): Effect.Effect<string> =>
+      fs.realPath(candidate).pipe(
+        Effect.catchReason(
+          "PlatformError",
+          "NotFound",
+          () => {
+            const parent = path.dirname(candidate)
+            return parent === candidate ? Effect.succeed(candidate) : realPathOrExistingParent(parent)
+          },
+          (_, error) => Effect.die(error),
+        ),
+      )
     return Service.of({
       find: search.find,
       read: Effect.fn("FileSystem.read")(function* (input) {
@@ -287,6 +301,16 @@ const baseLayer = Layer.effect(
             max: MAX_WRITE_BYTES,
           })
         const target = path.resolve(location.directory, input.path)
+        if (!FSUtil.contains(location.directory, target) && !FSUtil.contains(global.tmp, target))
+          return yield* new NotFoundError({ path: RelativePath.make(input.path) })
+        // Check the nearest existing path before creating parents. This rejects
+        // an in-root lexical path whose existing symlink component redirects
+        // the eventual write outside both allowed roots.
+        if (!location.workspaceID) {
+          const realTarget = yield* realPathOrExistingParent(target)
+          if (!FSUtil.contains(root, realTarget) && !FSUtil.contains(global.tmp, realTarget))
+            return yield* new NotFoundError({ path: RelativePath.make(input.path) })
+        }
         yield* fs.writeWithDirs(target, input.data).pipe(Effect.orDie)
         return Write.make({ path: AbsolutePath.make(target) })
       }),
@@ -297,5 +321,5 @@ const baseLayer = Layer.effect(
 export const node = makeLocationNode({
   service: Service,
   layer: baseLayer,
-  deps: [FSUtil.node, Location.node, FileSystemSearch.node],
+  deps: [FSUtil.node, Location.node, FileSystemSearch.node, Global.node],
 })
