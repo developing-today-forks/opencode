@@ -4,7 +4,15 @@ import fs from "node:fs"
 import path from "path"
 import { mkdtemp, readFile, readdir, rename, rm } from "fs/promises"
 import { tmpdir } from "os"
-import { appendText, readJson, readText, renameWithRetry, writeJsonAtomic, writeText } from "../../src/util/persistence"
+import {
+  appendText,
+  readJson,
+  readText,
+  renameWithRetry,
+  writeJsonAtomic,
+  writeText,
+  writeTextExclusive,
+} from "../../src/util/persistence"
 
 test("persistence creates parent directories and supports text, append, and JSON", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "opencode-tui-persistence-"))
@@ -109,6 +117,22 @@ test("renameWithRetry retries EACCES and EBUSY but not other errors", async () =
   })
   await expect(failure).rejects.toThrow("no such file")
   expect(attempts).toBe(1)
+})
+
+test("writeTextExclusive creates an owner-only file and never truncates an existing one", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "opencode-tui-persistence-"))
+  try {
+    const exportPath = path.join(root, "nested", "session-export.md")
+    await writeTextExclusive(exportPath, "transcript")
+    expect(await readText(exportPath)).toBe("transcript")
+    if (process.platform !== "win32") {
+      expect(fs.statSync(exportPath).mode & 0o777).toBe(0o600)
+    }
+    await expect(writeTextExclusive(exportPath, "second writer")).rejects.toThrow()
+    expect(await readText(exportPath)).toBe("transcript")
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })
 
 test("writeJsonAtomic removes the temp file when rename keeps failing transiently", async () => {

@@ -15,6 +15,20 @@ export async function writeText(filePath: string, content: string) {
   await writeFile(filePath, content)
 }
 
+// Exclusive owner-only create for sensitive payloads staged into shared
+// directories (e.g. session transcript exports in os.tmpdir()): the file is
+// created with O_EXCL at 0600, so it is never world-readable under a normal
+// umask and an existing file is never silently truncated by a second writer.
+export async function writeTextExclusive(filePath: string, content: string) {
+  await mkdir(path.dirname(filePath), { recursive: true })
+  const handle = await open(filePath, "wx", 0o600)
+  try {
+    await handle.writeFile(content)
+  } finally {
+    await handle.close()
+  }
+}
+
 export async function appendText(filePath: string, content: string) {
   await mkdir(path.dirname(filePath), { recursive: true })
   await appendFile(filePath, content)
