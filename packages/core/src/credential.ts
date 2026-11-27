@@ -1,7 +1,7 @@
 export * as Credential from "./credential.js"
 
 import { asc, desc, eq, type SQL } from "drizzle-orm"
-import { Cause, Clock, Context, Duration, Effect, Fiber, Layer, Schema } from "effect"
+import { Cause, Clock, Context, Duration, Effect, Fiber, Layer, Option, Schema } from "effect"
 import { Credential } from "@opencode/schema/credential"
 import { CredentialLegacy } from "@opencode/schema/credential-legacy"
 import { Integration } from "@opencode/schema/integration"
@@ -123,21 +123,32 @@ const layer = Layer.effect(
     const scope = yield* Effect.scope
     const pending = new Map<ID, Fiber.Fiber<OAuth | undefined, unknown>>()
     // Rows written before v2.1 may carry the old key credential shape.
-    const decode = Schema.decodeUnknownSync(CredentialLegacy.Value)
-    const stored = (row: typeof CredentialTable.$inferSelect) => {
-      if (!row.integration_id) return
-      return new Info({
-        id: row.id,
-        integrationID: row.integration_id,
-        label: row.label,
-        value: decode(row.value),
+    const decode = Schema.decodeUnknownOption(CredentialLegacy.Value)
+    // A single stored row that matches no known credential shape (a hand edit, a partial
+    // migration, an unknown future kind) must not die the whole read as an untyped defect:
+    // skip it and log the row's id so the bad credential is diagnosable on its own.
+    const stored = (row: typeof CredentialTable.$inferSelect) =>
+      Effect.gen(function* () {
+        if (!row.integration_id) return undefined
+        const value = decode(row.value)
+        if (Option.isNone(value)) {
+          yield* Effect.logWarning("credential row skipped: stored value does not decode", {
+            credentialID: row.id,
+            integrationID: row.integration_id,
+          })
+          return undefined
+        }
+        return new Info({
+          id: row.id,
+          integrationID: row.integration_id,
+          label: row.label,
+          value: value.value,
+        })
       })
-    }
     const storedRows = (rows: ReadonlyArray<typeof CredentialTable.$inferSelect>) =>
-      rows.flatMap((row) => {
-        const credential = stored(row)
-        return credential ? [credential] : []
-      })
+      Effect.forEach(rows, stored).pipe(
+        Effect.map((credentials) => credentials.filter((credential) => credential !== undefined)),
+      )
     const rows = (where?: SQL) =>
       db
         .select()
@@ -145,7 +156,7 @@ const layer = Layer.effect(
         .where(where)
         .orderBy(asc(CredentialTable.active), asc(CredentialTable.time_created), asc(CredentialTable.id))
         .all()
-        .pipe(Effect.orDie, Effect.map(storedRows))
+        .pipe(Effect.orDie, Effect.flatMap(storedRows))
     type Transaction = Parameters<Parameters<typeof db.transaction>[0]>[0]
     const currentActive = (tx: Transaction, integrationID: Integration.ID) =>
       tx
@@ -218,7 +229,7 @@ const layer = Layer.effect(
       list: Effect.fn("Credential.list")((integrationID) => rows(eq(CredentialTable.integration_id, integrationID))),
       get: Effect.fn("Credential.get")(function* (id) {
         const row = yield* db.select().from(CredentialTable).where(eq(CredentialTable.id, id)).get().pipe(Effect.orDie)
-        return row ? stored(row) : undefined
+        return row ? yield* stored(row) : undefined
       }),
       create: Effect.fn("Credential.create")(function* (input) {
         const credential = new Info({
