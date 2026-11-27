@@ -521,6 +521,32 @@ describe("SessionProjector", () => {
     }),
   )
 
+  it.effect("projects a model switch with no previous model when the stored model cell is corrupt", () =>
+    Effect.gen(function* () {
+      const db = yield* seedSession()
+      const bus = yield* Bus.Service
+      // A wrong-shape model cell (edited DB, older writer, backup/sync restore) must
+      // degrade to an unknown previous model, not die the projection fiber.
+      yield* db.run(sql`update session_v2 set model = ${JSON.stringify({ bogus: true })} where id = ${sessionID}`)
+
+      const exit = yield* bus.publish(SessionEvent.ModelSelected, { sessionID, model }).pipe(Effect.exit)
+
+      expect(exit._tag).toBe("Success")
+      const rows = yield* db
+        .select()
+        .from(SessionMessageTable)
+        .where(eq(SessionMessageTable.session_id, sessionID))
+        .all()
+        .pipe(Effect.orDie)
+      const messages = rows.map((row) =>
+        Schema.decodeUnknownSync(SessionMessage.Info)({ ...row.data, id: row.id, type: row.type }),
+      )
+      expect(messages.map((message) => message.type)).toEqual(["model-switched"])
+      expect(messages[0]).toMatchObject({ model })
+      expect(messages[0]?.type === "model-switched" ? messages[0].previous : "wrong-type").toBeUndefined()
+    }),
+  )
+
   it.effect("rejects distinct creator events that reuse one projected message ID", () =>
     Effect.gen(function* () {
       const db = yield* seedSession()
