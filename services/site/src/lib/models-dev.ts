@@ -20,7 +20,7 @@ type ModelsDev = Record<string, { models?: Record<string, ModelsDevModel> }>
 export async function fetchFreeModels(options?: {
   timeoutMs?: number
   maxBytes?: number
-  fetch?: typeof fetch
+  fetch?: (input: string, init?: { signal?: AbortSignal }) => Promise<Response>
 }): Promise<ModelsDevModel[]> {
   const load = options?.fetch ?? fetch
   const response = await load("https://models.dev/api.json", {

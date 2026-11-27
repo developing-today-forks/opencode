@@ -18,37 +18,45 @@ const valid = JSON.stringify({
 
 describe("fetchFreeModels", () => {
   test("returns the non-deprecated zero-cost models from a valid response", async () => {
-    const load = (async () => new Response(valid)) as typeof fetch
-    const models = await fetchFreeModels({ fetch: load })
+    const models = await fetchFreeModels({ fetch: async () => new Response(valid) })
     expect(models.map((model) => model.id)).toEqual(["free"])
   })
 
   test("a stalled request settles within the deadline", async () => {
-    const load = ((_input: RequestInfo | URL, init?: RequestInit) =>
-      new Promise<Response>((_resolve, reject) => {
-        init?.signal?.addEventListener("abort", () => reject(init.signal?.reason))
-      })) as typeof fetch
     const start = Date.now()
-    await expect(fetchFreeModels({ fetch: load, timeoutMs: 25 })).rejects.toThrow()
+    await expect(
+      fetchFreeModels({
+        timeoutMs: 25,
+        fetch: (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => reject(init.signal?.reason))
+          }),
+      }),
+    ).rejects.toThrow()
     expect(Date.now() - start).toBeLessThan(5_000)
   })
 
   test("a never-ending response body settles within the deadline", async () => {
-    const load = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-      const body = new ReadableStream<Uint8Array>({
-        start(controller) {
-          init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason))
-        },
-      })
-      return new Response(body)
-    }) as typeof fetch
     const start = Date.now()
-    await expect(fetchFreeModels({ fetch: load, timeoutMs: 25 })).rejects.toThrow()
+    await expect(
+      fetchFreeModels({
+        timeoutMs: 25,
+        fetch: async (_input, init) =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                init?.signal?.addEventListener("abort", () => controller.error(init.signal?.reason))
+              },
+            }),
+          ),
+      }),
+    ).rejects.toThrow()
     expect(Date.now() - start).toBeLessThan(5_000)
   })
 
   test("an over-limit body is rejected before full buffering", async () => {
-    const load = (async () => new Response(valid)) as typeof fetch
-    await expect(fetchFreeModels({ fetch: load, maxBytes: 16 })).rejects.toThrow("exceeded 16 bytes")
+    await expect(fetchFreeModels({ fetch: async () => new Response(valid), maxBytes: 16 })).rejects.toThrow(
+      "exceeded 16 bytes",
+    )
   })
 })
