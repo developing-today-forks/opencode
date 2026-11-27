@@ -23,6 +23,7 @@ import { robotsTxt } from "~/lib/robots-txt"
 import { mediaUrl } from "~/lib/media"
 import { legacyRedirect } from "~/lib/legacy"
 import { metaResponse } from "~/lib/meta"
+import { installScript } from "~/lib/install-script"
 import { setSecurityHeaders } from "~/lib/security-headers"
 import { noindexDev } from "~/lib/noindex"
 import { docsMiddleware } from "~/docs/middleware"
@@ -154,13 +155,6 @@ export default [
 const textHeaders = {
   "Content-Type": "text/plain; charset=utf-8",
   "Cache-Control": "public, max-age=3600, stale-while-revalidate=86400",
-}
-
-async function installScript() {
-  const response = await fetch("https://raw.githubusercontent.com/anomalyco/opencode/dev/install")
-  const headers = new Headers(response.headers)
-  headers.set("Cache-Control", "no-store")
-  return new Response(response.body, { status: response.status, statusText: response.statusText, headers })
 }
 
 /** Where an old URL (without its locale) lives now, or undefined when it has not moved. */
