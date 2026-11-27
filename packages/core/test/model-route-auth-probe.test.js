@@ -1,0 +1,198 @@
+import { afterEach, describe, expect, test } from "bun:test";
+import { ModelRoute } from "@opencode/core/model-route";
+// code#9950: a quota bench probes half-open at its window reset, but an auth bench
+// historically just expired — returning a possibly-still-dead door to full candidacy
+// at the expiry instant, so a wave of sessions could pile onto it before the first
+// failure re-benched it. An expired auth bench now converts to probe-pending: the
+// door stays out of ordinary candidacy until exactly one probe attempt settles it.
+describe("ModelRoute auth bench probe (code#9950)", () => {
+    const policy = ModelRoute.policy({ cooldownMs: 60000, quotaCooldownMs: 900000 });
+    const target = ModelRoute.ref({ providerID: "auth-probe-provider", model: "door" });
+    const sample = { firstTokenMs: 100, responseMs: 500, tokensPerSecond: 30 };
+    afterEach(() => {
+        ModelRoute.resetHealth();
+        ModelRoute.resetSelection();
+        ModelRoute.setAdjustments([]);
+    });
+    const entriesFor = (now) => ModelRoute.availability(now).filter((entry) => entry.providerID === "auth-probe-provider");
+    test("an auth bench converts to a half-open probe at expiry; probe success reseats and clears the ladder", () => {
+        const now = 1000000000;
+        // First auth failure benches on the long (quota-length) ladder.
+        ModelRoute.failed(target, policy, now, { auth: true });
+        expect(ModelRoute.cooldownUntil(target, now)).toBe(now + 900000);
+        expect(ModelRoute.probeDue(target, undefined, now)).toBe(false);
+        // While the bench stands there is no probe: the reset-shaped admission belongs to
+        // quota benches, and an auth bench's probe moment is its own expiry.
+        expect(ModelRoute.coolingDown(target, now + 899999)).toBe(true);
+        expect(ModelRoute.probeDue(target, undefined, now + 899999)).toBe(false);
+        // At expiry the bench converts instead of lapsing: no cooldown remains, but the
+        // door is not an ordinary candidate — a probe is due and availability says so.
+        expect(ModelRoute.cooldownUntil(target, now + 900000)).toBe(0);
+        expect(ModelRoute.probeDue(target, undefined, now + 900000)).toBe(true);
+        // The bench lives at traffic (effort) scope now: availability names the
+        // effort it holds, "default" for an attempt that served without one.
+        expect(entriesFor(now + 900000)).toEqual([
+            {
+                providerID: "auth-probe-provider",
+                modelID: "door",
+                variant: "default",
+                class: "auth",
+                reason: "auth bench expired; half-open probe pending",
+                resume: "probe",
+            },
+        ]);
+        // Exactly one probe: the first claim wins and blocks every other candidacy.
+        expect(ModelRoute.claimBenchProbe(target, undefined, now + 900000)).toBe(true);
+        expect(ModelRoute.claimBenchProbe(target, undefined, now + 900000)).toBe(false);
+        expect(ModelRoute.probeDue(target, undefined, now + 900000)).toBe(false);
+        expect(ModelRoute.probeInFlight(target, undefined, now + 900000)).toBe(true);
+        expect(entriesFor(now + 900000)[0]?.reason).toBe("auth bench expired; half-open probe in flight");
+        // Probe success reseats the door and clears the ladder: the next auth failure
+        // benches at the base again instead of escalating.
+        ModelRoute.completed(target, policy, sample, now + 900001);
+        expect(ModelRoute.probeDue(target, undefined, now + 900001)).toBe(false);
+        expect(ModelRoute.probeInFlight(target, undefined, now + 900001)).toBe(false);
+        expect(entriesFor(now + 900001)).toEqual([]);
+        ModelRoute.failed(target, policy, now + 900002, { auth: true });
+        expect(ModelRoute.cooldownUntil(target, now + 900002)).toBe(now + 900002 + 900000);
+    });
+    test("a failed auth probe re-benches on the escalated ladder; the door owes another probe at the new expiry (credential scope)", () => {
+        const now = 1100000000;
+        ModelRoute.failed(target, policy, now, { auth: true }, "cred-auth");
+        expect(ModelRoute.credentialCooldownUntil(target, "cred-auth", now)).toBe(now + 900000);
+        // The claim is spent straight from the raw expired form — no candidacy read has
+        // converted the bench yet — and materializes the probe-pending state.
+        expect(ModelRoute.claimBenchProbe(target, "cred-auth", now + 900000)).toBe(true);
+        expect(ModelRoute.probeInFlight(target, "cred-auth", now + 900000)).toBe(true);
+        expect(entriesFor(now + 900000)).toEqual([
+            {
+                providerID: "auth-probe-provider",
+                modelID: "door",
+                credentialID: "cred-auth",
+                variant: "default",
+                class: "auth",
+                reason: "auth bench expired; half-open probe in flight",
+                resume: "probe",
+            },
+        ]);
+        // The probe fails auth again: second consecutive failure, so the bench doubles.
+        ModelRoute.failed(target, policy, now + 900001, { auth: true }, "cred-auth");
+        expect(ModelRoute.credentialCooldownUntil(target, "cred-auth", now + 900001)).toBe(now + 900001 + 1800000);
+        expect(ModelRoute.probeInFlight(target, "cred-auth", now + 900001)).toBe(false);
+        expect(ModelRoute.probeDue(target, "cred-auth", now + 900001)).toBe(false);
+        // At the new expiry the door owes a fresh probe rather than returning outright.
+        expect(ModelRoute.probeDue(target, "cred-auth", now + 900001 + 1800000)).toBe(true);
+        // The target scope and sibling credentials were never benched or probed.
+        expect(ModelRoute.cooldownUntil(target, now + 900001)).toBe(0);
+        expect(ModelRoute.probeDue(target, "cred-other", now + 900001 + 1800000)).toBe(false);
+    });
+    test("a released auth probe claim leaves the door probe-pending and the probe due again", () => {
+        const now = 1200000000;
+        ModelRoute.failed(target, policy, now, { auth: true });
+        expect(ModelRoute.cooldownUntil(target, now + 900000)).toBe(0);
+        expect(ModelRoute.claimBenchProbe(target, undefined, now + 900000)).toBe(true);
+        // The owner resolved the target but never attempted it: the claim is handed back
+        // and the probe is due again, exactly as for a quota bench (#1478).
+        expect(ModelRoute.releaseBenchProbe(target, undefined, now + 900000)).toBe(true);
+        expect(ModelRoute.probeInFlight(target, undefined, now + 900000)).toBe(false);
+        expect(ModelRoute.probeDue(target, undefined, now + 900000)).toBe(true);
+        expect(ModelRoute.claimBenchProbe(target, undefined, now + 900001)).toBe(true);
+    });
+    test("an auth bench is planted with a real duration at every scope: until is strictly after plant time (#2555)", () => {
+        const now = 1250000000;
+        const scopes = [
+            { credentialID: undefined, variant: undefined },
+            { credentialID: "cred-zero", variant: undefined },
+            { credentialID: undefined, variant: "xhigh" },
+        ];
+        for (const [index, scope] of scopes.entries()) {
+            const plant = now + index;
+            ModelRoute.failed(target, policy, plant, { auth: true }, scope.credentialID, undefined, undefined, scope.variant);
+            const until = ModelRoute.cooldownUntil(target, plant, undefined, scope.variant);
+            const credentialUntil = scope.credentialID
+                ? ModelRoute.credentialCooldownUntil(target, scope.credentialID, plant)
+                : until;
+            expect(credentialUntil).toBeGreaterThan(plant);
+            expect(credentialUntil - plant).toBe(900000);
+            const entry = entriesFor(plant).find((item) => item.variant === (scope.variant ?? "default"));
+            expect(entry?.until ?? plant + 1).toBeGreaterThan(plant);
+            ModelRoute.resetHealth();
+        }
+    });
+    test("an ordinary failure never becomes probe-pending: its bench lapses outright", () => {
+        const now = 1300000000;
+        const ordinary = ModelRoute.ref({ providerID: "auth-probe-provider", model: "ordinary" });
+        ModelRoute.failed(ordinary, policy, now);
+        expect(ModelRoute.cooldownUntil(ordinary, now)).toBe(now + 60000);
+        expect(ModelRoute.cooldownUntil(ordinary, now + 60000)).toBe(0);
+        expect(ModelRoute.probeDue(ordinary, undefined, now + 60000)).toBe(false);
+        expect(ModelRoute.claimBenchProbe(ordinary, undefined, now + 60000)).toBe(false);
+        expect(entriesFor(now + 60000)).toEqual([]);
+    });
+    test("a probe-pending claim that never settles goes stale at the claim bound and the probe is due again (#2455)", () => {
+        const now = 1500000000;
+        const bound = ModelRoute.PROBE_CLAIM_MAX_AGE_MS;
+        ModelRoute.failed(target, policy, now, { auth: true });
+        expect(ModelRoute.cooldownUntil(target, now + 900000)).toBe(0);
+        expect(ModelRoute.claimBenchProbe(target, undefined, now + 900000)).toBe(true);
+        // Within the bound the claim is the bench's one admitted attempt: nothing else is
+        // due and the scope reads in flight, exactly as before.
+        expect(ModelRoute.probeInFlight(target, undefined, now + 900000 + bound)).toBe(true);
+        expect(ModelRoute.probeDue(target, undefined, now + 900000 + bound)).toBe(false);
+        expect(ModelRoute.claimBenchProbe(target, undefined, now + 900000 + bound)).toBe(false);
+        // The owner vanished (step fiber interrupted mid-probe): past the bound the claim
+        // is stale — the probe is due again, availability says pending, not in flight.
+        const stale = now + 900000 + bound + 1;
+        expect(ModelRoute.probeInFlight(target, undefined, stale)).toBe(false);
+        expect(ModelRoute.probeDue(target, undefined, stale)).toBe(true);
+        expect(entriesFor(stale)[0]?.reason).toBe("auth bench expired; half-open probe pending");
+        // A fresh claim re-stamps the scope; the stale owner's late release names the old
+        // claim, so it cannot clear the fresh one.
+        expect(ModelRoute.claimBenchProbe(target, undefined, stale)).toBe(true);
+        expect(ModelRoute.releaseBenchProbe(target, undefined, now + 900000)).toBe(false);
+        expect(ModelRoute.probeInFlight(target, undefined, stale)).toBe(true);
+        // The fresh probe settles the bench outright.
+        ModelRoute.completed(target, policy, sample, stale + 1);
+        expect(ModelRoute.probeDue(target, undefined, stale + 1)).toBe(false);
+        expect(ModelRoute.probeInFlight(target, undefined, stale + 1)).toBe(false);
+        expect(entriesFor(stale + 1)).toEqual([]);
+    });
+    test("a stale probe-pending claim reclaims at credential scope too (#2455)", () => {
+        const now = 1600000000;
+        const bound = ModelRoute.PROBE_CLAIM_MAX_AGE_MS;
+        ModelRoute.failed(target, policy, now, { auth: true }, "cred-stale");
+        expect(ModelRoute.credentialCooldownUntil(target, "cred-stale", now + 900000)).toBe(0);
+        expect(ModelRoute.claimBenchProbe(target, "cred-stale", now + 900000)).toBe(true);
+        const stale = now + 900000 + bound + 1;
+        expect(ModelRoute.probeInFlight(target, "cred-stale", stale)).toBe(false);
+        expect(ModelRoute.probeDue(target, "cred-stale", stale)).toBe(true);
+        expect(ModelRoute.claimBenchProbe(target, "cred-stale", stale)).toBe(true);
+        expect(ModelRoute.probeInFlight(target, "cred-stale", stale)).toBe(true);
+        // The target scope was never claimed: nothing goes stale or due there.
+        expect(ModelRoute.probeDue(target, undefined, stale)).toBe(false);
+    });
+    test("a stale probe-pending claim reclaims at traffic (effort) scope too (#2455)", () => {
+        const now = 1700000000;
+        const bound = ModelRoute.PROBE_CLAIM_MAX_AGE_MS;
+        ModelRoute.failed(target, policy, now, { auth: true }, undefined, undefined, undefined, "xhigh");
+        expect(ModelRoute.cooldownUntil(target, now + 900000, undefined, "xhigh")).toBe(0);
+        expect(ModelRoute.claimBenchProbe(target, undefined, now + 900000, undefined, "xhigh")).toBe(true);
+        const stale = now + 900000 + bound + 1;
+        expect(ModelRoute.probeInFlight(target, undefined, stale, "xhigh")).toBe(false);
+        expect(ModelRoute.probeDue(target, undefined, stale, "xhigh")).toBe(true);
+        expect(ModelRoute.claimBenchProbe(target, undefined, stale, undefined, "xhigh")).toBe(true);
+        // The sibling effort was never benched or claimed.
+        expect(ModelRoute.probeDue(target, undefined, stale, "high")).toBe(false);
+        expect(ModelRoute.probeInFlight(target, undefined, stale, "high")).toBe(false);
+    });
+    test("a success landing outside a claim (a session already on the door) also reseats a probe-pending bench", () => {
+        const now = 1400000000;
+        ModelRoute.failed(target, policy, now, { auth: true });
+        expect(ModelRoute.cooldownUntil(target, now + 900000)).toBe(0);
+        expect(ModelRoute.probeDue(target, undefined, now + 900000)).toBe(true);
+        // No claim was spent; the success itself is the door's answer.
+        ModelRoute.completed(target, policy, sample, now + 900005);
+        expect(ModelRoute.probeDue(target, undefined, now + 900005)).toBe(false);
+        expect(entriesFor(now + 900005)).toEqual([]);
+    });
+});

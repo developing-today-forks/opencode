@@ -1,0 +1,892 @@
+import { beforeEach, describe, expect, test } from "bun:test";
+import { AIError, InvalidRequestError, LLMClient, LLMEvent, LanguageModel, Message, SystemPart, QuotaExceededError, TransportError, } from "@opencode/ai/effect";
+import { OpenAIChat, OpenAIResponses } from "@opencode/ai/protocols";
+import { Agent } from "@opencode/core/agent";
+import { Database } from "@opencode/core/database/database";
+import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder";
+import { llmClient } from "@opencode/core/effect/app-node-platform";
+import { LayerNode } from "@opencode/util/effect/layer-node";
+import { Bus } from "@opencode/core/bus";
+import { SessionEvent } from "@opencode/core/session/event";
+import { SessionMessage } from "@opencode/core/session/message";
+import { SessionProjector } from "@opencode/core/session/projector";
+import { SessionRunnerModel } from "@opencode/core/session/runner/model";
+import { SessionTable } from "@opencode/core/session/sql";
+import { SessionStore } from "@opencode/core/session/store";
+import { SessionTitle } from "@opencode/core/session/title";
+import { PluginHooks } from "@opencode/core/plugin/hooks";
+import { PluginSupervisor } from "@opencode/core/plugin/supervisor";
+import { Location } from "@opencode/core/location";
+import { Session } from "@opencode/core/session";
+import { Project } from "@opencode/core/project";
+import { ProjectTable } from "@opencode/core/project/sql";
+import { App } from "@opencode/core/app";
+import { Credential } from "@opencode/core/credential";
+import { Model } from "@opencode/core/model";
+import { ModelRoute } from "@opencode/core/model-route";
+import { ModelRouteLog } from "@opencode/core/model-route-log";
+import { Provider } from "@opencode/core/provider";
+import { AbsolutePath } from "@opencode/core/schema";
+import { Money } from "@opencode/schema/money";
+import { Deferred, Effect, Fiber, Layer, Schema, Stream } from "effect";
+import { testEffect } from "./lib/effect";
+let requests = [];
+let selectedSmall;
+let selectedPrimary;
+let selections = [];
+let probeClaims = false;
+let probeServingID;
+let probeCredentialID;
+const model = LanguageModel.make({
+    id: "title-model",
+    provider: "test",
+    route: OpenAIChat.route,
+});
+const smallModel = LanguageModel.make({
+    id: "title-small",
+    provider: "test",
+    route: OpenAIChat.route,
+});
+const cost = [
+    {
+        input: Money.USDPerMillionTokens.make(1),
+        output: Money.USDPerMillionTokens.make(2),
+        cache: {
+            read: Money.USDPerMillionTokens.make(0.1),
+            write: Money.USDPerMillionTokens.make(0.5),
+        },
+    },
+];
+const providerRejected = (input) => new AIError({ reason: new InvalidRequestError(input) });
+const successfulTitle = () => Stream.make(LLMEvent.textDelta({ id: "title", text: "Generated Title\n" }), LLMEvent.stepFinish({
+    index: 0,
+    reason: { normalized: "stop" },
+    usage: {
+        inputTokens: 15,
+        outputTokens: 6,
+        nonCachedInputTokens: 10,
+        cacheReadInputTokens: 3,
+        cacheWriteInputTokens: 2,
+        reasoningTokens: 2,
+    },
+}), LLMEvent.finish({
+    reason: { normalized: "stop" },
+}));
+let titleStream = successfulTitle;
+const client = Layer.mock(LLMClient.Service)({
+    stream: (request) => {
+        requests.push(request);
+        return titleStream(request);
+    },
+    generate: () => Effect.die("unused"),
+});
+// Simulates a routed resolution the way the real resolver behaves after #1478: picking a
+// target whose bench probe is due spends the claim and stamps it on the routing block.
+const probeRouting = (language) => {
+    const target = ModelRoute.ref({ providerID: "test", model: language.id });
+    const claimedAt = Date.now();
+    const token = ModelRoute.nextProbeClaimToken();
+    const targetClaimed = ModelRoute.claimBenchProbe(target, undefined, claimedAt, token);
+    const credentialClaimed = probeCredentialID
+        ? ModelRoute.claimBenchProbe(target, Credential.ID.make(probeCredentialID), claimedAt, token)
+        : false;
+    return {
+        routeID: Model.ID.make("title-route"),
+        target,
+        policy: ModelRoute.policy({ cooldownMs: 60000, quotaCooldownMs: 900000 }),
+        attempts: 1,
+        ...(probeServingID ? { credentialID: Credential.ID.make(probeServingID) } : {}),
+        fallback: () => Effect.succeed(undefined),
+        ...(targetClaimed || credentialClaimed
+            ? {
+                probeClaim: {
+                    claimedAt,
+                    token,
+                    ...(probeCredentialID ? { credentialID: Credential.ID.make(probeCredentialID) } : {}),
+                },
+            }
+            : {}),
+    };
+};
+const models = Layer.mock(SessionRunnerModel.Service)({
+    resolve: (session) => {
+        selections.push(session.model);
+        const language = session.model?.id === "title-small" ? smallModel : model;
+        return Effect.succeed(SessionRunnerModel.resolved(language, {
+            capabilities: { tools: true, input: ["text", "image"], output: ["text"] },
+            cost,
+            limit: { context: 200000, output: 32000 },
+            variant: session.model?.variant,
+            ...(probeClaims ? { routing: probeRouting(language) } : {}),
+        }));
+    },
+});
+const smallModels = Layer.mock(Model.Service, {
+    small: () => Effect.succeed(selectedSmall),
+    get: (_providerID, modelID) => Effect.succeed(modelID === selectedPrimary?.id ? selectedPrimary : undefined),
+});
+const it = testEffect(AppNodeBuilder.build(LayerNode.group([
+    Database.node,
+    Bus.node,
+    SessionProjector.node,
+    SessionStore.node,
+    Agent.node,
+    PluginHooks.node,
+    SessionTitle.node,
+    ModelRouteLog.node,
+]), [
+    llmClient.replace(client),
+    Model.node.replace(smallModels),
+    SessionRunnerModel.node.replace(models),
+    Location.node.replace(Location.boundNode({ directory: AbsolutePath.make("/project") })),
+    PluginSupervisor.node.replace(Layer.empty),
+]));
+const insertSession = (id, title, created, model) => Effect.gen(function* () {
+    const { db } = yield* Database.Service;
+    yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie);
+    yield* db
+        .insert(SessionTable)
+        .values({
+        id,
+        project_id: Project.ID.global,
+        slug: id,
+        directory: "/project",
+        title,
+        model,
+        time_created: created,
+        version: "test",
+    })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie);
+});
+const prompt = (sessionID, text) => Effect.gen(function* () {
+    const bus = yield* Bus.Service;
+    const messageID = SessionMessage.ID.create();
+    yield* bus.publish(SessionEvent.InboxEnqueued, {
+        sessionID,
+        inboxID: messageID,
+        item: { type: "user", payload: { text }, delivery: "steer" },
+    });
+    yield* bus.publish(SessionEvent.InboxDelivered, {
+        sessionID,
+        inboxID: messageID,
+    });
+});
+const small = Model.Info.make({
+    ...Model.Info.default(Provider.ID.make("test"), Model.ID.make("title-small")),
+    family: Model.Family.make("gpt-luna"),
+    capabilities: { tools: false, input: ["text"], output: ["text"] },
+    variants: [
+        { id: Model.VariantID.make("low") },
+        { id: Model.VariantID.make("none") },
+        { id: Model.VariantID.make("high") },
+    ],
+});
+const lowSmall = Model.Info.make({
+    ...small,
+    variants: [{ id: Model.VariantID.make("low") }, { id: Model.VariantID.make("high") }],
+});
+beforeEach(() => {
+    requests = [];
+    selectedSmall = undefined;
+    selectedPrimary = undefined;
+    selections = [];
+    probeClaims = false;
+    probeServingID = undefined;
+    probeCredentialID = undefined;
+    titleStream = successfulTitle;
+});
+const enableTitleAgent = Effect.gen(function* () {
+    const agents = yield* Agent.Service;
+    yield* agents.transform((editor) => {
+        editor.update(Agent.ID.make("title"), (agent) => {
+            agent.mode = "primary";
+            agent.hidden = true;
+            agent.system = "You are a title generator.";
+        });
+    });
+});
+it.effect("generates a title from the sole user message and renames the session", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_generate");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Help me debug the failing build");
+    const store = yield* SessionStore.Service;
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.headers).toEqual({
+        "x-opencode-session-id": sessionID,
+        "x-session-affinity": sessionID,
+        "X-Session-Id": sessionID,
+        "User-Agent": App.useragent(App.make()),
+        "x-opencode-project": Project.ID.global,
+        "x-opencode-session": sessionID,
+        "x-opencode-client": "opencode",
+    });
+    expect(requests[0]?.promptCacheKey).toBe(sessionID);
+    expect(requests[0]?.tools).toEqual([]);
+    expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator."]);
+    expect(JSON.stringify(requests[0]?.messages)).toContain("Help me debug the failing build");
+    const renamed = yield* store.get(sessionID);
+    expect(renamed?.title).toBe("Generated Title");
+    expect(renamed?.tokens).toEqual({ input: 10, output: 4, reasoning: 2, cache: { read: 3, write: 2 } });
+    expect(renamed?.cost).toBeCloseTo(0.0000233);
+}));
+it.live("counts a title request against its target's budget, and a restart restores the same count", () => Effect.gen(function* () {
+    ModelRoute.resetHealth();
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_budget");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Count this request against the budget");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const target = ModelRoute.ref({ providerID: "test", model: "title-model" });
+    const live = ModelRoute.usageOf(target);
+    expect(live.minute.requests).toBe(1);
+    // Input, output and reasoning, the same tokens the main path counts; the cache is left out.
+    expect(live.day.tokens).toBe(16);
+    expect(ModelRoute.overBudget(target, { requestsPerMinute: 1 })).toBe(true);
+    // After a restart only the routing history is left, and it must restore what was counted live.
+    yield* Effect.sleep("100 millis");
+    ModelRoute.resetHealth();
+    const { db } = yield* Database.Service;
+    yield* ModelRouteLog.restoreUsageFrom(db);
+    expect(ModelRoute.usageOf(target)).toEqual(live);
+}));
+it.live("settles the attempted model's probe claim and releases the unattempted primary's (#1478)", () => Effect.gen(function* () {
+    ModelRoute.resetHealth();
+    probeClaims = true;
+    selectedSmall = small;
+    yield* enableTitleAgent;
+    // Both title models sit on a quota bench whose known window reset has already passed,
+    // so each resolution spends that bench's single half-open probe claim.
+    const policy = ModelRoute.policy({ cooldownMs: 60000, quotaCooldownMs: 900000 });
+    const primary = ModelRoute.ref({ providerID: "test", model: "title-model" });
+    const preferred = ModelRoute.ref({ providerID: "test", model: "title-small" });
+    const plantedAt = Date.now() - 60000;
+    const resetAt = plantedAt + 30000;
+    for (const target of [primary, preferred]) {
+        for (let index = 0; index < 8; index++)
+            ModelRoute.failed(target, policy, plantedAt + index, { quota: true });
+        ModelRoute.observeProviderQuota(target, {
+            planID: "plan",
+            window: "five-hours",
+            providerID: "test",
+            percent: 100,
+            remaining: 0,
+            resetAt,
+            observedAt: plantedAt + 10,
+            stale: false,
+        }, plantedAt + 10);
+    }
+    expect(ModelRoute.probeDue(primary, undefined)).toBe(true);
+    expect(ModelRoute.probeDue(preferred, undefined)).toBe(true);
+    const sessionID = Session.ID.make("ses_title_probe_claim");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Title this with a probed model");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small"]);
+    // The attempted preferred model reported success: its bench ended outright.
+    expect(ModelRoute.cooldownUntil(preferred, Date.now())).toBe(0);
+    // The unattempted primary's claim was released: its bench is still in force and its
+    // probe is due again for the next real request.
+    expect(ModelRoute.cooldownUntil(primary, Date.now())).toBeGreaterThan(Date.now());
+    expect(ModelRoute.activeBenches(Date.now()).find((bench) => bench.modelID === "title-model")?.probeClaimed).toBe(false);
+    expect(ModelRoute.probeDue(primary, undefined)).toBe(true);
+    ModelRoute.resetHealth();
+}));
+it.live("settles a failed title attempt with its failure classification (#1478)", () => Effect.gen(function* () {
+    ModelRoute.resetHealth();
+    probeClaims = true;
+    selectedSmall = small;
+    yield* enableTitleAgent;
+    // The preferred (small) model fails with a quota error; the primary fallback succeeds.
+    titleStream = () => requests.length === 1
+        ? Stream.fail(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
+        : successfulTitle();
+    const sessionID = Session.ID.make("ses_title_probe_failure_hint");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Title this despite a quota failure");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"]);
+    // The failed attempt settles with the quota classification preserved: its bench is a
+    // quota bench on the quota cooldown, not an ordinary transient-failure bench.
+    const bench = ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small");
+    expect(bench?.reason).toBe("quota");
+    expect(bench?.until).toBeGreaterThan(Date.now() + 60000);
+    ModelRoute.resetHealth();
+}));
+it.effect("settles the probe credential when it differs from the serving one (#1486)", () => Effect.gen(function* () {
+    ModelRoute.resetHealth();
+    probeClaims = true;
+    probeServingID = "cred-serving";
+    probeCredentialID = "cred-probe";
+    selectedSmall = small;
+    yield* enableTitleAgent;
+    // Both title models sit on quota benches whose known window resets have already
+    // passed, on the target scope and on the probe credential scope alike.
+    const policy = ModelRoute.policy({ cooldownMs: 60000, quotaCooldownMs: 900000 });
+    const primary = ModelRoute.ref({ providerID: "test", model: "title-model" });
+    const preferred = ModelRoute.ref({ providerID: "test", model: "title-small" });
+    const plantedAt = Date.now() - 60000;
+    const resetAt = plantedAt + 30000;
+    const snapshot = (observedAt) => ({
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt,
+        stale: false,
+    });
+    for (const target of [primary, preferred]) {
+        for (let index = 0; index < 8; index++) {
+            ModelRoute.failed(target, policy, plantedAt + index, { quota: true });
+            ModelRoute.failed(target, policy, plantedAt + index, { quota: true }, "cred-probe");
+        }
+        ModelRoute.observeProviderQuota(target, snapshot(plantedAt + 10), plantedAt + 10);
+        ModelRoute.observeCredentialQuota(target, "cred-probe", snapshot(plantedAt + 10), plantedAt + 10);
+    }
+    expect(ModelRoute.probeDue(preferred, undefined)).toBe(true);
+    expect(ModelRoute.probeDue(preferred, "cred-probe")).toBe(true);
+    // The preferred (small) model fails with a quota error; the primary fallback succeeds.
+    titleStream = () => requests.length === 1
+        ? Stream.fail(new AIError({ reason: new QuotaExceededError({ message: "out of quota" }) }))
+        : successfulTitle();
+    const sessionID = Session.ID.make("ses_title_probe_credential");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Title this with a divergent probe credential");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"]);
+    // The failed attempt settled every scope its pick claimed: the target scope renewed
+    // on the quota ladder even though the serving credential differs, the probe
+    // credential scope renewed with it, and the serving credential kept its own
+    // quota accounting — with no claim left outstanding anywhere.
+    const targetBench = ModelRoute.activeBenches(Date.now()).find((bench) => bench.modelID === "title-small" && bench.credentialID === undefined);
+    expect(targetBench?.reason).toBe("quota");
+    expect(targetBench?.until).toBeGreaterThan(Date.now());
+    expect(ModelRoute.credentialCooldownUntil(preferred, "cred-probe")).toBeGreaterThan(Date.now());
+    expect(ModelRoute.credentialCooldownUntil(preferred, "cred-serving")).toBeGreaterThan(Date.now());
+    expect(ModelRoute.activeBenches(Date.now()).some((bench) => bench.probeClaimed)).toBe(false);
+    expect(ModelRoute.probeDue(preferred, undefined)).toBe(false);
+    expect(ModelRoute.probeDue(preferred, "cred-probe")).toBe(false);
+    ModelRoute.resetHealth();
+}));
+it.effect("releases the model's probe claim when preparation is interrupted (#1486)", () => Effect.gen(function* () {
+    ModelRoute.resetHealth();
+    probeClaims = true;
+    yield* enableTitleAgent;
+    const target = ModelRoute.ref({ providerID: "test", model: "title-model" });
+    const policy = ModelRoute.policy({ cooldownMs: 60000, quotaCooldownMs: 900000 });
+    const plantedAt = Date.now() - 60000;
+    const resetAt = plantedAt + 30000;
+    for (let index = 0; index < 8; index++)
+        ModelRoute.failed(target, policy, plantedAt + index, { quota: true });
+    ModelRoute.observeProviderQuota(target, {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: plantedAt + 10,
+        stale: false,
+    }, plantedAt + 10);
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true);
+    // Stall request preparation inside a title hook, then interrupt the attempt.
+    const entered = yield* Deferred.make();
+    const gate = yield* Deferred.make();
+    const hooks = yield* PluginHooks.Service;
+    yield* hooks.register("session", "title", () => Deferred.succeed(entered, undefined).pipe(Effect.andThen(Deferred.await(gate)), Effect.asVoid));
+    const sessionID = Session.ID.make("ses_title_probe_interrupt");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Interrupt this title during preparation");
+    const title = yield* SessionTitle.Service;
+    const fiber = yield* title.generate(sessionID).pipe(Effect.forkScoped);
+    yield* Deferred.await(entered);
+    yield* Fiber.interrupt(fiber);
+    // No request ran, so nothing settled — but the claim is handed back instead of
+    // stranding the bench's probe behind the interrupted preparation.
+    expect(requests).toHaveLength(0);
+    expect(ModelRoute.cooldownUntil(target)).toBeGreaterThan(Date.now());
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true);
+    ModelRoute.resetHealth();
+}));
+it.effect("releases the model probe claim when the title stream is interrupted (#1486)", () => Effect.gen(function* () {
+    ModelRoute.resetHealth();
+    probeClaims = true;
+    yield* enableTitleAgent;
+    const target = ModelRoute.ref({ providerID: "test", model: "title-model" });
+    const policy = ModelRoute.policy({ cooldownMs: 60000, quotaCooldownMs: 900000 });
+    const plantedAt = Date.now() - 60000;
+    const resetAt = plantedAt + 30000;
+    for (let index = 0; index < 8; index++)
+        ModelRoute.failed(target, policy, plantedAt + index, { quota: true });
+    ModelRoute.observeProviderQuota(target, {
+        planID: "plan",
+        window: "five-hours",
+        providerID: "test",
+        percent: 100,
+        remaining: 0,
+        resetAt,
+        observedAt: plantedAt + 10,
+        stale: false,
+    }, plantedAt + 10);
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true);
+    // The stream starts but never emits; interrupt the attempt mid-stream.
+    let markStarted = () => { };
+    const started = new Promise((resolve) => {
+        markStarted = resolve;
+    });
+    titleStream = () => {
+        markStarted();
+        return Stream.never;
+    };
+    const sessionID = Session.ID.make("ses_title_probe_stream_interrupt");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Interrupt this title during the stream");
+    const title = yield* SessionTitle.Service;
+    const fiber = yield* title.generate(sessionID).pipe(Effect.forkScoped);
+    yield* Effect.promise(() => started);
+    expect(requests).toHaveLength(1);
+    yield* Fiber.interrupt(fiber);
+    // The interrupted stream unwinds the attempt before its settlement can run, so the
+    // claim is handed back from the stream interruption handler instead.
+    expect(ModelRoute.cooldownUntil(target)).toBeGreaterThan(Date.now());
+    expect(ModelRoute.probeDue(target, undefined)).toBe(true);
+    ModelRoute.resetHealth();
+}));
+it.live("releases instead of benching on a context-overflow title failure (#1478)", () => Effect.gen(function* () {
+    ModelRoute.resetHealth();
+    probeClaims = true;
+    selectedSmall = small;
+    yield* enableTitleAgent;
+    // The preferred (small) model rejects the oversized prompt as context overflow;
+    // the primary fallback succeeds. Overflow is a property of this request, not of
+    // the model, so the failed attempt must not bench the healthy target.
+    titleStream = () => requests.length === 1
+        ? Stream.fail(new AIError({
+            reason: new InvalidRequestError({ message: "prompt too long", classification: "context-overflow" }),
+        }))
+        : successfulTitle();
+    const sessionID = Session.ID.make("ses_title_probe_overflow");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Title this oversized prompt");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"]);
+    expect(ModelRoute.activeBenches(Date.now()).find((item) => item.modelID === "title-small")).toBeUndefined();
+    expect(ModelRoute.cooldownUntil(ModelRoute.ref({ providerID: "test", model: "title-small" }), Date.now())).toBe(0);
+    ModelRoute.resetHealth();
+}));
+for (const timing of ["start", "end"])
+    it.effect(`excludes commentary from titles when the response phase arrives at ${timing}`, () => Effect.gen(function* () {
+        yield* enableTitleAgent;
+        const sessionID = Session.ID.make(`ses_title_phase_${timing}`);
+        yield* insertSession(sessionID);
+        yield* prompt(sessionID, "Investigate performance across four hosts without making changes");
+        // Sanitized shape of a live Luna response: both messages are output_text, not reasoning.
+        titleStream = (request) => Stream.fromIterable([
+            {
+                type: "response.output_item.added",
+                item: { type: "message", id: "commentary", ...(timing === "start" ? { phase: "commentary" } : {}) },
+            },
+            {
+                type: "response.output_text.delta",
+                item_id: "commentary",
+                delta: "We need title only. Need capture investigation four machines performance read-only. Title concise.",
+            },
+            {
+                type: "response.output_item.done",
+                item: { type: "message", id: "commentary", phase: "commentary" },
+            },
+            { type: "response.output_item.added", item: { type: "message", id: "final", phase: "final_answer" } },
+            { type: "response.output_text.delta", item_id: "final", delta: "Read-only performance investigation" },
+            { type: "response.output_item.done", item: { type: "message", id: "final", phase: "final_answer" } },
+            { type: "response.completed", response: { id: "response_title" } },
+        ]).pipe(Stream.map((event) => Schema.decodeUnknownSync(OpenAIResponses.protocol.stream.event)(JSON.stringify(event))), Stream.mapAccumEffect(() => OpenAIResponses.protocol.stream.initial(request), OpenAIResponses.protocol.stream.step));
+        const title = yield* SessionTitle.Service;
+        yield* title.generate(sessionID);
+        const store = yield* SessionStore.Service;
+        expect(requests).toHaveLength(1);
+        expect((yield* store.get(sessionID))?.title).toBe("Read-only performance investigation");
+    }));
+it.effect("runs title hooks instead of context hooks", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_hook");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Redact this message");
+    const hooks = yield* PluginHooks.Service;
+    let contexts = 0;
+    yield* hooks.register("session", "context", () => Effect.sync(() => contexts++));
+    yield* hooks.register("session", "title", (event) => Effect.sync(() => {
+        expect(event.sessionID).toBe(sessionID);
+        expect(event.system.map((part) => part.text)).toEqual(["You are a title generator."]);
+        event.system.push(SystemPart.make("Prefer short titles."));
+        event.messages = [Message.user("[redacted]")];
+        event.options.maxTokens = 32;
+        event.options.reasoningEffort = "low";
+    }));
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(contexts).toBe(0);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator.", "Prefer short titles."]);
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("Redact this message");
+    expect(requests[0]?.maxTokens).toBe(32);
+    expect(requests[0]?.providerOptions).toEqual({ reasoningEffort: "low" });
+}));
+it.effect("uses a hook-provided title without a model request", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_result");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Hello");
+    const hooks = yield* PluginHooks.Service;
+    yield* hooks.register("session", "title", (event) => Effect.sync(() => {
+        event.result = "Plugin Title";
+    }));
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests).toHaveLength(0);
+    const store = yield* SessionStore.Service;
+    expect((yield* store.get(sessionID))?.title).toBe("Plugin Title");
+}));
+it.effect("uses a small model from the primary provider", () => Effect.gen(function* () {
+    selectedSmall = small;
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_small_model");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Use a small model for this title");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small"]);
+    expect(selections[1]?.variant).toBe(Model.VariantID.make("none"));
+    const store = yield* SessionStore.Service;
+    expect((yield* store.get(sessionID))?.title).toBe("Generated Title");
+}));
+it.effect("falls back to the primary model when the small model fails", () => Effect.gen(function* () {
+    titleStream = () => requests.length === 1 ? Stream.fail(providerRejected({ message: "Small model unavailable" })) : successfulTitle();
+    selectedSmall = lowSmall;
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_small_fallback");
+    yield* insertSession(sessionID, undefined, undefined, Model.Ref.make({
+        providerID: Provider.ID.make("test"),
+        id: Model.ID.make("title-model"),
+        variant: Model.VariantID.make("high"),
+    }));
+    yield* prompt(sessionID, "Fall back when title generation fails");
+    const attempted = [];
+    const hooks = yield* PluginHooks.Service;
+    yield* hooks.register("session", "model.request", (event) => Effect.sync(() => {
+        attempted.push(event.model);
+    }));
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests.map((request) => String(request.model.id))).toEqual(["title-small", "title-model"]);
+    expect(attempted.map((model) => String(model.variant))).toEqual(["low", "high"]);
+    const store = yield* SessionStore.Service;
+    expect((yield* store.get(sessionID))?.title).toBe("Generated Title");
+}));
+const primaryRef = (variant) => Model.Ref.make({
+    providerID: Provider.ID.make("test"),
+    id: Model.ID.make("title-model"),
+    ...(variant ? { variant: Model.VariantID.make(variant) } : {}),
+});
+const primaryInfo = (variants) => Model.Info.make({
+    ...Model.Info.default(Provider.ID.make("test"), Model.ID.make("title-model")),
+    variants: variants.map((id) => ({ id: Model.VariantID.make(id) })),
+});
+const titleAttempts = (sessionID, text, variant) => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    yield* insertSession(sessionID, undefined, undefined, primaryRef(variant));
+    yield* prompt(sessionID, text);
+    const attempted = [];
+    const hooks = yield* PluginHooks.Service;
+    yield* hooks.register("session", "model.request", (event) => Effect.sync(() => {
+        attempted.push(event.model);
+    }));
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const store = yield* SessionStore.Service;
+    return { attempted: attempted.map((model) => String(model.variant)), title: (yield* store.get(sessionID))?.title };
+});
+it.effect("uses the primary model at its lowest variant without a small model", () => Effect.gen(function* () {
+    selectedPrimary = primaryInfo(["none", "low", "high"]);
+    const result = yield* titleAttempts(Session.ID.make("ses_title_primary_lowest"), "Title with the lowest variant", "high");
+    expect(result.attempted).toEqual(["none"]);
+    expect(result.title).toBe("Generated Title");
+}));
+it.effect("falls back to the selected primary variant when the lowest variant fails", () => Effect.gen(function* () {
+    titleStream = () => requests.length === 1 ? Stream.fail(providerRejected({ message: "Variant rejected" })) : successfulTitle();
+    selectedPrimary = primaryInfo(["low", "high"]);
+    const result = yield* titleAttempts(Session.ID.make("ses_title_primary_fallback"), "Fall back to the selection", "high");
+    expect(result.attempted).toEqual(["low", "high"]);
+    expect(result.title).toBe("Generated Title");
+}));
+it.effect("uses the selected primary variant when no lower variant exists", () => Effect.gen(function* () {
+    selectedPrimary = primaryInfo(["high", "max"]);
+    const result = yield* titleAttempts(Session.ID.make("ses_title_primary_selected"), "No lower variant here", "high");
+    expect(result.attempted).toEqual(["high"]);
+    expect(result.title).toBe("Generated Title");
+}));
+it.effect("keeps the primary default variant instead of a low variant that may enable reasoning", () => Effect.gen(function* () {
+    selectedPrimary = primaryInfo(["low", "high"]);
+    const result = yield* titleAttempts(Session.ID.make("ses_title_primary_default"), "Default may not reason", undefined);
+    expect(result.attempted).toEqual(["default"]);
+    expect(result.title).toBe("Generated Title");
+}));
+it.effect("uses the primary none variant from its default variant", () => Effect.gen(function* () {
+    selectedPrimary = primaryInfo(["none", "low", "high"]);
+    const result = yield* titleAttempts(Session.ID.make("ses_title_primary_none"), "Disable reasoning", undefined);
+    expect(result.attempted).toEqual(["none"]);
+    expect(result.title).toBe("Generated Title");
+}));
+it.effect("generates from the first user message after later messages exist", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_second_message");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "First message");
+    yield* prompt(sessionID, "Second message");
+    const store = yield* SessionStore.Service;
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests).toHaveLength(1);
+    expect(JSON.stringify(requests[0]?.messages)).toContain("First message");
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("Second message");
+    expect((yield* store.get(sessionID))?.title).toBe("Generated Title");
+}));
+it.effect("retries a legacy persisted fallback title", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_legacy");
+    const created = Date.parse("2026-07-30T18:45:03.662Z");
+    yield* insertSession(sessionID, "New session - 2026-07-30T18:45:03.662Z", created);
+    yield* prompt(sessionID, "Retry the legacy title");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const store = yield* SessionStore.Service;
+    expect(requests).toHaveLength(1);
+    expect((yield* store.get(sessionID))?.title).toBe("Generated Title");
+}));
+it.effect("generates a title for an explicitly requested child session", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_child");
+    const { db } = yield* Database.Service;
+    yield* db
+        .insert(ProjectTable)
+        .values({ id: Project.ID.global, worktree: AbsolutePath.make("/project"), sandboxes: [] })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie);
+    yield* db
+        .insert(SessionTable)
+        .values({
+        id: sessionID,
+        project_id: Project.ID.global,
+        parent_id: Session.ID.make("ses_title_parent"),
+        slug: sessionID,
+        directory: "/project",
+        version: "test",
+    })
+        .onConflictDoNothing()
+        .run()
+        .pipe(Effect.orDie);
+    yield* prompt(sessionID, "Do this subtask");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const store = yield* SessionStore.Service;
+    expect(requests).toHaveLength(1);
+    expect((yield* store.get(sessionID))?.title).toBe("Generated Title");
+}));
+it.effect("does not generate when the title agent is removed", () => Effect.gen(function* () {
+    const sessionID = Session.ID.make("ses_title_no_agent");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Help me debug the failing build");
+    const store = yield* SessionStore.Service;
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    expect(requests).toHaveLength(0);
+    const untouched = yield* store.get(sessionID);
+    expect(untouched?.title).toBeUndefined();
+}));
+it.effect("regenerates an existing title using the title agent", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_regenerate");
+    yield* insertSession(sessionID, "Original title");
+    yield* prompt(sessionID, "Investigate the login failure");
+    const events = yield* Bus.Service;
+    const assistantMessageID = SessionMessage.ID.create();
+    yield* events.publish(SessionEvent.Step.Started, {
+        sessionID,
+        assistantMessageID,
+        agent: Agent.ID.make("build"),
+        model: Model.Ref.make({ id: Model.ID.make("title-model"), providerID: Provider.ID.make("test") }),
+        started: 0,
+    });
+    yield* events.publish(SessionEvent.Reasoning.Started, { sessionID, assistantMessageID, ordinal: 0 });
+    yield* events.publish(SessionEvent.Reasoning.Ended, {
+        sessionID,
+        assistantMessageID,
+        ordinal: 0,
+        text: "Private reasoning that should not appear",
+    });
+    yield* events.publish(SessionEvent.Text.Started, { sessionID, assistantMessageID, ordinal: 1 });
+    yield* events.publish(SessionEvent.Text.Ended, {
+        sessionID,
+        assistantMessageID,
+        ordinal: 1,
+        text: "The actual issue is expired OAuth credentials.",
+    });
+    yield* prompt(sessionID, "Switch to fixing OAuth token refresh");
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const store = yield* SessionStore.Service;
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.system.map((part) => part.text)).toEqual(["You are a title generator."]);
+    expect(JSON.stringify(requests[0]?.messages)).toContain("Investigate the login failure");
+    expect(JSON.stringify(requests[0]?.messages)).toContain("The actual issue is expired OAuth credentials.");
+    expect(JSON.stringify(requests[0]?.messages)).toContain("Switch to fixing OAuth token refresh");
+    expect(JSON.stringify(requests[0]?.messages)).not.toContain("Private reasoning that should not appear");
+    expect((yield* store.get(sessionID))?.title).toBe("Generated Title");
+}));
+it.effect("bounds regeneration context while preserving the original request and recent conversation", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_regenerate_bounded");
+    yield* insertSession(sessionID, "Original title");
+    yield* prompt(sessionID, `ORIGINAL_GOAL ${"a".repeat(3000)} OMITTED_ORIGINAL_END`);
+    yield* prompt(sessionID, `OMITTED_OLD_CONTEXT ${"b".repeat(9000)} RECENT_GOAL`);
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const content = requests[0]?.messages[0]?.content[0];
+    expect(content?.type).toBe("text");
+    if (content?.type !== "text")
+        return;
+    expect(content.text.length).toBeLessThanOrEqual(8000);
+    expect(content.text).toContain("ORIGINAL_GOAL");
+    expect(content.text).toContain("RECENT_GOAL");
+    expect(content.text).not.toContain("OMITTED_ORIGINAL_END");
+    expect(content.text).not.toContain("OMITTED_OLD_CONTEXT");
+}));
+it.effect("keeps the clipped regeneration context well formed", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_regenerate_emoji");
+    yield* insertSession(sessionID, "Original title");
+    // The leading x puts both cuts, the original request's head and the recent conversation's tail, inside an emoji.
+    yield* prompt(sessionID, `x${"😀".repeat(1500)}`);
+    yield* prompt(sessionID, `x${"😀".repeat(5000)}`);
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const content = requests[0]?.messages[0]?.content[0];
+    expect(content?.type).toBe("text");
+    if (content?.type !== "text")
+        return;
+    expect(content.text.length).toBeLessThanOrEqual(8000);
+    expect(content.text.length).toBeGreaterThan(7900);
+    expect(content.text.isWellFormed()).toBe(true);
+}));
+for (const [prefix, stored] of [
+    [95, `${"a".repeat(95)}😀...`],
+    [96, `${"a".repeat(96)}...`],
+    [97, `${"a".repeat(97)}...`],
+])
+    it.effect(`clips a long generated title without splitting an emoji after ${prefix} letters`, () => Effect.gen(function* () {
+        yield* enableTitleAgent;
+        titleStream = () => Stream.make(LLMEvent.textDelta({ id: "title", text: `${"a".repeat(prefix)}😀${"b".repeat(20)}` }), LLMEvent.finish({ reason: { normalized: "stop" } }));
+        const sessionID = Session.ID.make(`ses_title_emoji_${prefix}`);
+        yield* insertSession(sessionID);
+        yield* prompt(sessionID, "Name this session");
+        const title = yield* SessionTitle.Service;
+        yield* title.generate(sessionID);
+        const store = yield* SessionStore.Service;
+        expect((yield* store.get(sessionID))?.title).toBe(stored);
+    }));
+it.effect("preserves the existing title when regeneration fails", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_regenerate_failure");
+    yield* insertSession(sessionID, "Original title");
+    yield* prompt(sessionID, "Fail to regenerate this title");
+    titleStream = () => Stream.fail(providerRejected({ message: "Provider unavailable" }));
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const store = yield* SessionStore.Service;
+    expect(requests).toHaveLength(1);
+    expect((yield* store.get(sessionID))?.title).toBe("Original title");
+}));
+it.effect("retries after a failed title request", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_retry");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Retry this title");
+    const title = yield* SessionTitle.Service;
+    titleStream = () => Stream.fail(providerRejected({ message: "Provider unavailable" }));
+    yield* title.generate(sessionID);
+    titleStream = successfulTitle;
+    yield* title.generate(sessionID);
+    const store = yield* SessionStore.Service;
+    expect(requests).toHaveLength(2);
+    expect((yield* store.get(sessionID))?.title).toBe("Generated Title");
+}));
+it.effect("does not rename after a failed title stream", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_stream_failure");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Fail this title stream");
+    titleStream = () => Stream.fail(new AIError({
+        reason: new TransportError({ message: "Disconnected", transport: "http", operation: "request" }),
+    }));
+    const title = yield* SessionTitle.Service;
+    yield* title.generate(sessionID);
+    const store = yield* SessionStore.Service;
+    expect(requests).toHaveLength(1);
+    expect((yield* store.get(sessionID))?.title).toBeUndefined();
+}));
+it.effect("preserves a manual rename completed while generation is in flight", () => Effect.gen(function* () {
+    yield* enableTitleAgent;
+    const sessionID = Session.ID.make("ses_title_manual_rename");
+    yield* insertSession(sessionID);
+    yield* prompt(sessionID, "Generate this title");
+    const started = yield* Deferred.make();
+    const release = yield* Deferred.make();
+    titleStream = () => Stream.unwrap(Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(release)), Effect.as(successfulTitle())));
+    const title = yield* SessionTitle.Service;
+    const fiber = yield* title.generate(sessionID).pipe(Effect.forkScoped);
+    yield* Deferred.await(started);
+    const events = yield* Bus.Service;
+    yield* events.publish(SessionEvent.Renamed, { sessionID, title: "Manual title" });
+    yield* Deferred.succeed(release, undefined);
+    yield* Fiber.join(fiber);
+    const store = yield* SessionStore.Service;
+    expect(requests).toHaveLength(1);
+    expect((yield* store.get(sessionID))?.title).toBe("Manual title");
+}));
+describe("title prompt cuts well-formedness (#1977)", () => {
+    const astral = "\u{1F600}";
+    test("head cut drops a straddling pair whole", () => {
+        const out = SessionTitle.truncateFirstMessageText("a".repeat(1999) + astral + "b".repeat(10));
+        expect(out.isWellFormed()).toBe(true);
+        expect(out).toBe("a".repeat(1999));
+    });
+    test("head cut keeps a pair ending exactly at the cut", () => {
+        const out = SessionTitle.truncateFirstMessageText("a".repeat(1998) + astral + "b".repeat(10));
+        expect(out).toBe("a".repeat(1998) + astral);
+    });
+    test("tail cut drops a straddling pair whole", () => {
+        const out = SessionTitle.truncateRecentContextText("zz" + astral + "aaaa", 5);
+        expect(out.isWellFormed()).toBe(true);
+        expect(out).toBe("aaaa");
+    });
+    test("tail cut keeps a non-straddling pair", () => {
+        const out = SessionTitle.truncateRecentContextText("zz" + astral + "aaaa", 6);
+        expect(out).toBe(astral + "aaaa");
+    });
+});
