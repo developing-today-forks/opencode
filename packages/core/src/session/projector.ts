@@ -402,7 +402,9 @@ function run(db: DatabaseService, event: MessageEvent) {
           .get()
           .pipe(
             Effect.orDie,
-            Effect.map((row) => (row?.model ? Schema.decodeUnknownSync(Model.Ref)(row.model) : undefined)),
+            Effect.map((row) =>
+              row?.model ? Option.getOrUndefined(Schema.decodeUnknownOption(Model.Ref)(row.model)) : undefined,
+            ),
           )
       },
       getLocation() {
