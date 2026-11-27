@@ -1747,8 +1747,10 @@ const gatheredProviderQuota = new Map<string, QuotaGateState>()
 
 // Promoting model-shaped evidence is derived from a Location's declaration.
 // Neither another Location nor removal of that declaration may inherit it.
-const gatheredProviderKey = (target: Model.Ref, location?: string) =>
-  JSON.stringify([location ?? "", wallScope(target.providerID, location), target.providerID])
+const gatheredProviderKey = (target: Model.Ref, location?: string) => {
+  const scope = wallScope(target.providerID, location)
+  return scope === undefined ? target.providerID : JSON.stringify([location ?? "", scope, target.providerID])
+}
 
 /** Feeds one target's gathered reading into the provider gate when the reading
  * is the provider-wide shape (fork #2479): exactly one entry for the provider

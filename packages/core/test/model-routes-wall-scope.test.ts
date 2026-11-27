@@ -63,6 +63,23 @@ describe("declared wall scope (code#13790)", () => {
     }
   })
 
+  test("undeclared provider evidence retains its existing cross-location gate", () => {
+    ModelRoute.resetHealth()
+    const leaf = ModelRoute.ref({ providerID: "undeclared", model: "full" })
+    const now = 910_000_000
+    const resetAt = now + 86_400_000
+    const readings = [{ providerID: "undeclared", measuredAt: now, windows: [
+      { name: "weekly", usedPercent: 100, resetAt, measuredAt: now },
+    ], models: {} }]
+    try {
+      expect(ModelRoute.observeGatheredProviderWall(leaf, readings, now, "/first")).toBe(true)
+      expect(ModelRoute.providerQuotaBlocked(leaf, now + 1, "/other")).toEqual({ until: resetAt })
+      expect(ModelRoute.providerRootStartBlocked(leaf, now + 1, "/other")).toEqual({ until: resetAt })
+    } finally {
+      ModelRoute.resetHealth()
+    }
+  })
+
   test("promoted model evidence stays local and disappears when its declaration is removed", () => {
     ModelRoute.resetHealth()
     const entries = [document("provider")]
