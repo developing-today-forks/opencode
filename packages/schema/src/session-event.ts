@@ -52,6 +52,8 @@ export const Created = Event.durable({
     model: Model.Ref.pipe(optional),
     /** Host-supplied annotations resolved at creation, including any inherited from a parent. */
     metadata: SessionMetadata.pipe(optional),
+    /** Fleet correlation id captured from the host environment; never contains credentials. */
+    fleetCtxID: Schema.String.pipe(optional),
     subagentPolicy: SessionSubagentPolicy.pipe(optional),
     permissions: Permission.Ruleset.pipe(optional),
     /** Detached (non-interactive) mode, resolved at creation including inheritance from a parent. */
@@ -266,23 +268,24 @@ export const InboxDeliveryChanged = Event.durable({
 export type InboxDeliveryChanged = typeof InboxDeliveryChanged.Type
 
 export namespace Execution {
-  export const Started = Event.durable({ type: "session.execution.started", ...options, schema: Base })
+  const ExecutionBase = { ...Base, fleetCtxID: Schema.String.pipe(optional) }
+  export const Started = Event.durable({ type: "session.execution.started", ...options, schema: ExecutionBase })
   export type Started = typeof Started.Type
 
-  export const Succeeded = Event.durable({ type: "session.execution.succeeded", ...options, schema: Base })
+  export const Succeeded = Event.durable({ type: "session.execution.succeeded", ...options, schema: ExecutionBase })
   export type Succeeded = typeof Succeeded.Type
 
   export const Failed = Event.durable({
     type: "session.execution.failed",
     ...options,
-    schema: { ...Base, error: SessionError.Error },
+    schema: { ...ExecutionBase, error: SessionError.Error },
   })
   export type Failed = typeof Failed.Type
 
   export const Interrupted = Event.durable({
     type: "session.execution.interrupted",
     ...options,
-    schema: { ...Base, reason: Schema.Literals(["user", "shutdown", "superseded", "inactivity"]) },
+    schema: { ...ExecutionBase, reason: Schema.Literals(["user", "shutdown", "superseded", "inactivity"]) },
   })
   export type Interrupted = typeof Interrupted.Type
 }
@@ -511,6 +514,7 @@ export namespace Tool {
     ...Base,
     assistantMessageID: SessionMessage.ID,
     id: Schema.String,
+    fleetCtxID: Schema.String.pipe(optional),
   }
 
   export namespace Input {

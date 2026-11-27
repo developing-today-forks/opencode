@@ -71,6 +71,7 @@ import type { EventLog } from "@opencode/schema/event-log"
 import type { FileDiff } from "@opencode/schema/file-diff"
 import { Job } from "./job.js"
 import { SessionEnvironment } from "./session/environment.js"
+import { SessionFleetContext } from "./session/fleet-context.js"
 import { SessionRouteTarget } from "./session/route-target.js"
 import { ModelRoute } from "./model-route.js"
 import { InstructionEntry } from "./session/instruction-entry.js"
@@ -494,6 +495,11 @@ const layer = Layer.effect(
             })
           }
         }
+        const fleetContext = SessionFleetContext.start({
+          sessionID,
+          parentID: input.parentID,
+          environment: SessionFleetContext.capture(),
+        })
         const projected = yield* bus
           .publish(
             SessionEvent.Created,
@@ -510,6 +516,7 @@ const layer = Layer.effect(
               // Children inherit metadata and permissions the way they inherit
               // location, so host policies that read them treat the family uniformly.
               metadata: input.metadata ?? parent?.metadata,
+              fleetCtxID: fleetContext.FLEET_CTX_ID,
               subagentPolicy: input.subagentPolicy,
               permissions: input.permissions ?? parent?.permissions,
               // A detached tree never sprouts an interactive leaf: a child cannot opt out.
@@ -633,6 +640,7 @@ const layer = Layer.effect(
         // lifecycle write then fails on the deleted row.
         yield* McpxSubagent.releaseSubagentSession(sessionID).pipe(Effect.catch(() => Effect.void))
         yield* environments.clear(sessionID)
+        SessionFleetContext.end(sessionID)
         ModelRoute.forgetPins(sessionID)
         yield* bus.publish(SessionEvent.Deleted, { sessionID })
         yield* bus.remove(sessionID)

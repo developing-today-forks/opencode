@@ -11,6 +11,7 @@ import { Bus } from "../../bus.js"
 import { SessionEvent } from "../event.js"
 import { SessionMessage } from "../message.js"
 import { SessionSchema } from "../schema.js"
+import { SessionFleetContext } from "../fleet-context.js"
 import { SessionError } from "@opencode/schema/session-error"
 import { Money } from "@opencode/schema/money"
 import { Text } from "../../util/text.js"
@@ -374,6 +375,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     LiveToolMetadata.clear(assistantMessageID, id)
     yield* bus.publish(SessionEvent.Tool.Failed, {
       sessionID: input.sessionID,
+      ...SessionFleetContext.stamp(input.sessionID),
       assistantMessageID,
       id,
       error:
@@ -503,6 +505,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         tool.providerExecuted = event.providerExecuted === true
         yield* bus.publish(SessionEvent.Tool.Called, {
           sessionID: input.sessionID,
+          ...SessionFleetContext.stamp(input.sessionID),
           assistantMessageID,
           id: event.id,
           input: asRecord(event.input),
@@ -529,6 +532,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         if (event.result.type === "error") {
           yield* bus.publish(SessionEvent.Tool.Failed, {
             sessionID: input.sessionID,
+            ...SessionFleetContext.stamp(input.sessionID),
             assistantMessageID,
             id: event.id,
             error: { type: "tool.execution", message: stringify(event.result.value) },
@@ -540,6 +544,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
         }
         yield* bus.publish(SessionEvent.Tool.Success, {
           sessionID: input.sessionID,
+          ...SessionFleetContext.stamp(input.sessionID),
           assistantMessageID,
           id: event.id,
           content: hostedContent(event.result),
@@ -575,6 +580,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     LiveToolMetadata.set(assistantMessageID, id, update)
     yield* bus.publish(SessionEvent.Tool.Progress, {
       sessionID: input.sessionID,
+      ...SessionFleetContext.stamp(input.sessionID),
       assistantMessageID,
       id,
       metadata: update,
@@ -594,6 +600,7 @@ export const createLLMEventPublisher = (bus: Pick<Bus.Interface, "publish">, inp
     if (!isReadonlyArrayNonEmpty(content)) return yield* Effect.die(new Error(`Tool execution has no content: ${id}`))
     yield* bus.publish(SessionEvent.Tool.Success, {
       sessionID: input.sessionID,
+      ...SessionFleetContext.stamp(input.sessionID),
       assistantMessageID,
       id,
       content,
