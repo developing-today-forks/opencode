@@ -1745,6 +1745,11 @@ export const plantGatheredNearEmptyWall = (
  * reporting cannot wall a provider forever. */
 const gatheredProviderQuota = new Map<string, QuotaGateState>()
 
+// Promoting model-shaped evidence is derived from a Location's declaration.
+// Neither another Location nor removal of that declaration may inherit it.
+const gatheredProviderKey = (target: Model.Ref, location?: string) =>
+  JSON.stringify([location ?? "", wallScope(target.providerID, location), target.providerID])
+
 /** Feeds one target's gathered reading into the provider gate when the reading
  * is the provider-wide shape (fork #2479): exactly one entry for the provider
  * and no per-model reading for this target — the shape `gatheredQuotaWall`'s
@@ -1834,8 +1839,8 @@ export const observeGatheredProviderWall = (
       stale: false,
     }
     if (!QuotaSnapshot.isKnownFull(snapshot, now, threshold)) return false
-    const previous = gatheredProviderQuota.get(target.providerID)
-    gatheredProviderQuota.set(target.providerID, { snapshot, target, gated: true })
+    const previous = gatheredProviderQuota.get(gatheredProviderKey(target, location))
+    gatheredProviderQuota.set(gatheredProviderKey(target, location), { snapshot, target, gated: true })
     if (!previous?.gated)
       logHealth(
         target,
@@ -1872,9 +1877,9 @@ export const observeGatheredProviderWall = (
     observedAt: entry.measuredAt,
     stale: false,
   }
-  const previous = gatheredProviderQuota.get(target.providerID)
+  const previous = gatheredProviderQuota.get(gatheredProviderKey(target, location))
   if (QuotaSnapshot.isKnownFull(snapshot, now, currentConstants(location).quotaGate.balanceDeadThreshold)) {
-    gatheredProviderQuota.set(target.providerID, { snapshot, target, gated: true })
+    gatheredProviderQuota.set(gatheredProviderKey(target, location), { snapshot, target, gated: true })
     if (!previous?.gated)
       logHealth(
         target,
@@ -1888,7 +1893,7 @@ export const observeGatheredProviderWall = (
   // a percent-less window is missing evidence, not headroom (the plant's own
   // lift rule, at provider scope).
   if (!complete || !previous) return false
-  gatheredProviderQuota.delete(target.providerID)
+  gatheredProviderQuota.delete(gatheredProviderKey(target, location))
   if (previous.gated) logHealth(target, "quota-readmitted", `provider:${target.providerID} (gathered)`)
   return true
 }
@@ -3672,8 +3677,7 @@ export const providerQuotaBlocked = (
     // Sibling-evidence narrowing (code#13693 Slice F): a target serving after
     // the fed snapshot was observed is not blocked by the provider-scope fed
     // gate; the gathered gate below is still judged on its own evidence time.
-    if (scope === "provider" || scope === "account" || !state || !providerScopeNarrowed(target, state.snapshot.observedAt))
-      return fed
+    if (!state || !providerScopeNarrowed(target, state.snapshot.observedAt)) return fed
   }
   // The gathered snapshot's provider-wide wall (fork #2479): a provider no
   // plan-derived feed carries can still stand walled on the gatherer's own
@@ -3681,7 +3685,7 @@ export const providerQuotaBlocked = (
   // recomputed from the reading's own observation time — the root-start
   // gate's discipline — so the record lapses when the gatherer stops
   // reporting instead of holding on a derivation-time freshness stamp.
-  const gathered = scope === "per-model" ? undefined : gatheredProviderQuota.get(target.providerID)
+  const gathered = scope === "per-model" ? undefined : gatheredProviderQuota.get(gatheredProviderKey(target, location))
   if (gathered) {
     if (
       QuotaSnapshot.isKnownFull(
@@ -3777,7 +3781,7 @@ export const providerRootStartBlocked = (
   // session waves kept dealing walled legs of this shape as last resorts.
   const gathered = wallScope(target.providerID, location) === "per-model"
     ? undefined
-    : gatheredProviderQuota.get(target.providerID)
+    : gatheredProviderQuota.get(gatheredProviderKey(target, location))
   if (gathered && QuotaSnapshot.blocksRootStart(judgedSnapshot(gathered.snapshot, now), now, gate.rootStartMaxPct))
     return { until: gathered.snapshot.resetAt }
   return undefined

@@ -63,6 +63,30 @@ describe("declared wall scope (code#13790)", () => {
     }
   })
 
+  test("promoted model evidence stays local and disappears when its declaration is removed", () => {
+    ModelRoute.resetHealth()
+    const entries = [document("provider")]
+    const off = ModelRoute.onWallScope((id) => ConfigModelRoutesPlugin.configuredWallScope(entries, id), "/scope")
+    const leaf = ModelRoute.ref({ providerID: "scoped", model: "full" })
+    const now = 910_000_000
+    const resetAt = now + 86_400_000
+    const readings = [{ providerID: "scoped", measuredAt: now, windows: [], models: {
+      full: [{ name: "weekly", usedPercent: 100, resetAt, measuredAt: now }],
+    } }]
+    try {
+      expect(ModelRoute.observeGatheredProviderWall(leaf, readings, now, "/scope")).toBe(true)
+      expect(ModelRoute.providerQuotaBlocked(leaf, now + 1, "/scope")).toEqual({ until: resetAt })
+      expect(ModelRoute.providerQuotaBlocked(leaf, now + 1, "/other")).toBeUndefined()
+      expect(ModelRoute.providerRootStartBlocked(leaf, now + 1, "/other")).toBeUndefined()
+      entries.length = 0
+      expect(ModelRoute.providerQuotaBlocked(leaf, now + 1, "/scope")).toBeUndefined()
+      expect(ModelRoute.providerRootStartBlocked(leaf, now + 1, "/scope")).toBeUndefined()
+    } finally {
+      off()
+      ModelRoute.resetHealth()
+    }
+  })
+
   test.each([undefined, "provider", "account"] as const)("%s scope judges model-shaped evidence", (scope) => {
     ModelRoute.resetHealth()
     const off = ModelRoute.onWallScope((id) => ConfigModelRoutesPlugin.configuredWallScope([document(scope)], id), "/scope")
