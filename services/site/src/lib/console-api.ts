@@ -5,6 +5,7 @@ import { desktopBuilds, desktopInstall, detectOS, getDownloadHref } from "~/lib/
 import { detectPlatform } from "~/lib/platform"
 import { modules, type Letter } from "~/lib/font-content"
 import { freeModels } from "~/lib/get-started"
+import { fetchFreeModels } from "~/lib/models-dev"
 import { sdkInstalls } from "~/lib/install-commands"
 import { liteQuitKey } from "~/lib/console-stub"
 
@@ -226,14 +227,9 @@ export function install() {
       return manifest.sdk.install
     },
     async models() {
-      const live = await fetch("https://models.dev/api.json")
-        .then((response) => response.json() as Promise<ModelsDev>)
-        .then((data) =>
-          Object.values(data.opencode?.models ?? {}).filter(
-            (model) => model.cost?.input === 0 && model.cost?.output === 0 && model.status !== "deprecated",
-          ),
-        )
-        .catch(() => [])
+      // fetchFreeModels is deadline- and size-bounded, so a stalled models.dev
+      // settles into the catch and the freeModels fallback below instead of hanging.
+      const live = await fetchFreeModels().catch(() => [])
       if (!live.length) {
         say([`Free models include ${freeModels.join(", ")}. No account needed.`])
         return freeModels
@@ -295,11 +291,6 @@ export function install() {
   Object.defineProperty(window, "opencode", { value: api, configurable: true, writable: true })
   return { api, startLite, greet: () => greet(colors, say) }
 }
-
-type ModelsDev = Record<
-  string,
-  { models?: Record<string, { id: string; name: string; status?: string; cost?: { input?: number; output?: number } }> }
->
 
 /** Loads a Text.js console app built by packages/console/textjs; its manifest maps names to hashed files. */
 async function textjs<T>(name: "lite" | "picker") {
