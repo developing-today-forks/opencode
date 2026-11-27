@@ -3,6 +3,7 @@ import { $ } from "bun"
 import fs from "fs/promises"
 import path from "path"
 import { Effect, Layer, Stream } from "effect"
+import { sql } from "drizzle-orm"
 import { AppNodeBuilder } from "@opencode/core/effect/app-node-builder"
 import { LayerNode } from "@opencode/util/effect/layer-node"
 import { Bus } from "@opencode/core/bus"
@@ -67,6 +68,57 @@ describe("Project.list", () => {
           canonical: abs("/newer"),
           time: { created: 2, updated: 2, active: 3 },
           sandboxes: [],
+        },
+      ])
+    }),
+  )
+
+  it.effect("skips rows whose stored sandboxes or worktree no longer decodes", () =>
+    Effect.gen(function* () {
+      const db = (yield* Database.Service).db
+      const project = yield* Project.Service
+      yield* db
+        .insert(ProjectTable)
+        .values([
+          {
+            id: Project.ID.make("healthy"),
+            worktree: abs("/healthy"),
+            sandboxes: [abs("/healthy/sandbox")],
+            time_created: 1,
+            time_updated: 1,
+            time_active: 3,
+          },
+          {
+            id: Project.ID.make("corrupt-sandboxes"),
+            worktree: abs("/corrupt-sandboxes"),
+            sandboxes: [],
+            time_created: 2,
+            time_updated: 2,
+            time_active: 2,
+          },
+          {
+            id: Project.ID.make("corrupt-worktree"),
+            worktree: abs("/corrupt-worktree"),
+            sandboxes: [],
+            time_created: 3,
+            time_updated: 3,
+            time_active: 1,
+          },
+        ])
+        .run()
+      // Corrupt the cells at rest, below the typed column decoders: an off-shape
+      // sandboxes JSON cell and a non-absolute worktree.
+      yield* db.run(sql`UPDATE project SET sandboxes = '{}' WHERE id = 'corrupt-sandboxes'`)
+      yield* db.run(sql`UPDATE project SET worktree = 'relative/path' WHERE id = 'corrupt-worktree'`)
+
+      // Oracle: list returns exactly the healthy row; the two poison rows are
+      // skipped (with a warning) instead of dying the whole read as a defect.
+      expect(yield* project.list()).toEqual([
+        {
+          id: Project.ID.make("healthy"),
+          canonical: abs("/healthy"),
+          time: { created: 1, updated: 1, active: 3 },
+          sandboxes: [abs("/healthy/sandbox")],
         },
       ])
     }),

@@ -1,6 +1,6 @@
 import nodePath from "path"
 import { customType } from "drizzle-orm/sqlite-core"
-import { Schema } from "effect"
+import { Option, Schema } from "effect"
 import { AbsolutePath } from "../schema.js"
 
 function storagePath(input: string) {
@@ -80,6 +80,27 @@ export const pathColumn = customType<{
 })
 
 const decodeAbsoluteArray = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Array(Schema.String)))
+const decodeAbsoluteArrayOption = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Array(Schema.String)))
+
+// Non-throwing counterparts of the column decoders below, for readers that must
+// tolerate a persisted cell which no longer decodes (schema skew, a verbatim
+// migration copy of an already-corrupt cell) instead of dying on it.
+export function decodeStoredAbsolutePath(input: string): AbsolutePath | undefined {
+  const result = storedAbsolutePath(input)
+  return result === undefined ? undefined : AbsolutePath.make(toPlatform(result))
+}
+
+export function decodeStoredAbsoluteArray(input: string): AbsolutePath[] | undefined {
+  const decoded = decodeAbsoluteArrayOption(input)
+  if (Option.isNone(decoded)) return undefined
+  const result: AbsolutePath[] = []
+  for (const item of decoded.value) {
+    const decodedItem = decodeStoredAbsolutePath(item)
+    if (decodedItem === undefined) return undefined
+    result.push(decodedItem)
+  }
+  return result
+}
 
 export const absoluteArrayColumn = customType<{
   data: AbsolutePath[]

@@ -2,7 +2,7 @@ export * as V1Migration from "./v1-migration.bun.js"
 
 import { Cause, Effect, Fiber, Layer, Option, Schema, Semaphore } from "effect"
 import { Database } from "./database.js"
-import { storedAbsolutePath } from "./path.js"
+import { decodeStoredAbsoluteArray, storedAbsolutePath } from "./path.js"
 import { SessionMessageTable, SessionTable } from "../session/sql.js"
 import { SessionV1 } from "@opencode/schema/session-v1"
 import { SessionMessage } from "../session/message.js"
@@ -855,9 +855,29 @@ function importNextDatabase(
           if (source.inTransaction) source.run("ROLLBACK")
         }),
       )
-      const projects = new Map(
-        selectNextRows<NextProject>(source, "project", NEXT_PROJECT_COLUMNS).map((project) => [project.id, project]),
-      )
+      // The copy below inserts worktree and sandboxes verbatim, so validate their
+      // shape here instead of importing a cell that then bricks every project
+      // read: a project whose worktree is not an absolute path is quarantined
+      // (its sessions fall back to the global project, like a missing project),
+      // and an undecodable sandboxes cell is normalized to an empty list.
+      const projects = new Map<string, NextProject>()
+      for (const project of selectNextRows<NextProject>(source, "project", NEXT_PROJECT_COLUMNS)) {
+        if (storedAbsolutePath(project.worktree) === undefined) {
+          yield* Effect.logWarning("Quarantined previous V2 project with a non-absolute worktree", {
+            projectID: project.id,
+            worktree: project.worktree,
+          })
+          continue
+        }
+        if (decodeStoredAbsoluteArray(project.sandboxes) === undefined) {
+          yield* Effect.logWarning("Normalized previous V2 project with an undecodable sandboxes cell", {
+            projectID: project.id,
+          })
+          projects.set(project.id, { ...project, sandboxes: "[]" })
+          continue
+        }
+        projects.set(project.id, project)
+      }
       const sessions = selectNextRows<NextSession>(source, "session", NEXT_SESSION_COLUMNS)
       for (const [index, session] of sessions.entries()) {
         const project = projects.get(session.project_id)

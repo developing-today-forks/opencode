@@ -16,6 +16,7 @@ import { Hash } from "@opencode/util/hash"
 import { ProjectSchema } from "./project/schema.js"
 import { ProjectTable, upsertProject } from "./project/sql.js"
 import { ProjectIcon } from "./project/icon.js"
+import { decodeStoredAbsoluteArray, decodeStoredAbsolutePath } from "./database/path.js"
 import { WorktreeTable } from "./worktree/sql.js"
 
 export const ID = ProjectSchema.ID
@@ -100,7 +101,24 @@ export interface Interface {
 
 export class Service extends Context.Service<Service, Interface>()("@opencode/Project") {}
 
-function fromRow(row: typeof ProjectTable.$inferSelect): Info {
+type Row = Pick<
+  typeof ProjectTable.$inferSelect,
+  | "id"
+  | "worktree"
+  | "vcs"
+  | "name"
+  | "icon_url"
+  | "icon_url_override"
+  | "icon_color"
+  | "time_created"
+  | "time_updated"
+  | "time_active"
+  | "time_archived"
+  | "sandboxes"
+  | "commands"
+>
+
+function fromRow(row: Row): Info {
   const icon =
     row.icon_url || row.icon_url_override || row.icon_color
       ? {
@@ -125,6 +143,25 @@ function fromRow(row: typeof ProjectTable.$inferSelect): Info {
     sandboxes: row.sandboxes,
   }
 }
+
+type StoredRow = Omit<Row, "worktree" | "sandboxes"> & { readonly worktree: string; readonly sandboxes: string }
+
+// A persisted row whose worktree or sandboxes cell no longer decodes (schema skew
+// after an upgrade, a verbatim migration copy of an already-corrupt cell) must not
+// die every project read as an untyped defect: list-shaped reads skip it with a
+// warning naming the row, and the healthy rows around it stay readable.
+const fromStoredRow = (row: StoredRow) =>
+  Effect.gen(function* () {
+    const worktree = decodeStoredAbsolutePath(row.worktree)
+    const sandboxes = decodeStoredAbsoluteArray(row.sandboxes)
+    if (worktree === undefined || sandboxes === undefined) {
+      yield* Effect.logWarning("project row skipped: stored worktree or sandboxes does not decode", {
+        projectID: row.id,
+      })
+      return undefined
+    }
+    return fromRow({ ...row, worktree, sandboxes })
+  })
 
 const layer = Layer.effect(
   Service,
@@ -248,14 +285,32 @@ const layer = Layer.effect(
     })
 
     const list = Effect.fn("Project.list")(function* (input?: ListInput) {
+      // The worktree and sandboxes cells are read raw (sql<string>) so their
+      // throwing column decoders cannot die the whole list on one corrupt row;
+      // fromStoredRow decodes them per row and skips the rows that fail.
       const rows = yield* db
-        .select()
+        .select({
+          id: ProjectTable.id,
+          worktree: sql<string>`${ProjectTable.worktree}`,
+          vcs: ProjectTable.vcs,
+          name: ProjectTable.name,
+          icon_url: ProjectTable.icon_url,
+          icon_url_override: ProjectTable.icon_url_override,
+          icon_color: ProjectTable.icon_color,
+          time_created: ProjectTable.time_created,
+          time_updated: ProjectTable.time_updated,
+          time_active: ProjectTable.time_active,
+          time_archived: ProjectTable.time_archived,
+          sandboxes: sql<string>`${ProjectTable.sandboxes}`,
+          commands: ProjectTable.commands,
+        })
         .from(ProjectTable)
         .where(input?.archived ? undefined : isNull(ProjectTable.time_archived))
         .orderBy(desc(ProjectTable.time_active), asc(ProjectTable.id))
         .all()
         .pipe(Effect.orDie)
-      return rows.map(fromRow)
+      const infos = yield* Effect.forEach(rows, fromStoredRow)
+      return infos.filter((info) => info !== undefined)
     })
 
     const update = Effect.fn("Project.update")(function* (input: UpdateInput) {
