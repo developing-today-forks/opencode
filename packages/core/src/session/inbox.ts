@@ -1,7 +1,7 @@
 export * as SessionInbox from "./inbox.js"
 
 import { and, asc, eq, notInArray, or } from "drizzle-orm"
-import { Context, DateTime, Effect, Layer, Schema } from "effect"
+import { Context, DateTime, Effect, Layer, Option, Schema } from "effect"
 import { makeGlobalNode } from "@opencode/util/effect/app-node"
 import {
   Command,
@@ -64,19 +64,19 @@ export {
  */
 export type Promotable = "input" | "steer"
 
-const decodeUser = Schema.decodeUnknownSync(UserPayload)
-const decodeMediaUser = Schema.decodeUnknownSync(MediaUserPayload)
-const decodeStoredUser = Schema.decodeUnknownSync(SessionStored.UserPayload)
+const decodeUser = Schema.decodeUnknownOption(UserPayload)
+const decodeMediaUser = Schema.decodeUnknownOption(MediaUserPayload)
+const decodeStoredUser = Schema.decodeUnknownOption(SessionStored.UserPayload)
 const encodeStoredUser = Schema.encodeSync(SessionStored.UserPayload)
-const decodeSynthetic = Schema.decodeUnknownSync(SyntheticPayload)
+const decodeSynthetic = Schema.decodeUnknownOption(SyntheticPayload)
 const encodeSynthetic = Schema.encodeSync(SyntheticPayload)
-const decodeCompaction = Schema.decodeUnknownSync(CompactionPayload)
+const decodeCompaction = Schema.decodeUnknownOption(CompactionPayload)
 const encodeCompaction = Schema.encodeSync(CompactionPayload)
-const decodeMove = Schema.decodeUnknownSync(MovePayload)
+const decodeMove = Schema.decodeUnknownOption(MovePayload)
 const encodeMove = Schema.encodeSync(MovePayload)
-const decodeShell = Schema.decodeUnknownSync(ShellPayload)
+const decodeShell = Schema.decodeUnknownOption(ShellPayload)
 const encodeShell = Schema.encodeSync(ShellPayload)
-const decodeCommand = Schema.decodeUnknownSync(CommandPayload)
+const decodeCommand = Schema.decodeUnknownOption(CommandPayload)
 const encodeCommand = Schema.encodeSync(CommandPayload)
 const inboxLocks = KeyedMutex.makeUnsafe<SessionSchema.ID>()
 type PendingRef = { readonly id: SessionMessage.ID; readonly sessionID: SessionSchema.ID }
@@ -95,57 +95,60 @@ function matches<Type extends Item["type"]>(
   return stored.sessionID === request.sessionID && stored.type === request.type
 }
 
-const fromRow = (row: typeof SessionInboxTable.$inferSelect): Info => {
-  const base = {
-    id: row.id,
+// A persisted row whose payload or timestamp no longer decodes (schema skew after an
+// upgrade, a hand edit) must not die every read of the session's inbox as an untyped
+// defect: list-shaped reads skip it with a warning naming the row, point reads treat
+// it as absent, and the healthy rows around it stay readable.
+const skipCorruptRow = (row: typeof SessionInboxTable.$inferSelect) =>
+  Effect.logWarning("session inbox row skipped: stored payload does not decode", {
+    inboxID: row.id,
     sessionID: row.session_id,
-    time: { created: DateTime.makeUnsafe(row.time_created) },
-  }
-  if (row.type === "compaction")
-    return Compaction.make({
-      ...base,
-      type: "compaction",
-      payload: decodeCompaction(row.payload),
-      delivery: row.delivery,
-    })
-  if (row.type === "move")
-    return Move.make({ ...base, type: "move", payload: decodeMove(row.payload), delivery: row.delivery })
-  if (row.type === "user")
-    return User.make({
-      ...base,
-      type: "user",
-      payload: decodeUser(row.payload),
-      delivery: row.delivery,
-    })
-  if (row.type === "synthetic")
-    return Synthetic.make({
-      ...base,
-      type: "synthetic",
-      payload: decodeSynthetic(row.payload),
-      delivery: row.delivery,
-    })
-  if (row.type === "shell")
-    return Shell.make({
-      ...base,
-      type: "shell",
-      payload: decodeShell(row.payload),
-      delivery: row.delivery,
-    })
-  if (row.type === "command")
-    return Command.make({
-      ...base,
-      type: "command",
-      payload: decodeCommand(row.payload),
-      delivery: row.delivery,
-    })
-  throw new LifecycleConflict({ id: base.id })
-}
+    type: row.type,
+  }).pipe(Effect.as(undefined))
+
+const fromRow = (row: typeof SessionInboxTable.$inferSelect): Effect.Effect<Info | undefined> =>
+  Effect.gen(function* () {
+    const created = DateTime.make(row.time_created)
+    if (Option.isNone(created)) return yield* skipCorruptRow(row)
+    const base = { id: row.id, sessionID: row.session_id, time: { created: created.value } }
+    if (row.type === "compaction") {
+      const payload = decodeCompaction(row.payload)
+      if (Option.isNone(payload)) return yield* skipCorruptRow(row)
+      return Compaction.make({ ...base, type: "compaction", payload: payload.value, delivery: row.delivery })
+    }
+    if (row.type === "move") {
+      const payload = decodeMove(row.payload)
+      if (Option.isNone(payload)) return yield* skipCorruptRow(row)
+      return Move.make({ ...base, type: "move", payload: payload.value, delivery: row.delivery })
+    }
+    if (row.type === "user") {
+      const payload = decodeUser(row.payload)
+      if (Option.isNone(payload)) return yield* skipCorruptRow(row)
+      return User.make({ ...base, type: "user", payload: payload.value, delivery: row.delivery })
+    }
+    if (row.type === "synthetic") {
+      const payload = decodeSynthetic(row.payload)
+      if (Option.isNone(payload)) return yield* skipCorruptRow(row)
+      return Synthetic.make({ ...base, type: "synthetic", payload: payload.value, delivery: row.delivery })
+    }
+    if (row.type === "shell") {
+      const payload = decodeShell(row.payload)
+      if (Option.isNone(payload)) return yield* skipCorruptRow(row)
+      return Shell.make({ ...base, type: "shell", payload: payload.value, delivery: row.delivery })
+    }
+    if (row.type === "command") {
+      const payload = decodeCommand(row.payload)
+      if (Option.isNone(payload)) return yield* skipCorruptRow(row)
+      return Command.make({ ...base, type: "command", payload: payload.value, delivery: row.delivery })
+    }
+    throw new LifecycleConflict({ id: base.id })
+  })
 
 export const find = Effect.fn("SessionInbox.find")(function* (db: DatabaseService, id: SessionMessage.ID) {
   const row = yield* db.select().from(SessionInboxTable).where(eq(SessionInboxTable.id, id)).get().pipe(Effect.orDie)
   if (row === undefined) return undefined
   const [hydrated] = yield* SessionBlob.hydrateInbox(db, [row])
-  return hydrated && fromRow(hydrated)
+  return hydrated ? yield* fromRow(hydrated) : undefined
 })
 
 const promotedFromMessage = Effect.fn("SessionInbox.promotedFromMessage")(function* (
@@ -394,7 +397,9 @@ export const projectDelivered = Effect.fn("SessionInbox.projectDelivered")(funct
     .get()
     .pipe(Effect.orDie)
   if (!deleted) return yield* Effect.die(new LifecycleConflict({ id: input.id }))
-  return delivered(deleted)
+  // Died, like the missing-row conflict above: the projector's error channel is
+  // closed, and bus boundaries turn a LifecycleConflict defect into a typed failure.
+  return yield* delivered(deleted).pipe(Effect.orDie)
 })
 
 /** A consumed row with its payload as stored, so user file refs reach the message without their blobs. */
@@ -415,13 +420,23 @@ export type Delivered =
     }
   | { readonly id: SessionMessage.ID; readonly type: "compaction" | "move" | "shell" | "command" }
 
-const delivered = (row: typeof SessionInboxTable.$inferSelect): Delivered => {
-  if (row.type === "user")
-    return { id: row.id, type: "user", delivery: row.delivery, payload: decodeStoredUser(row.payload) }
-  if (row.type === "synthetic")
-    return { id: row.id, type: "synthetic", delivery: row.delivery, payload: decodeSynthetic(row.payload) }
-  return { id: row.id, type: row.type }
-}
+// The row is already consumed (deleted) when this runs, so a payload that no longer
+// decodes cannot be skipped: fail the delivery as a LifecycleConflict, the typed
+// conflict shape this module dies with, instead of an untyped SchemaError defect.
+const delivered = (row: typeof SessionInboxTable.$inferSelect): Effect.Effect<Delivered, LifecycleConflict> =>
+  Effect.gen(function* () {
+    if (row.type === "user") {
+      const payload = decodeStoredUser(row.payload)
+      if (Option.isNone(payload)) return yield* new LifecycleConflict({ id: row.id })
+      return { id: row.id, type: "user", delivery: row.delivery, payload: payload.value } satisfies Delivered
+    }
+    if (row.type === "synthetic") {
+      const payload = decodeSynthetic(row.payload)
+      if (Option.isNone(payload)) return yield* new LifecycleConflict({ id: row.id })
+      return { id: row.id, type: "synthetic", delivery: row.delivery, payload: payload.value } satisfies Delivered
+    }
+    return { id: row.id, type: row.type } satisfies Delivered
+  })
 
 export const projectCancelled = Effect.fn("SessionInbox.projectCancelled")(function* (
   db: DatabaseService,
@@ -482,7 +497,8 @@ const listRows = (db: DatabaseService, sessionID: SessionSchema.ID) =>
     .pipe(Effect.orDie)
 
 export const list = Effect.fn("SessionInbox.list")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
-  return (yield* SessionBlob.hydrateInbox(db, yield* listRows(db, sessionID))).map(fromRow)
+  const decoded = yield* Effect.forEach(yield* SessionBlob.hydrateInbox(db, yield* listRows(db, sessionID)), fromRow)
+  return decoded.filter((item) => item !== undefined)
 })
 
 /** {@link list} for clients that fetch media themselves: files stored in `blob` stay `media:` refs. */
@@ -491,18 +507,25 @@ export const listWithRefs = Effect.fn("SessionInbox.listWithRefs")(function* (
   sessionID: SessionSchema.ID,
 ) {
   const kept = yield* SessionBlob.keepInboxRefs(db, yield* listRows(db, sessionID))
-  return kept.rows.map((row): MediaInfo => {
-    if (row.type !== "user") return fromRow(row)
-    const payload = decodeMediaUser(row.payload)
-    return MediaUser.make({
-      id: row.id,
-      sessionID: row.session_id,
-      time: { created: DateTime.makeUnsafe(row.time_created) },
-      type: "user",
-      payload: payload.files ? { ...payload, files: SessionBlob.describe(payload.files, kept.meta) } : payload,
-      delivery: row.delivery,
-    })
-  })
+  const decoded = yield* Effect.forEach(kept.rows, (row) =>
+    Effect.gen(function* () {
+      if (row.type !== "user") return yield* fromRow(row)
+      const payload = decodeMediaUser(row.payload)
+      const created = DateTime.make(row.time_created)
+      if (Option.isNone(payload) || Option.isNone(created)) return yield* skipCorruptRow(row)
+      return MediaUser.make({
+        id: row.id,
+        sessionID: row.session_id,
+        time: { created: created.value },
+        type: "user",
+        payload: payload.value.files
+          ? { ...payload.value, files: SessionBlob.describe(payload.value.files, kept.meta) }
+          : payload.value,
+        delivery: row.delivery,
+      })
+    }),
+  )
+  return decoded.filter((item) => item !== undefined)
 })
 
 export const moveIDs = Effect.fn("SessionInbox.moveIDs")(function* (db: DatabaseService, sessionID: SessionSchema.ID) {
@@ -521,10 +544,10 @@ export const nextPromotable = Effect.fn("SessionInbox.nextPromotable")(function*
   promotable: Promotable,
 ) {
   const steer = (yield* pendingSteers(db, sessionID))[0]
-  if (steer) return promotion(steer)
+  if (steer) return yield* promotion(steer).pipe(Effect.orDie)
   if (promotable !== "input") return undefined
   const queued = yield* firstQueued(db, sessionID)
-  return queued ? promotion(queued) : undefined
+  return queued ? yield* promotion(queued).pipe(Effect.orDie) : undefined
 })
 
 /** What a boundary decides on: prompts are promoted by id, so only a move's payload is read. */
@@ -552,14 +575,35 @@ export type Promotion =
 /** An admitted shell or command whose execution has not started yet. */
 export type Operation = Extract<Promotion, { readonly type: "shell" | "command" }>
 
-const promotion = (row: typeof SessionInboxTable.$inferSelect): Promotion =>
-  row.type === "move"
-    ? { id: row.id, type: "move", delivery: row.delivery, payload: decodeMove(row.payload) }
-    : row.type === "shell"
-      ? { id: row.id, type: "shell", delivery: row.delivery, payload: decodeShell(row.payload) }
-      : row.type === "command"
-        ? { id: row.id, type: "command", delivery: row.delivery, payload: decodeCommand(row.payload) }
-        : { id: row.id, type: row.type, delivery: row.delivery }
+const tryPromotion = (row: typeof SessionInboxTable.$inferSelect): Promotion | undefined => {
+  if (row.type === "move") {
+    const payload = decodeMove(row.payload)
+    return Option.isNone(payload)
+      ? undefined
+      : { id: row.id, type: "move", delivery: row.delivery, payload: payload.value }
+  }
+  if (row.type === "shell") {
+    const payload = decodeShell(row.payload)
+    return Option.isNone(payload)
+      ? undefined
+      : { id: row.id, type: "shell", delivery: row.delivery, payload: payload.value }
+  }
+  if (row.type === "command") {
+    const payload = decodeCommand(row.payload)
+    return Option.isNone(payload)
+      ? undefined
+      : { id: row.id, type: "command", delivery: row.delivery, payload: payload.value }
+  }
+  return { id: row.id, type: row.type, delivery: row.delivery }
+}
+
+// A boundary decision reads one specific row, so a payload that no longer decodes
+// fails as a LifecycleConflict rather than an untyped SchemaError defect; the
+// exported boundary above dies with it, matching this module's conflict handling.
+const promotion = (row: typeof SessionInboxTable.$inferSelect): Effect.Effect<Promotion, LifecycleConflict> => {
+  const decoded = tryPromotion(row)
+  return decoded ? Effect.succeed(decoded) : Effect.fail(new LifecycleConflict({ id: row.id }))
+}
 
 /**
  * Admitted shell/command operations still pending execution, in admission
@@ -583,7 +627,14 @@ export const pendingOperations = Effect.fn("SessionInbox.pendingOperations")(fun
     .orderBy(asc(SessionInboxTable.enqueued_seq))
     .all()
     .pipe(Effect.orDie)
-  return rows.map(promotion).filter((item): item is Operation => item.type === "shell" || item.type === "command")
+  const decoded = yield* Effect.forEach(rows, (row) =>
+    Effect.gen(function* () {
+      const item = tryPromotion(row)
+      if (item === undefined) return yield* skipCorruptRow(row)
+      return item
+    }),
+  )
+  return decoded.filter((item): item is Operation => item?.type === "shell" || item?.type === "command")
 })
 
 /** Which pending rows count: "input" means any item in either delivery mode. */
