@@ -1,6 +1,6 @@
 export * as Bus from "./bus.js"
 
-import { Cause, Clock, Context, Effect, Layer, Option, PubSub, Schema, Stream } from "effect"
+import { Cause, Clock, Context, Effect, Either, Layer, Option, PubSub, Schema, Stream } from "effect"
 import { Event } from "@opencode/schema/event"
 import type { EventLog } from "@opencode/schema/event-log"
 import { and, asc, eq, gt, lte, sql } from "drizzle-orm"
@@ -78,21 +78,32 @@ const requireAggregateID = (type: string, aggregate: string, data: unknown) => {
 }
 
 // Every stored event decodes through here, so payloads written in older shapes are upgraded in one place.
+// Decoding never throws: a stored row whose shape no longer decodes is reported as a typed
+// InvalidDurableEventError so callers choose between failing typed (replay) and skipping the
+// row as a gap (log reads) instead of dying the fiber with an untyped ParseError defect.
 const decodeStoredData = (definition: Event.DurableDefinition, data: unknown) =>
-  Schema.decodeUnknownSync(definition.data)(SessionLegacy.event(definition.type, data))
+  Schema.decodeUnknownEither(definition.data)(SessionLegacy.event(definition.type, data))
 
-const decodeSerializedEvent = (event: SerializedEvent): Event.Payload => {
+const undecodableError = (type: string, cause: { readonly message: string }) =>
+  new InvalidDurableEventError({ type, message: `Undecodable stored data for durable event type ${type}: ${cause.message}` })
+
+const decodeSerializedEvent = (event: SerializedEvent): Either.Either<Event.Payload, InvalidDurableEventError> => {
   const definition = Durable.get(event.type)
   if (!definition?.durable) {
-    throw new InvalidDurableEventError({ type: event.type, message: `Unknown durable event type ${event.type}` })
+    return Either.left(
+      new InvalidDurableEventError({ type: event.type, message: `Unknown durable event type ${event.type}` }),
+    )
   }
-  return {
-    id: event.id,
-    created: event.created ?? 0,
-    type: definition.type,
-    durable: envelope(event.aggregateID, event.seq, definition.durable.version),
-    data: decodeStoredData(definition, event.data),
-  }
+  return decodeStoredData(definition, event.data).pipe(
+    Either.mapLeft((cause) => undecodableError(event.type, cause)),
+    Either.map((data) => ({
+      id: event.id,
+      created: event.created ?? 0,
+      type: definition.type,
+      durable: envelope(event.aggregateID, event.seq, definition.durable.version),
+      data,
+    })),
+  )
 }
 
 export const versionedType = Event.versionedType
@@ -175,7 +186,7 @@ export interface Interface {
   readonly replay: (
     event: SerializedEvent,
     options?: { readonly publish?: boolean; readonly ownerID?: string; readonly strictOwner?: boolean },
-  ) => Effect.Effect<void>
+  ) => Effect.Effect<void, InvalidDurableEventError>
   readonly remove: (aggregateID: string) => Effect.Effect<void>
   readonly claim: (aggregateID: string, ownerID: string) => Effect.Effect<void>
 }
@@ -660,13 +671,15 @@ export function configured(options?: Options) {
               return yield* Effect.die(
                 new InvalidDurableEventError({ type: event.type, message: `Unknown durable event type ${event.type}` }),
               )
+            const decoded = decodeStoredData(definition, event.data)
+            if (Either.isLeft(decoded)) return yield* Effect.fail(undecodableError(event.type, decoded.left))
             yield* durableLocks.withLock(event.aggregateID)(
               Effect.gen(function* () {
                 const payload = {
                   id: event.id,
                   created: event.created ?? 0,
                   type: definition.type,
-                  data: decodeStoredData(definition, event.data),
+                  data: decoded.right,
                 } as Event.Payload
                 const committed = yield* commitDurableEvent(definition, payload, {
                   seq: event.seq,
@@ -788,20 +801,21 @@ export function configured(options?: Options) {
             // Skip types missing from the durable manifest instead of failing the
             // read: the aggregate may hold events this process cannot decode. The
             // raw tail seq keeps cursors advancing across the resulting gaps.
+            // Rows of a known type whose stored payload no longer decodes are
+            // skipped the same way: one corrupt row must not die the whole read.
             Effect.map((rows) => ({
               seq: rows.at(-1)?.seq,
               events: rows.flatMap((event) => {
                 if (!Durable.get(event.type)?.durable) return []
-                return [
-                  decodeSerializedEvent({
-                    id: event.id,
-                    created: event.created,
-                    aggregateID: event.aggregate_id,
-                    seq: event.seq,
-                    type: event.type,
-                    data: event.data,
-                  }),
-                ]
+                const decoded = decodeSerializedEvent({
+                  id: event.id,
+                  created: event.created,
+                  aggregateID: event.aggregate_id,
+                  seq: event.seq,
+                  type: event.type,
+                  data: event.data,
+                })
+                return Either.isRight(decoded) ? [decoded.right] : []
               }),
             })),
           )

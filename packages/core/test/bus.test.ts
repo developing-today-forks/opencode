@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Cause, Deferred, Effect, Exit, Fiber, Layer, Ref, Schema, Stream } from "effect"
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Option, Ref, Schema, Stream } from "effect"
 import { Bus } from "@opencode/core/bus"
 import { Event } from "@opencode/schema/event"
 import { Session } from "@opencode/schema/session"
@@ -1296,6 +1296,67 @@ describe("Bus", () => {
         "log.synced",
       ])
       expect(items.at(-1)).toEqual({ type: "log.synced", aggregateID, seq: Event.Seq.make(1) })
+    }),
+  )
+
+  it.effect("log skips a stored row whose payload no longer decodes instead of dying the whole read", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const { db } = yield* Database.Service
+      const aggregateID = Session.ID.create()
+      yield* bus.publish(DurableMessage, durableData(aggregateID, "zero"))
+      yield* bus.publish(DurableMessage, durableData(aggregateID, "one"))
+      yield* bus.publish(DurableMessage, durableData(aggregateID, "two"))
+
+      const rows = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, aggregateID))
+        .all()
+        .pipe(Effect.orDie)
+      const corrupt = rows.find((row) => row.seq === 1)
+      if (!corrupt) throw new Error("expected the middle stored row to corrupt")
+      yield* db
+        .update(EventTable)
+        .set({ data: { sessionID: aggregateID, title: 42 } })
+        .where(eq(EventTable.id, corrupt.id))
+        .run()
+        .pipe(Effect.orDie)
+
+      const items = yield* Stream.runCollect(bus.log({ aggregateID }))
+
+      expect(items.map((item) => (Bus.isSynced(item) ? item.type : item.durable?.seq))).toEqual([
+        Event.Seq.make(0),
+        Event.Seq.make(2),
+        "log.synced",
+      ])
+      expect(items.at(-1)).toEqual({ type: "log.synced", aggregateID, seq: Event.Seq.make(2) })
+    }),
+  )
+
+  it.effect("replay of a wrong-shape stored event fails typed instead of dying with a ParseError defect", () =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Service
+      const aggregateID = Session.ID.create()
+
+      const exit = yield* bus
+        .replay({
+          id: Event.ID.create(),
+          created: 0,
+          type: Bus.versionedType(DurableMessage.type, 1),
+          seq: 0,
+          aggregateID,
+          data: { sessionID: aggregateID, title: 42 },
+        })
+        .pipe(Effect.exit)
+
+      expect(Exit.isFailure(exit)).toBe(true)
+      if (Exit.isFailure(exit)) {
+        const failure = Cause.failureOption(exit.cause)
+        expect(Option.isSome(failure)).toBe(true)
+        if (Option.isSome(failure)) expect(failure.value).toBeInstanceOf(Bus.InvalidDurableEventError)
+        expect(Option.isSome(Cause.dieOption(exit.cause))).toBe(false)
+      }
     }),
   )
 
