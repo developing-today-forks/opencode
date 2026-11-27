@@ -1,8 +1,8 @@
 # Spec: `*-direct` providers emulate the vendor wire
 
 Status: **Active doctrine.** Direction set by Drew 2026-11-05 01:13 CST (correction to the
-ACP-embedding direction). Tracked by `developing-today-forks/opencode#1717`; this file is the
-repo's own record of it (acceptance criterion on that issue).
+ACP-embedding direction). The audit history is recorded on
+`developing-today-forks/opencode#1717`; this file is the repo's own record of it.
 
 This applies to every `*-direct` provider in this fork.
 
@@ -52,9 +52,9 @@ Recorded here as the worked example; the full evidence is on `#1717`.
   away, a vibe-direct turn completed end to end on `providerID vibe-direct` /
   `model mistral-vibe-cli-latest`. Details and transcripts on `#1717`.
 
-**Known follow-up (not a doctrine violation):** `vibe-auth` caches the resolved key per server
-process and its exported `invalidate()` has no caller, so a rotated key is not picked up until
-restart. Wire invalidation (or re-resolution) on authentication failure closes this. Tracked on `#1717`.
+**Resolved follow-up:** a Vibe 401 invalidates the cached credential, re-prepares the request, and
+retries once through `VibeAuth.invalidate()` (`packages/ai/src/providers/vibe.ts`). This picks up a
+rotated or revoked key without waiting for a server restart.
 
 ## Inference-time vendor-runtime check (2026-11-08)
 
@@ -63,14 +63,19 @@ time. The only `child_process` use in the providers tree is `secret-tool` keyrin
 (`vibe-auth.ts`, `antigravity-auth.ts`); the same applies to the quota providers that read keyring
 entries. This is the rule-1 half of the audit, applied repo-wide.
 
-## Audit snapshot
+## Audit snapshot (2026-11-27)
+
+The six-provider classification was recorded on `#1717` on 2026-11-08 and checked against current
+main. `#1818`'s rotating Claude Code credential gap was implemented by PR #2126; Muse's stored
+inference-key preference was implemented by PR #2161. The status column distinguishes a completed
+implementation from the still-unverified lifetime of the Muse account token.
 
 | Provider | Auth class | Rule 1 (no runtime) | Status |
 | --- | --- | --- | --- |
-| `vibe-direct` | S (static key) | clean | **COMPLIANT** (verified 2026-11-05) |
-| `antigravity-direct` | shares `vibe-auth` keyring pattern (via `secret-tool`) | clean | pending on `#1717` |
-| `muse-direct` | `#13555` verdict (2026-11-08): the `dca:` account token is **not verifiably long-lived** (no expiry or refresh token recorded; two stored tokens returned 401, with rotation/revocation still a caveat). Use the stored minted `api_key` as primary; account-token exchange is bootstrap-only. | clean | api_key-primary remedy implemented; exchange 401 requires Muse app re-auth; account-token lifetime remains unverified |
-| `commandcode` | pending classification | clean | pending on `#1717` |
-| `claude-code` | stored `expiresAt` — classify leaf expiry | clean | pending on `#1717` |
-| `opencode-route` (façade) | leaves inherit their own classifications | clean | pending on `#1717` |
-| `deepseek` | API-key class expected | clean | pending on `#1717` |
+| `vibe-direct` | S (static workspace key) | clean | **COMPLIANT**; 401 invalidation and one retry are wired in current main |
+| `antigravity-direct` | R (OAuth access + refresh token) | clean | **COMPLIANT**; refresh exchange runs in-process |
+| `muse-direct` | Stored inference `api_key` is primary; the `dca:` account token has no recorded expiry or refresh token and was rejected in two probes (rotation/revocation remains a caveat). | clean | Stored-key remedy implemented by PR #2161; account-token lifetime remains unverified and a rejected account credential requires Muse app sign-in |
+| `commandcode` | S (static API key from `~/.commandcode/auth.json`) | clean | **COMPLIANT**; no renewal needed |
+| `claude-code` | R (single-use rotating OAuth refresh token) | clean | **COMPLIANT**; refresh is persisted atomically before using the new access token (PR #2126) |
+| `opencode-route` (façade) | S (`OPENCODE_API_KEY`); downstream leaves retain their own classifications | clean | **COMPLIANT** at the façade; leaf status is inherited |
+| `deepseek` | S (`DEEPSEEK_API_KEY`) | clean | **COMPLIANT**; no renewal needed |
