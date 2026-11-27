@@ -229,9 +229,9 @@ describe("ProviderQuota.sessionCookie", () => {
         return Response.json(usagePayload)
       }) as typeof fetch
       const call = ProviderQuota.sessionCookie("opendesign", { fetchImpl })
-      const fiber = yield* Effect.fork(call)
+      const fiber = yield* Effect.forkChild(call)
       // Wait until the fetch is in flight (session answered, usage requested and held).
-      for (let spins = 0; seen.length < 2 && spins < 100; spins++) yield* Effect.yieldNow()
+      for (let spins = 0; seen.length < 2 && spins < 100; spins++) yield* Effect.yieldNow
       expect(seen).toHaveLength(2)
       // The fetch stays in flight past the whole retry window.
       yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis + 1_000)
