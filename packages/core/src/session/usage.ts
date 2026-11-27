@@ -55,13 +55,22 @@ export type Recorded = {
   readonly cost: Money.USD
 }
 
+/**
+ * A reported cost is authoritative only when it is finite and non-negative, mirroring the
+ * `billedAmount` rule on network ingress. `Usage.cost` is a plain `Schema.Number`, so it can
+ * carry NaN/±Infinity (which `Money.USD.make` throws on) or a negative amount; callers fall
+ * back — to catalog pricing in `record`, to omitting the cost on the decision path — instead.
+ */
+export const reportedCost = (usage: Usage | undefined): Money.USD | undefined =>
+  usage?.cost !== undefined && Number.isFinite(usage.cost) && usage.cost >= 0 ? Money.USD.make(usage.cost) : undefined
+
 export const record = (usage: Usage | undefined, costs: Model.Info["cost"]): Recorded => {
   const normalized = tokens(usage)
   return {
     tokens: normalized,
     // What an endpoint says it charged beats the catalog, which can't see its peak pricing, subscriptions or routing.
-    // A reported zero is authoritative.
-    cost: usage?.cost === undefined ? calculateCost(costs, normalized) : Money.USD.make(usage.cost),
+    // A reported zero is authoritative. A non-finite or negative reported cost falls back to the catalog.
+    cost: reportedCost(usage) ?? calculateCost(costs, normalized),
   }
 }
 

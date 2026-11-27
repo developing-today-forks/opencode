@@ -27,7 +27,6 @@ import type {
   ImageResult,
   VideoRequest,
 } from "@opencode/schema/generate"
-import { Money } from "@opencode/schema/money"
 import { SessionID } from "@opencode/schema/session-id"
 import { Cause, Context, Effect, Exit, Layer, Result, Schema, Stream } from "effect"
 import { RequestExecutor } from "@opencode/ai/route"
@@ -950,9 +949,10 @@ export const layer = Layer.effect(
           Effect.mapError((error) => providerError(input.model, error)),
         )
       const usage = response.usage
+      const cost = SessionUsage.reportedCost(usage)
       return {
         answers: response.answers,
-        ...(usage?.cost === undefined ? {} : { cost: Money.USD.make(usage.cost) }),
+        ...(cost === undefined ? {} : { cost }),
         ...(usage?.inputTokens === undefined && usage?.outputTokens === undefined
           ? {}
           : { tokens: { input: usage.inputTokens, output: usage.outputTokens } }),
