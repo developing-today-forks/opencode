@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Cause, Effect, Exit, Option, Schema } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import { Credential } from "@opencode/core/credential"
 import { Integration } from "@opencode/core/integration"
 import { Plugin } from "@opencode/core/plugin"
@@ -103,9 +103,9 @@ describe("xAI OAuth decode (#2881)", () => {
     expect(Exit.isFailure(exit)).toBe(true)
     if (!Exit.isFailure(exit)) return
     expect(Cause.hasDies(exit.cause)).toBe(false)
-    const failure = Cause.failureOption(exit.cause)
-    expect(Option.isSome(failure)).toBe(true)
-    const error = Option.getOrUndefined(failure)
+    const reason = exit.cause.reasons.find(Cause.isFailReason)
+    expect(reason).toBeDefined()
+    const error = reason?.error
     expect(error).toBeInstanceOf(Error)
     expect(error instanceof Error ? error.message : undefined).toBe("xAI request returned an unreadable response body")
   }
