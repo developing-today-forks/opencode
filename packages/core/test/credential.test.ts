@@ -72,6 +72,28 @@ describe("Credential", () => {
     }),
   )
 
+  it.effect("skips a corrupt stored row instead of dying the whole read", () =>
+    Effect.gen(function* () {
+      const credentials = yield* Credential.Service
+      const db = (yield* Database.Service).db
+      const integrationID = Integration.ID.make("openai")
+      const created = yield* credentials.create({
+        integrationID,
+        label: "Good",
+        value: Credential.Key.make({ type: "key", key: "secret" }),
+      })
+      // A persisted value matching none of the known credential shapes.
+      yield* db.run(
+        sql`INSERT INTO credential (id, integration_id, label, value, active, time_created, time_updated) VALUES ('cred_corrupt', ${integrationID}, 'Corrupt', ${JSON.stringify({ type: "unknown-kind", wat: true })}, 0, 1, 1)`,
+      )
+
+      expect(yield* credentials.list(integrationID)).toEqual([created])
+      expect(yield* credentials.all()).toEqual([created])
+      expect(yield* credentials.get(Credential.ID.make("cred_corrupt"))).toBeUndefined()
+      expect(yield* credentials.get(created.id)).toEqual(created)
+    }),
+  )
+
   it.effect("publishes global events only for observable credential mutations", () =>
     Effect.gen(function* () {
       const credentials = yield* Credential.Service
