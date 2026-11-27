@@ -204,7 +204,28 @@ const finished = (row: Pick<Row, "expires_at">, next: number | undefined) =>
 
 const expired = (row: Pick<Row, "expires_at">, now: number) => row.expires_at !== null && now > row.expires_at
 
-const optionalTime = (value: number | null) => (value === null ? undefined : DateTime.makeUnsafe(value))
+/** The largest epoch-millisecond magnitude a JavaScript Date can hold (ECMA-262 time value range). */
+const maxEpochMillis = 8_640_000_000_000_000
+
+/**
+ * A stored epoch-millisecond column as a DateTime, or undefined when the value can't be one. Legacy or
+ * corrupt rows can hold a non-integer or out-of-range number (the columns carry no CHECK constraint),
+ * and DateTime.makeUnsafe throws on those, which would brick every Automation read through toInfo
+ * (opencode#2910; session precedent in session/info.ts, #2820/#2870).
+ */
+const representable = (millis: number | null) =>
+  millis === null || !Number.isInteger(millis) || Math.abs(millis) > maxEpochMillis
+    ? undefined
+    : DateTime.makeUnsafe(millis)
+
+const optionalTime = representable
+
+/**
+ * A required timestamp: its own value when representable, else its sibling's (created and updated stand
+ * in for each other), else the epoch, so a corrupt row still reads and sorts as oldest.
+ */
+const requiredTime = (own: DateTime.Utc | undefined, sibling: DateTime.Utc | undefined) =>
+  own ?? sibling ?? DateTime.makeUnsafe(0)
 
 const deliverySummary = (sessionID: SessionSchema.ID, subagent?: Agent.ID) =>
   `${subagent === undefined ? "Prompted" : "Started subagent"} ${sessionID}`
@@ -226,7 +247,10 @@ const toInfo = (row: Row): Info => ({
   lastOutcome: row.last_outcome ?? undefined,
   lastOutput: row.last_output ?? undefined,
   state: row.state ?? undefined,
-  time: { created: DateTime.makeUnsafe(row.time_created), updated: DateTime.makeUnsafe(row.time_updated) },
+  time: {
+    created: requiredTime(representable(row.time_created), representable(row.time_updated)),
+    updated: requiredTime(representable(row.time_updated), representable(row.time_created)),
+  },
 })
 
 const layer = Layer.effect(

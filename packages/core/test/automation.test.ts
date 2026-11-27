@@ -1159,6 +1159,46 @@ describe("Automation", () => {
     }),
   )
 
+  it.effect("lists an automation whose stored timestamps are out of range instead of defecting", () =>
+    Effect.gen(function* () {
+      const automations = yield* setup()
+      const { db } = yield* Database.Service
+      const now = yield* Clock.currentTimeMillis
+      const corruptID = Automation.ID.create()
+      // Insert directly into SQLite with values no writer should persist: a next_due_at just past the
+      // largest representable time value, a non-integer expires_at, and an out-of-range time_created
+      // whose sibling time_updated is valid.
+      yield* db
+        .insert(AutomationTable)
+        .values({
+          id: corruptID,
+          project_id: (yield* creator).projectID,
+          session_id: sessionID,
+          directory: enabledDirectory,
+          name: "corrupt timestamps",
+          action: { type: "prompt", prompt: "Still reads.", to: { session: sessionID } },
+          trigger: { type: "at", at: new Date(now + 10_000).toISOString() },
+          tz: "UTC",
+          next_due_at: 8_640_000_000_000_001,
+          expires_at: 1.5,
+          time_created: 8_640_000_000_000_001,
+          time_updated: now,
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      const listed = (yield* automations.list()).find((item) => item.id === corruptID)
+      expect(listed).toBeDefined()
+      expect(listed?.nextDueAt).toBeUndefined()
+      expect(listed?.expires).toBeUndefined()
+      // time.created is unrepresentable, so it falls back to its sibling time_updated.
+      expect(listed && DateTime.toEpochMillis(listed.time.created)).toBe(now)
+      expect(listed && DateTime.toEpochMillis(listed.time.updated)).toBe(now)
+      const fetched = yield* automations.get(corruptID)
+      expect(fetched.id).toBe(corruptID)
+    }),
+  )
+
   describe("code actions", () => {
     /** Approves every permission ask "once", as a person at the creating Session would, and records them. */
     const answerAsks = Effect.gen(function* () {
