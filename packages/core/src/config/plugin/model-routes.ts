@@ -105,6 +105,12 @@ export const Plugin = define({
     )
     yield* Effect.addFinalizer(() => Effect.sync(offMembershipLimits))
 
+    const offWallScope = ModelRoute.onWallScope(
+      (providerID) => configuredWallScope(loaded.entries, providerID),
+      ctx.location.directory,
+    )
+    yield* Effect.addFinalizer(() => Effect.sync(offWallScope))
+
     // Quota demotion policy (#1151), from experimental.model_route_demotion. Registered
     // under this Location's directory so another Location's activation cannot replace it,
     // and removed again when this Location's graph closes.
@@ -736,6 +742,16 @@ export function configuredMembershipLimits(
       if (limits) found = limits
     })
   return found
+}
+
+/** Later provider declarations win; an omitted declaration keeps inference. */
+export function configuredWallScope(entries: readonly Entry[], providerID: string) {
+  return entries
+    .filter((entry): entry is Document => entry.type === "document")
+    .reduce<ModelRoute.WallScope | undefined>(
+      (found, entry) => entry.info.providers?.[providerID]?.wallScope ?? found,
+      undefined,
+    )
 }
 
 function configuredSettings(entries: readonly Entry[]) {
