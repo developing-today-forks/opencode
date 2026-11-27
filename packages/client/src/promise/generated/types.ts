@@ -386,6 +386,27 @@ export type RouteAttemptCoverage = {
   last: number | null
 }
 
+export type RouteAttemptRollupRow = {
+  bucket: string | number | "Infinity" | "-Infinity" | "NaN" | null
+  providerID?: string
+  modelID?: string
+  variant?: string | null
+  credentialKey?: string | null
+  attempts: number | "Infinity" | "-Infinity" | "NaN"
+  successes: number | "Infinity" | "-Infinity" | "NaN"
+  tokensInput: number | "Infinity" | "-Infinity" | "NaN"
+  tokensOutput: number | "Infinity" | "-Infinity" | "NaN"
+  tokensReasoning: number | "Infinity" | "-Infinity" | "NaN"
+  tokensCacheRead: number | "Infinity" | "-Infinity" | "NaN"
+  tokensCacheWrite: number | "Infinity" | "-Infinity" | "NaN"
+  tokensCombined: number | "Infinity" | "-Infinity" | "NaN"
+  costUsd: number | "Infinity" | "-Infinity" | "NaN"
+  costRows: number | "Infinity" | "-Infinity" | "NaN"
+  credentialRows: number | "Infinity" | "-Infinity" | "NaN"
+  first: number | "Infinity" | "-Infinity" | "NaN" | null
+  last: number | "Infinity" | "-Infinity" | "NaN" | null
+}
+
 export type RouteAttemptDecision = {
   id: number | "Infinity" | "-Infinity" | "NaN"
   time: number | "Infinity" | "-Infinity" | "NaN"
@@ -5514,6 +5535,16 @@ export type RouteAttemptListOutput = { data: Array<RouteAttemptAttempt> }["data"
 export type RouteAttemptStatsInput = { readonly since?: number | undefined; readonly until?: number | undefined }
 
 export type RouteAttemptStatsOutput = { data: RouteAttemptStats }["data"]
+
+export type RouteAttemptRollupInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly bucket?: "none" | "day" | "hour" | "hourOfDay" | "dayOfWeek" | undefined
+  readonly group?: string | undefined
+  readonly clock?: "local" | "utc" | undefined
+}
+
+export type RouteAttemptRollupOutput = { data: Array<RouteAttemptRollupRow> }["data"]
 
 export type RouteDecisionListInput = {
   readonly since?: number | undefined
