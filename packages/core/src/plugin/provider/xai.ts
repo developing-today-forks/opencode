@@ -233,6 +233,7 @@ export function decode<A, I, R>(response: Response, schema: Schema.Schema<A, I, 
         // A malformed or wrong-shape 200 body is an unreadable response, not a
         // defect: surface it on the failure channel like every other branch.
         Effect.mapError(() => new Error("xAI request returned an unreadable response body")),
+        Effect.catchAllDefect(() => Effect.fail(new Error("xAI request returned an unreadable response body"))),
       ),
     ),
   )

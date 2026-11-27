@@ -105,7 +105,9 @@ describe("xAI OAuth decode (#2881)", () => {
     expect(Cause.isDie(exit.cause)).toBe(false)
     const failure = Cause.failureOption(exit.cause)
     expect(Option.isSome(failure)).toBe(true)
-    expect(Option.getOrUndefined(failure)).toEqual(new Error("xAI request returned an unreadable response body"))
+    const error = Option.getOrUndefined(failure)
+    expect(error).toBeInstanceOf(Error)
+    expect(error instanceof Error ? error.message : undefined).toBe("xAI request returned an unreadable response body")
   }
 
   test("a non-JSON 200 body fails typed instead of dying", async () => {
