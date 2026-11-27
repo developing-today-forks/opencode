@@ -310,7 +310,7 @@ const layer = Layer.effect(
         .all()
         .pipe(Effect.orDie)
       const infos = yield* Effect.forEach(rows, fromStoredRow)
-      return infos.filter((info) => info !== undefined)
+      return infos.filter((info): info is Info => info !== undefined)
     })
 
     const update = Effect.fn("Project.update")(function* (input: UpdateInput) {
