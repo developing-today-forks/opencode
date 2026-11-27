@@ -24,6 +24,11 @@ describe("declared wall scope (code#13790)", () => {
     }
   })
 
+  test.each(["providers", "provider"])("rejects invalid %s declarations", (key) => {
+    const result = ConfigNormalize.normalize({ [key]: { scoped: { wallScope: "typo" } } })
+    expect(result.diagnostics.some((item) => item.kind === "invalid" && item.path[0] === key)).toBe(true)
+  })
+
   test("later declarations win; absence leaves inference enabled", () => {
     expect(ConfigModelRoutesPlugin.configuredWallScope([document("provider"), document("per-model"), document()], "scoped")).toBe("per-model")
     expect(ConfigModelRoutesPlugin.configuredWallScope([document()], "scoped")).toBeUndefined()
@@ -52,7 +57,6 @@ describe("declared wall scope (code#13790)", () => {
       entries.push(document("per-model"))
       expect(ModelRoute.providerQuotaBlocked(sibling, now + 1, "/scope")).toBeUndefined()
       expect(ModelRoute.providerRootStartBlocked(sibling, now + 1, "/scope")).toBeUndefined()
-      entries.push(document(scope))
     } finally {
       off()
       ModelRoute.resetHealth()
@@ -68,11 +72,19 @@ describe("declared wall scope (code#13790)", () => {
     const resetAt = now + 86_400_000
     const readings = [{ providerID: "scoped", measuredAt: now, windows: [], models: {
       full: [{ name: "weekly", usedPercent: 100, resetAt, measuredAt: now }],
+      other: [{ name: "weekly", usedPercent: 10, resetAt, measuredAt: now }],
     } }]
     try {
-      expect(ModelRoute.observeGatheredProviderWall(leaf, readings, now, "/scope")).toBe(scope !== undefined)
-      expect(ModelRoute.providerQuotaBlocked(sibling, now + 1, "/scope")).toEqual(scope === undefined ? undefined : { until: resetAt })
-      expect(ModelRoute.providerRootStartBlocked(sibling, now + 1, "/scope")).toEqual(scope === undefined ? undefined : { until: resetAt })
+      // Oracle: a declared shared wall cannot depend on target feed order.
+      for (const targets of [[leaf, sibling], [sibling, leaf]]) {
+        ModelRoute.resetHealth()
+        for (const target of targets)
+          expect(ModelRoute.observeGatheredProviderWall(target, readings, now, "/scope")).toBe(scope !== undefined)
+        expect(ModelRoute.providerQuotaBlocked(sibling, now + 1, "/scope")).toEqual(scope === undefined ? undefined : { until: resetAt })
+        expect(ModelRoute.providerRootStartBlocked(sibling, now + 1, "/scope")).toEqual(scope === undefined ? undefined : { until: resetAt })
+      }
+      ModelRoute.completed(sibling, ModelRoute.policy({}), { firstTokenMs: 10, responseMs: 10, tokensPerSecond: 30 }, now + 10)
+      expect(ModelRoute.providerQuotaBlocked(sibling, now + 11, "/scope")).toEqual(scope === undefined ? undefined : { until: resetAt })
     } finally {
       off()
       ModelRoute.resetHealth()
