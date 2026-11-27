@@ -226,10 +226,15 @@ function send(url: string, init: RequestInit) {
   })
 }
 
-function decode<S extends Schema.Decoder<unknown>>(response: Response, schema: S) {
+export function decode<S extends Schema.Decoder<unknown>>(response: Response, schema: S) {
   return readOAuthText(response).pipe(
-    Effect.map((text) => JSON.parse(text)),
-    Effect.map(Schema.decodeUnknownSync(schema)),
+    Effect.flatMap((text) =>
+      Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(text).pipe(
+        // A malformed or wrong-shape 200 body is an unreadable response, not a
+        // defect: surface it on the failure channel like every other branch.
+        Effect.mapError(() => new Error("xAI request returned an unreadable response body")),
+      ),
+    ),
   )
 }
 
