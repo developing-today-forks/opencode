@@ -92,7 +92,7 @@ const userAttachmentContent = (files: readonly FileAttachment[]) => {
 }
 
 const decodeToolInput = Schema.decodeUnknownOption(Schema.fromJsonString(Schema.Unknown))
-const decodeNativeWindow = Schema.decodeUnknownSync(SessionHistory.NativeWindow)
+const decodeNativeWindow = Schema.decodeUnknownOption(SessionHistory.NativeWindow)
 
 const materializeToolContent = (
   content: Extract<SessionMessage.AssistantTool["state"], { status: "completed" }>["content"],
@@ -300,7 +300,16 @@ function toLLMMessage(message: SessionMessage.Info, model: Model.Ref, providerMe
     case "compaction": {
       if (message.status !== "completed") return []
       // History selection only keeps native windows the target model can replay.
-      if (message.native?.messages !== undefined) return [...decodeNativeWindow(message.native.messages)]
+      if (message.native?.messages !== undefined) {
+        const window = decodeNativeWindow(message.native.messages)
+        if (Option.isSome(window)) return [...window.value]
+        // A window that no longer decodes is skipped the same way history selection skips it
+        // (history.ts) instead of failing the whole prompt build: degrade to the summary
+        // checkpoint below and leave a trace of the degradation.
+        console.warn(
+          `Skipping undecodable native compaction window for message ${message.id}; falling back to its summary checkpoint.`,
+        )
+      }
       const kept = SessionRecentText.kept(message)
       return [
         Message.make({
