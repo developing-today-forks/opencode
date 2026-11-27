@@ -213,6 +213,8 @@ import type {
   RouteAttemptListOutput,
   RouteAttemptStatsInput,
   RouteAttemptStatsOutput,
+  RouteAttemptRollupInput,
+  RouteAttemptRollupOutput,
   RouteDecisionListInput,
   RouteDecisionListOutput,
   ProjectListInput,
@@ -1552,6 +1554,22 @@ const EndpointRouteAttemptStats = (raw: RawClient["server.route"]) => (input?: R
     ),
   )
 
+const EndpointRouteAttemptRollup = (raw: RawClient["server.route"]) => (input?: RouteAttemptRollupInput) =>
+  preserveEffect<RouteAttemptRollupOutput>()(
+    raw["route.attempt.rollup"]({
+      query: {
+        since: input?.["since"],
+        until: input?.["until"],
+        bucket: input?.["bucket"],
+        group: input?.["group"],
+        clock: input?.["clock"],
+      },
+    }).pipe(
+      Effect.mapError(mapClientError),
+      Effect.map((value) => value.data),
+    ),
+  )
+
 const EndpointRouteDecisionList = (raw: RawClient["server.route"]) => (input?: RouteDecisionListInput) =>
   preserveEffect<RouteDecisionListOutput>()(
     raw["route.decision.list"]({
@@ -1568,7 +1586,11 @@ const adaptGroupRoute = (raw: RawClient["server.route"]) => ({
     add: EndpointRouteOverrideAdd(raw),
     remove: EndpointRouteOverrideRemove(raw),
   },
-  attempt: { list: EndpointRouteAttemptList(raw), stats: EndpointRouteAttemptStats(raw) },
+  attempt: {
+    list: EndpointRouteAttemptList(raw),
+    stats: EndpointRouteAttemptStats(raw),
+    rollup: EndpointRouteAttemptRollup(raw),
+  },
   decision: { list: EndpointRouteDecisionList(raw) },
 })
 

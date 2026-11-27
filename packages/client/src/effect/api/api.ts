@@ -2316,6 +2316,37 @@ export type RouteAttemptStatsOperation<E = never> = (
   input?: RouteAttemptStatsInput,
 ) => Effect.Effect<RouteAttemptStatsOutput, E>
 
+export type RouteAttemptRollupInput = {
+  readonly since?: number | undefined
+  readonly until?: number | undefined
+  readonly bucket?: "none" | "day" | "hour" | "hourOfDay" | "dayOfWeek" | undefined
+  readonly group?: string | undefined
+  readonly clock?: "local" | "utc" | undefined
+}
+export type RouteAttemptRollupOutput = ReadonlyArray<{
+  readonly bucket: string | number | null
+  readonly providerID?: string | undefined
+  readonly modelID?: string | undefined
+  readonly variant?: string | null | undefined
+  readonly credentialKey?: string | null | undefined
+  readonly attempts: number
+  readonly successes: number
+  readonly tokensInput: number
+  readonly tokensOutput: number
+  readonly tokensReasoning: number
+  readonly tokensCacheRead: number
+  readonly tokensCacheWrite: number
+  readonly tokensCombined: number
+  readonly costUsd: number
+  readonly costRows: number
+  readonly credentialRows: number
+  readonly first: number | null
+  readonly last: number | null
+}>
+export type RouteAttemptRollupOperation<E = never> = (
+  input?: RouteAttemptRollupInput,
+) => Effect.Effect<RouteAttemptRollupOutput, E>
+
 export type RouteDecisionListInput = {
   readonly since?: number | undefined
   readonly until?: number | undefined
@@ -2343,7 +2374,11 @@ export interface RouteApi<E = never> {
     readonly add: RouteOverrideAddOperation<E>
     readonly remove: RouteOverrideRemoveOperation<E>
   }
-  readonly attempt: { readonly list: RouteAttemptListOperation<E>; readonly stats: RouteAttemptStatsOperation<E> }
+  readonly attempt: {
+    readonly list: RouteAttemptListOperation<E>
+    readonly stats: RouteAttemptStatsOperation<E>
+    readonly rollup: RouteAttemptRollupOperation<E>
+  }
   readonly decision: { readonly list: RouteDecisionListOperation<E> }
 }
 

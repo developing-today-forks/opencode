@@ -28,7 +28,7 @@ const WriteQuery = Schema.Struct({
   ...LocationQuery.fields,
   path: Schema.String.annotate({
     description:
-      "An absolute path or a path relative to the requested location. Missing parent directories are created.",
+      "An absolute path or a path relative to the requested location. The target must be inside the requested location or the server-advertised OpenCode temporary root; outside paths are rejected. Missing parent directories are created for allowed paths.",
   }),
 })
 
@@ -101,7 +101,7 @@ export const FileSystemGroup = HttpApiGroup.make("server.fs")
       query: WriteQuery,
       payload: Schema.Uint8Array.pipe(HttpApiSchema.asUint8Array()),
       success: Location.response(FileSystem.Write),
-      error: FileTooLargeError,
+      error: [FileTooLargeError, FileNotFoundError],
     })
       .annotateMerge(locationQueryOpenApi)
       .annotateMerge(
@@ -109,7 +109,7 @@ export const FileSystemGroup = HttpApiGroup.make("server.fs")
           identifier: "experimental.fs.write",
           summary: "Write file",
           description:
-            "Write the raw request body to an absolute path or a path relative to the requested location, creating parent directories, and return the resolved absolute path. Bodies over 10 MiB are rejected with 413 before any directory or file is created. Unlike read, the target is not confined to the location. Experimental: may change without compatibility guarantees.",
+            "Write the raw request body to a path inside the requested location or the server-advertised OpenCode temporary root, creating parent directories, and return the resolved absolute path. Other targets are rejected with 404; bodies over 10 MiB are rejected with 413 before any directory or file is created. Experimental: may change without compatibility guarantees.",
         }),
       ),
   )
