@@ -44,26 +44,22 @@ const reusedFor = (result: QuotaResult) =>
     ? sessionCookieQuotaTtlMillis
     : sessionCookieQuotaRetryMillis
 
-const answers = new Map<string, { readonly expiresAt: number; readonly result: Promise<QuotaResult> }>()
+type CacheEntry = { expiresAt: number; settled: boolean; result: Promise<QuotaResult> }
+
+const answers = new Map<string, CacheEntry>()
 
 const shared = (key: string, now: number, fetchQuota: () => Promise<QuotaResult>) => {
   for (const [stale, entry] of answers) if (entry.expiresAt <= now) answers.delete(stale)
   const cached = answers.get(key)
-  if (cached) return cached.result
-  const result = fetchQuota()
-  answers.set(key, { expiresAt: now + sessionCookieQuotaTtlMillis, result })
-  result.then(
-    // Callers in flight shared the fetch; once it settles, a failure that may pass is kept only briefly.
-    (answer) => {
-      const entry = answers.get(key)
-      if (entry?.result === result) answers.set(key, { expiresAt: now + reusedFor(answer), result })
-    },
-    // A rejected fetch is not an answer: drop it so the next caller retries.
-    () => {
-      if (answers.get(key)?.result === result) answers.delete(key)
-    },
-  )
-  return result
+  if (cached) return cached
+  // Keep slow requests shareable; the result-specific TTL starts when a caller observes settlement.
+  const entry: CacheEntry = { expiresAt: Number.POSITIVE_INFINITY, settled: false, result: fetchQuota() }
+  answers.set(key, entry)
+  // A rejected fetch is not an answer: drop it so the next caller retries.
+  entry.result.then(undefined, () => {
+    if (answers.get(key) === entry) answers.delete(key)
+  })
+  return entry
 }
 
 /**
@@ -88,8 +84,14 @@ export const sessionCookie = Effect.fn("ProviderQuota.sessionCookie")(function* 
   if (!credential) return undefined
   const now = yield* Clock.currentTimeMillis
   const key = [providerID, selected.id, cookie.workspaceID, SharedCache.fingerprint(cookie.cookie)].join("\u0000")
-  const result: QuotaResult = yield* Effect.promise(() =>
-    shared(key, now, () => fetchOpenDesignSessionQuota(emptyContext(options?.fetchImpl), credential)),
-  )
+  const entry = shared(key, now, () => fetchOpenDesignSessionQuota(emptyContext(options?.fetchImpl), credential))
+  const result: QuotaResult = yield* Effect.promise(() => entry.result)
+  if (!entry.settled) {
+    const settledAt = yield* Clock.currentTimeMillis
+    if (!entry.settled) {
+      entry.settled = true
+      if (answers.get(key) === entry) entry.expiresAt = settledAt + reusedFor(result)
+    }
+  }
   return result
 })

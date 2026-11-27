@@ -1,5 +1,5 @@
 import { describe, expect } from "bun:test"
-import { Effect, Logger } from "effect"
+import { Effect, Fiber, Logger } from "effect"
 import { TestClock } from "effect/testing"
 import { Credential } from "@opencode/core/credential"
 import { Database } from "@opencode/core/database/database"
@@ -179,6 +179,38 @@ describe("ProviderQuota.sessionCookie", () => {
       expect(cookiesSeen(stub.seen)).toContain("better-auth.session_token=reselect-second-cookie")
       expect(cookiesSeen(stub.seen)).toContain("better-auth.session_token=reselect-first-cookie")
       expect(stub.seen).toHaveLength(4)
+    }),
+  )
+
+  it.effect("starts the transient-failure retry window when the fetch settles (opencode#2873)", () =>
+    Effect.gen(function* () {
+      yield* storeCookie("delayed-transient-failure-cookie", "wrk_delayed_transient")
+      let releaseUsage: (response: Response) => void = () => {}
+      let markUsageStarted: () => void = () => {}
+      const usageStarted = new Promise<void>((resolve) => (markUsageStarted = resolve))
+      const delayedUsage = new Promise<Response>((resolve) => (releaseUsage = resolve))
+      const seen: string[] = []
+      let usageReads = 0
+      const fetchImpl = (async (input: Request | URL | string) => {
+        const url = String(input)
+        seen.push(url)
+        if (url.endsWith("/auth/get-session")) return Response.json({ user: { id: "usr_fixture" } })
+        if (usageReads++ > 0) return Response.json(usagePayload)
+        markUsageStarted()
+        return delayedUsage
+      }) as typeof fetch
+      const fiber = yield* Effect.fork(ProviderQuota.sessionCookie("opendesign", { fetchImpl }))
+      yield* Effect.promise(() => usageStarted)
+      yield* TestClock.adjust("6 seconds")
+      releaseUsage(Response.json({}, { status: 503 }))
+
+      expect(yield* Fiber.join(fiber)).toMatchObject({ ok: false })
+      expect(yield* ProviderQuota.sessionCookie("opendesign", { fetchImpl })).toMatchObject({ ok: false })
+      // The oracle is one upstream session/usage pair until five seconds after settlement.
+      expect(seen).toHaveLength(2)
+      yield* TestClock.adjust(ProviderQuota.sessionCookieQuotaRetryMillis)
+      expect(yield* ProviderQuota.sessionCookie("opendesign", { fetchImpl })).toMatchObject({ ok: true })
+      expect(seen).toHaveLength(4)
     }),
   )
 
