@@ -102,7 +102,7 @@ describe("xAI OAuth decode (#2881)", () => {
     const exit = await Effect.runPromise(Effect.exit(decode(new Response(body), TokenShape)))
     expect(Exit.isFailure(exit)).toBe(true)
     if (!Exit.isFailure(exit)) return
-    expect(Cause.isDie(exit.cause)).toBe(false)
+    expect(Cause.hasDies(exit.cause)).toBe(false)
     const failure = Cause.failureOption(exit.cause)
     expect(Option.isSome(failure)).toBe(true)
     const error = Option.getOrUndefined(failure)
