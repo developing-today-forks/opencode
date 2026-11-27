@@ -46,7 +46,7 @@ const reusedFor = (result: QuotaResult) =>
 
 const answers = new Map<string, { readonly expiresAt: number; readonly result: Promise<QuotaResult> }>()
 
-const shared = (key: string, now: number, fetchQuota: () => Promise<QuotaResult>) => {
+const shared = (key: string, now: number, clock: Clock.Clock, fetchQuota: () => Promise<QuotaResult>) => {
   for (const [stale, entry] of answers) if (entry.expiresAt <= now) answers.delete(stale)
   const cached = answers.get(key)
   if (cached) return cached.result
@@ -54,9 +54,12 @@ const shared = (key: string, now: number, fetchQuota: () => Promise<QuotaResult>
   answers.set(key, { expiresAt: now + sessionCookieQuotaTtlMillis, result })
   result.then(
     // Callers in flight shared the fetch; once it settles, a failure that may pass is kept only briefly.
+    // The reuse window starts when the fetch settles, not when it started: a slow transient failure
+    // (opencode#2873) must not expire before it is even cached, or the next caller refetches at once.
     (answer) => {
       const entry = answers.get(key)
-      if (entry?.result === result) answers.set(key, { expiresAt: now + reusedFor(answer), result })
+      if (entry?.result === result)
+        answers.set(key, { expiresAt: Effect.runSync(clock.currentTimeMillis) + reusedFor(answer), result })
     },
     // A rejected fetch is not an answer: drop it so the next caller retries.
     () => {
@@ -87,9 +90,10 @@ export const sessionCookie = Effect.fn("ProviderQuota.sessionCookie")(function* 
   const credential = normalizeOpenDesignCredential({ cookie: cookie.cookie, workspaceId: cookie.workspaceID })
   if (!credential) return undefined
   const now = yield* Clock.currentTimeMillis
+  const clock = yield* Effect.clock
   const key = [providerID, selected.id, cookie.workspaceID, SharedCache.fingerprint(cookie.cookie)].join("\u0000")
   const result: QuotaResult = yield* Effect.promise(() =>
-    shared(key, now, () => fetchOpenDesignSessionQuota(emptyContext(options?.fetchImpl), credential)),
+    shared(key, now, clock, () => fetchOpenDesignSessionQuota(emptyContext(options?.fetchImpl), credential)),
   )
   return result
 })
