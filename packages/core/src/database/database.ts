@@ -32,7 +32,16 @@ export class Service extends Context.Service<Service, Interface>()("@opencode/st
 // cross-object I/O.
 // Only a database file the user opens imports their legacy auth.json; in-memory and injected databases belong to
 // embedders and tests, which must not pick up the user's credentials.
-const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, legacyCredentials = false) =>
+interface BackendCapabilities {
+  readonly supportsTuningPragmas: boolean
+  readonly supportsForeignKeyToggle: boolean
+}
+
+const databaseLayer = (
+  lock: Effect.Effect<Semaphore.Semaphore>,
+  legacyCredentials = false,
+  capabilities: BackendCapabilities = { supportsTuningPragmas, supportsForeignKeyToggle },
+) =>
   Layer.effect(
     Service,
     Effect.gen(function* () {
@@ -40,7 +49,7 @@ const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, legacyCredentia
       // An injected Durable Object client may run under a non-workerd module condition in tests.
       const durableObject = EffectDrizzleSqlite.managesTransactionsNatively(db.$client)
 
-      if (supportsTuningPragmas && !durableObject) {
+      if (capabilities.supportsTuningPragmas && !durableObject) {
         // Set before journal_mode, so the journal switch waits out a lock a predecessor still holds.
         yield* db.run("PRAGMA busy_timeout = 5000")
         yield* db.run("PRAGMA journal_mode = WAL")
@@ -48,7 +57,7 @@ const databaseLayer = (lock: Effect.Effect<Semaphore.Semaphore>, legacyCredentia
         yield* db.run("PRAGMA cache_size = -64000")
       }
       // Durable Object SQLite always enforces foreign keys and rejects the pragma.
-      if (supportsForeignKeyToggle && !durableObject) yield* db.run("PRAGMA foreign_keys = ON")
+      if (capabilities.supportsForeignKeyToggle && !durableObject) yield* db.run("PRAGMA foreign_keys = ON")
       const semaphore = yield* lock
       yield* semaphore.withPermit(DatabaseMigration.apply(db, { legacyCredentials }))
 
@@ -71,16 +80,34 @@ function lockFor(filename: string) {
 export function layer(options: Options = { path: ":memory:" }) {
   return Layer.unwrap(
     Effect.gen(function* () {
+      // Issue #2492 spike: OPENCODE_DB_ENGINE=turso swaps the database backend to
+      // TursoDB (the Rust SQLite rewrite) behind this same seam. The module is
+      // imported lazily so its native driver loads only when selected; the
+      // default backend and its capability flags are unchanged otherwise.
+      const turso =
+        process.env.OPENCODE_DB_ENGINE === "turso"
+          ? yield* Effect.promise(() => import("./sqlite.turso.js"))
+          : undefined
       const provide = (filename: string) =>
-        (filename === ":memory:"
-          ? databaseLayer(Semaphore.make(1))
-          : databaseLayer(Effect.succeed(lockFor(filename)), true)
-        ).pipe(Layer.provide(sqliteLayer({ filename })))
+        databaseLayer(
+          filename === ":memory:" ? Semaphore.make(1) : Effect.succeed(lockFor(filename)),
+          filename !== ":memory:",
+          turso
+            ? {
+                supportsTuningPragmas: turso.supportsTuningPragmas,
+                supportsForeignKeyToggle: turso.supportsForeignKeyToggle,
+              }
+            : undefined,
+        ).pipe(Layer.provide((turso?.sqliteLayer ?? sqliteLayer)({ filename })))
       const filename = options.path ?? ":memory:"
       if (filename === ":memory:") return provide(filename)
       const file = isAbsolute(filename) ? filename : join((yield* Global.Service).data, filename)
       yield* Effect.promise(() => restrictToOwner(file))
-      return provide(file)
+      // TursoDB materializes its WAL file on open, after the pre-open chmod
+      // above, with the process umask instead of the database's mode (#2505).
+      // Re-tighten after the connection is built so sidecars created at open
+      // time are owner-only too; a no-op on backends that inherit the mode.
+      return provide(file).pipe(Layer.tap(() => Effect.promise(() => restrictToOwner(file))))
     }),
   )
 }

@@ -3,6 +3,20 @@ import { Effect } from "effect"
 import { MessagingSearch } from "@opencode/core/messaging/search"
 import { it } from "./lib/effect"
 
+describe("MessagingSearch.tantivyQuery", () => {
+  it.live("builds a whole-word OR query, or undefined when there are no words", () =>
+    Effect.sync(() => {
+      expect(MessagingSearch.tantivyQuery("hello world")).toEqual('"hello" OR "world"')
+      expect(MessagingSearch.tantivyQuery("Hello HELLO hello")).toEqual('"hello"')
+      expect(MessagingSearch.tantivyQuery("pizza!")).toEqual('"pizza"')
+      expect(MessagingSearch.tantivyQuery("pizz?a")).toEqual('"pizz" OR "a"')
+      expect(MessagingSearch.tantivyQuery("")).toBeUndefined()
+      expect(MessagingSearch.tantivyQuery("!!!")).toBeUndefined()
+      expect(MessagingSearch.tantivyQuery("  ")).toBeUndefined()
+    }),
+  )
+})
+
 describe("MessagingSearch.regexFilter", () => {
   it.live("matches complete text in order across worker batches and treats invalid patterns as literals", () =>
     Effect.gen(function* () {

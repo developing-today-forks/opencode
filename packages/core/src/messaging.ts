@@ -955,7 +955,12 @@ const layer = Layer.effect(
         match,
         {
           exact: () => {
-            const phrase = fts ? MessagingSearch.ftsPhrase(text) : undefined
+            // Only the trigram index can narrow an exact search — its phrases are
+            // literal substrings. A Tantivy phrase is a token sequence: narrowing
+            // with fts_match would return rows the substring is not in and miss
+            // partial-word substrings, so on tantivy the scan below is the search,
+            // exactly as on engines with no full-text index at all (#2492).
+            const phrase = fts === "fts5" ? MessagingSearch.ftsPhrase(text) : undefined
             return candidates(
               conditions,
               phrase
@@ -964,12 +969,25 @@ const layer = Layer.effect(
             )
           },
           fuzzy: () => {
-            const query = fts ? MessagingSearch.ftsQuery(text) : undefined
-            return candidates(
+            const query = fts
+              ? fts === "tantivy"
+                ? MessagingSearch.tantivyQuery(text)
+                : MessagingSearch.ftsQuery(text)
+              : undefined
+            if (!query) return candidates(conditions, undefined)
+            const narrowed = candidates(
               conditions,
-              query
-                ? sql`${MessagingMessageTable.id} IN (SELECT rowid FROM messaging_message_fts WHERE messaging_message_fts MATCH ${query})`
-                : undefined,
+              fts === "tantivy"
+                ? sql`fts_match(${MessagingMessageTable.data}, ${query})`
+                : sql`${MessagingMessageTable.id} IN (SELECT rowid FROM messaging_message_fts WHERE messaging_message_fts MATCH ${query})`,
+            )
+            if (fts !== "tantivy") return narrowed
+            // Tantivy narrows by whole words only: a query whose words appear in no
+            // document (typos, partial words) narrows to nothing, where the trigram
+            // index still narrows to near misses. Fall back to the scan window so
+            // app-side fuzzy scoring can rank the near misses itself (#2492).
+            return narrowed.pipe(
+              Effect.flatMap((rows) => (rows.length > 0 ? Effect.succeed(rows) : candidates(conditions))),
             )
           },
           all: () => candidates(conditions),
@@ -2272,11 +2290,24 @@ function escapeAttribute(value: string) {
 }
 
 /**
- * Creates the trigram FTS5 index over message text, idempotently: virtual tables cannot be declared
- * in the Drizzle schema, so fresh and migrated databases both get it here. Returns false when FTS5
- * is unavailable, in which case searches scan with SQL string functions instead.
+ * Creates the full-text index over message text, idempotently: virtual tables cannot be declared
+ * in the Drizzle schema, so fresh and migrated databases both get it here. Returns the engine the
+ * index runs on — "fts5" (trigram, stock SQLite) or "tantivy" (TursoDB's native search, #2492) —
+ * or undefined when neither is available, in which case searches scan with SQL string functions
+ * instead.
  */
 function setupFts(db: Database.Interface["db"]) {
+  return Effect.gen(function* () {
+    const fts5 = yield* setupFts5(db).pipe(Effect.catch((error) => Effect.succeed(error)))
+    if (fts5 === true) return "fts5" as const
+    const tantivy = yield* setupTantivy(db).pipe(Effect.catch(() => Effect.succeed(false)))
+    if (tantivy) return "tantivy" as const
+    yield* Effect.logWarning("messaging full-text index unavailable", { error: fts5 })
+    return undefined
+  })
+}
+
+function setupFts5(db: Database.Interface["db"]) {
   return Effect.gen(function* () {
     const existed = yield* db.get<{ name: string }>(
       sql`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messaging_message_fts'`,
@@ -2298,11 +2329,26 @@ function setupFts(db: Database.Interface["db"]) {
     )
     if (!existed) yield* db.run(sql.raw(`INSERT INTO messaging_message_fts(messaging_message_fts) VALUES ('rebuild')`))
     return true
-  }).pipe(
-    Effect.catch((error) =>
-      Effect.logWarning("messaging full-text index unavailable", { error }).pipe(Effect.as(false)),
-    ),
-  )
+  })
+}
+
+/**
+ * TursoDB has no FTS5 module; its native search is a Tantivy index over the table itself, so
+ * there are no sync triggers or rebuild commands — the index maintains itself, and creating it
+ * indexes the rows already present. The index gets its own name so a database migrated from a
+ * stock engine can carry both until the orphaned FTS5 table is dropped by a later cleanup.
+ * Tantivy tokenizes on word boundaries: whole-word and phrase matching work, partial-word
+ * (trigram) matching does not — the accepted trade of the engine switch (#2492).
+ */
+function setupTantivy(db: Database.Interface["db"]) {
+  return Effect.gen(function* () {
+    const existed = yield* db.get<{ name: string }>(
+      sql`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'messaging_message_tantivy'`,
+    )
+    if (!existed)
+      yield* db.run(sql.raw(`CREATE INDEX messaging_message_tantivy ON messaging_message USING fts (data)`))
+    return true
+  })
 }
 
 export const node = makeGlobalNode({

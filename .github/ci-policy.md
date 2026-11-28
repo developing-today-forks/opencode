@@ -71,7 +71,8 @@ in the same dispatched or scheduled runs, after the basic tier.
   **manual dispatch only** (`workflow_dispatch`). Unchanged by the
   tier split.
 - `test` — basic tier: `affected` + `unit` for affected packages
-  only. Main tier: `build` and `e2e` additionally run **on manual
+  only, plus `turso-engine` (database + messaging suites under
+  `OPENCODE_DB_ENGINE=turso`, issue #2505). Main tier: `build` and `e2e` additionally run **on manual
   dispatch and on the nightly schedule (`0 3 * * *`)**, which
   re-runs the full suite as a backstop. The `e2e (<os>)` aggregator
   job treats a tier-skipped e2e suite as the expected result on
