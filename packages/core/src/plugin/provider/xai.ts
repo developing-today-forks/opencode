@@ -206,7 +206,7 @@ function poll(device: typeof Device.Type, app: App.Info): Effect.Effect<Token, u
   })
 }
 
-function request<S extends Schema.Decoder<unknown>>(url: string, init: RequestInit, schema: S) {
+function request<A, I, R>(url: string, init: RequestInit, schema: Schema.Schema<A, I, R>) {
   return send(url, init).pipe(
     Effect.flatMap((response) => {
       if (response.ok) return decode(response, schema)
@@ -226,10 +226,16 @@ function send(url: string, init: RequestInit) {
   })
 }
 
-function decode<S extends Schema.Decoder<unknown>>(response: Response, schema: S) {
+export function decode<A, I, R>(response: Response, schema: Schema.Schema<A, I, R>) {
   return readOAuthText(response).pipe(
-    Effect.map((text) => JSON.parse(text)),
-    Effect.map(Schema.decodeUnknownSync(schema)),
+    Effect.flatMap((text) =>
+      Schema.decodeUnknownEffect(Schema.fromJsonString(schema))(text).pipe(
+        // A malformed or wrong-shape 200 body is an unreadable response, not a
+        // defect: surface it on the failure channel like every other branch.
+        Effect.mapError(() => new Error("xAI request returned an unreadable response body")),
+        Effect.catchDefect(() => Effect.fail(new Error("xAI request returned an unreadable response body"))),
+      ),
+    ),
   )
 }
 

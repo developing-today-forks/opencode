@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test"
-import { Effect } from "effect"
+import { Cause, Effect, Exit, Schema } from "effect"
 import { Credential } from "@opencode/core/credential"
 import { Integration } from "@opencode/core/integration"
 import { Plugin } from "@opencode/core/plugin"
 import { PluginHost } from "@opencode/core/plugin/host"
 import { MAX_DEVICE_LIFETIME_SECONDS } from "@opencode/core/plugin/provider/expires"
-import { deviceDeadline, deviceIntervalMs, XAIPlugin } from "@opencode/core/plugin/provider/xai"
+import { decode, deviceDeadline, deviceIntervalMs, XAIPlugin } from "@opencode/core/plugin/provider/xai"
 import { Model } from "@opencode/core/model"
 import { Provider } from "@opencode/core/provider"
 import { testEffect } from "../lib/effect"
@@ -90,6 +90,39 @@ describe("XAIPlugin", () => {
       expect(model?.settings?.transport).toBeUndefined()
     }),
   )
+})
+
+describe("xAI OAuth decode (#2881)", () => {
+  const TokenShape = Schema.Struct({ access_token: Schema.String })
+
+  // Oracle: the failure channel. A malformed 200 body must arrive as a typed
+  // failure carrying the unreadable-response error; a defect (die) in the
+  // cause means the throw escaped through Effect.map again.
+  const expectTypedFailure = async (body: string) => {
+    const exit = await Effect.runPromise(Effect.exit(decode(new Response(body), TokenShape)))
+    expect(Exit.isFailure(exit)).toBe(true)
+    if (!Exit.isFailure(exit)) return
+    expect(Cause.hasDies(exit.cause)).toBe(false)
+    const reason = exit.cause.reasons.find(Cause.isFailReason)
+    expect(reason).toBeDefined()
+    const error = reason?.error
+    expect(error).toBeInstanceOf(Error)
+    expect(error instanceof Error ? error.message : undefined).toBe("xAI request returned an unreadable response body")
+  }
+
+  test("a non-JSON 200 body fails typed instead of dying", async () => {
+    await expectTypedFailure("<html>captive portal</html>")
+  })
+
+  test("a wrong-shape JSON 200 body fails typed instead of dying", async () => {
+    await expectTypedFailure(JSON.stringify({ access_token: 42 }))
+  })
+
+  test("a well-formed 200 body still decodes", async () => {
+    const exit = await Effect.runPromise(Effect.exit(decode(new Response(JSON.stringify({ access_token: "tok" })), TokenShape)))
+    expect(Exit.isSuccess(exit)).toBe(true)
+    if (Exit.isSuccess(exit)) expect(exit.value).toEqual({ access_token: "tok" })
+  })
 })
 
 describe("xAI device poll deadline (#900)", () => {
