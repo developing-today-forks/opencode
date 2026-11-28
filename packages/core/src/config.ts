@@ -15,6 +15,7 @@ import { Bus } from "./bus.js"
 import { Watcher } from "./filesystem/watcher.js"
 import { FSUtil } from "@opencode/util/fs-util"
 import { Global } from "@opencode/util/global"
+import { isRecord } from "@opencode/util/record"
 import { Location } from "./location.js"
 import { AbsolutePath } from "./schema.js"
 import { ConfigVariable } from "./config/variable.js"
@@ -183,13 +184,24 @@ export const layer = (options?: Options) =>
         const errors: ParseError[] = []
         const input: unknown = parse(text, errors, { allowTrailingComma: true })
         if (errors.length) {
+          // The parser recovers a best-effort value from a malformed document, and
+          // normalization below already drops individual malformed keys with their
+          // own diagnostics. Rejecting the whole document here instead silently
+          // drops every key it sets: one bad region (a merge-conflict hunk in a
+          // large base config) once removed its disabled_providers from the
+          // effective config, so the explicit overlay was the only word and the
+          // providers the base config disables stayed enabled (#2928). Recover
+          // whenever the root is still an object; only a document with no
+          // recoverable object root is rejected outright.
           yield* Effect.logWarning("configuration normalization diagnostic", {
             source,
             path: "$",
             kind: "invalid",
-            action: "rejected malformed JSON or JSONC document",
+            action: isRecord(input)
+              ? `recovered configuration despite ${errors.length} malformed JSON or JSONC parse errors`
+              : "rejected malformed JSON or JSONC document",
           })
-          return
+          if (!isRecord(input)) return
         }
         const result = ConfigNormalize.normalize(input)
         // Every reload repeats routine notes. Rejected configs and dropped malformed or removed settings need a warning.
