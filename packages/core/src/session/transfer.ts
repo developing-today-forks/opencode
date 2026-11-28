@@ -22,6 +22,7 @@ import { Session } from "../session.js"
 import { Slug } from "../util/slug.js"
 import { SessionBlob } from "./blob.js"
 import { SessionEvent } from "./event.js"
+import { SessionFleetContext } from "./fleet-context.js"
 import { SessionMessage } from "./message.js"
 import { SessionProjector } from "./projector.js"
 import { SessionMessageTable, SessionTable } from "./sql.js"
@@ -105,11 +106,19 @@ const layer = Layer.effect(
             location: input.location,
             subpath,
           }))
+        // Mirror `create`: populate the in-memory Fleet context before publishing, so the
+        // Created event and every downstream stamp() carry the fleetCtxID for this session.
+        const fleetContext = SessionFleetContext.start({
+          sessionID,
+          parentID: input.data.info.parentID,
+          environment: SessionFleetContext.capture(),
+        })
         yield* bus
           .publish(
             SessionEvent.Created,
             {
               sessionID,
+              ...(fleetContext.FLEET_CTX_ID === undefined ? {} : { fleetCtxID: fleetContext.FLEET_CTX_ID }),
               parentID: input.data.info.parentID,
               slug: Slug.create(),
               version: app.version,
@@ -190,6 +199,8 @@ const layer = Layer.effect(
                 ? Effect.fail(new ImportConflictError({ sessionID }))
                 : Effect.die(defect),
             ),
+            // A failed publication retains no fleet context for the rejected ID (#2899's rule).
+            Effect.onError(() => Effect.sync(() => SessionFleetContext.end(sessionID))),
           )
         return yield* sessions.get(sessionID).pipe(Effect.orDie)
       }),

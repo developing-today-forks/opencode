@@ -29,6 +29,7 @@ import { SessionExecution } from "@opencode/core/session/execution"
 import { SessionInbox } from "@opencode/core/session/inbox"
 import { InstructionEntry } from "@opencode/core/session/instruction-entry"
 import { SessionEvent } from "@opencode/core/session/event"
+import { SessionFleetContext } from "@opencode/core/session/fleet-context"
 import { SessionTable } from "@opencode/core/session/sql"
 import { SessionStore } from "@opencode/core/session/store"
 import { SessionTransfer } from "@opencode/core/session/transfer"
@@ -1725,6 +1726,53 @@ describe("SessionTransfer", () => {
         "user",
       ])
       expect(yield* Bus.latestSequence(db, sessionID)).toBe(4)
+    }),
+  )
+
+  it.effect("populates fleet context on import from a live parent and stamps the created event", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const transfer = yield* SessionTransfer.Service
+      const { db } = yield* Database.Service
+      const parent = yield* session.create({ location, title: "Fleet parent" })
+      SessionFleetContext.start({ sessionID: parent.id, environment: { FLEET_CTX_ID: "task-2913" } })
+      const sessionID = Session.ID.create()
+
+      yield* transfer.import({
+        data: { info: { ...parent, id: sessionID, parentID: parent.id }, messages: [] },
+        location,
+      })
+
+      expect(SessionFleetContext.id(sessionID)).toBe("task-2913")
+      expect(SessionFleetContext.stamp(sessionID)).toEqual({ fleetCtxID: "task-2913" })
+      const event = yield* db
+        .select()
+        .from(EventTable)
+        .where(eq(EventTable.aggregate_id, sessionID))
+        .get()
+        .pipe(Effect.orDie)
+      expect(event).toMatchObject({ data: { fleetCtxID: "task-2913" } })
+    }),
+  )
+
+  it.effect("retains no fleet context for an import rejected before publication", () =>
+    Effect.gen(function* () {
+      const session = yield* Session.Service
+      const transfer = yield* SessionTransfer.Service
+      const template = yield* session.create({ location, title: "Fleet orphan" })
+      const sessionID = Session.ID.create()
+      const missingParent = Session.ID.create()
+
+      const error = yield* transfer
+        .import({
+          data: { info: { ...template, id: sessionID, parentID: missingParent }, messages: [] },
+          location,
+        })
+        .pipe(Effect.flip)
+
+      expect(error).toBeInstanceOf(Session.NotFoundError)
+      expect(SessionFleetContext.id(sessionID)).toBeUndefined()
+      expect(SessionFleetContext.stamp(sessionID)).toEqual({})
     }),
   )
 
