@@ -2994,3 +2994,41 @@ describe("Session fromRow timestamps (opencode#2870)", () => {
     }),
   )
 })
+
+describe("Session fromRow revert (opencode#2893)", () => {
+  const storedRow = Effect.gen(function* () {
+    const db = (yield* Database.Service).db
+    const stored = yield* db.select().from(SessionTable).where(eq(SessionTable.id, sessionID)).get()
+    if (!stored) return yield* Effect.die("Session row missing")
+    return stored
+  })
+
+  it.effect("reads an unknown-shape revert as absent instead of throwing, via fromRow, get, and list", () =>
+    Effect.gen(function* () {
+      const db = yield* seedSession()
+      yield* db.run(
+        sql`update session_v2 set revert = ${JSON.stringify({ futureShape: true, messageID: 42 })} where id = ${sessionID}`,
+      )
+      expect(fromRow(yield* storedRow).revert).toBeUndefined()
+
+      const store = yield* SessionStore.Service
+      const got = yield* store.get(sessionID)
+      expect(got?.id).toBe(sessionID)
+      expect(got?.revert).toBeUndefined()
+      const listed = yield* store.list({})
+      expect(listed.map((item) => item.id)).toContain(sessionID)
+      expect(listed.find((item) => item.id === sessionID)?.revert).toBeUndefined()
+    }),
+  )
+
+  it.effect("keeps a valid persisted revert as it was", () =>
+    Effect.gen(function* () {
+      const db = yield* seedSession()
+      yield* db.run(
+        sql`update session_v2 set revert = ${JSON.stringify({ messageID: "msg_revert_test" })} where id = ${sessionID}`,
+      )
+      const revert = fromRow(yield* storedRow).revert
+      expect(revert?.messageID).toBe("msg_revert_test")
+    }),
+  )
+})
