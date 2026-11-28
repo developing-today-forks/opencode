@@ -120,6 +120,81 @@ it.live("waits on its own connection until the process exits", () =>
   }),
 )
 
+it.live("reports a corrupt wait reply as a response failure, not an unreachable daemon", () =>
+  Effect.gen(function* () {
+    const { root, directory } = yield* temporaryRuntime()
+    const socketPath = path.join(directory, "daemon.sock")
+    yield* listen(socketPath, (_socket, request) => {
+      if (request.op === "ping") return pong
+      return { type: "bogus" }
+    })
+    yield* Effect.promise(() => writeRegistration(directory, socketPath))
+    const daemon = yield* makeDaemonTransport(root, "daemon")
+
+    expect((yield* Effect.flip(daemon.wait(1))).kind).toBe("response")
+  }),
+)
+
+it.live("reports a corrupt attach reply as a response failure, not an unreachable daemon", () =>
+  Effect.gen(function* () {
+    const { root, directory } = yield* temporaryRuntime()
+    const socketPath = path.join(directory, "daemon.sock")
+    yield* listen(socketPath, (_socket, request) => {
+      if (request.op === "ping") return pong
+      return { type: "bogus" }
+    })
+    yield* Effect.promise(() => writeRegistration(directory, socketPath))
+    const daemon = yield* makeDaemonTransport(root, "daemon")
+
+    const error = yield* daemon
+      .subscribe(1, { cursor: 0, attachmentID: "attachment", role: "observer", onEvent: () => {}, onEnd: () => {} })
+      .pipe(Effect.flip)
+    expect(error.kind).toBe("response")
+  }),
+)
+
+it.live("surfaces a corrupt live event frame as a typed error instead of a silent stream end", () =>
+  Effect.gen(function* () {
+    const { root, directory } = yield* temporaryRuntime()
+    const socketPath = path.join(directory, "daemon.sock")
+    yield* listen(socketPath, (socket, request) => {
+      if (request.op === "ping") return pong
+      if (request.op !== "subscribe") return { type: "processes", processes: [] }
+      setTimeout(() => socket.write(frame({ type: "bogus" })), 20)
+      return {
+        type: "attached",
+        process: terminal(1),
+        role: "observer",
+        generation: 1,
+        requested_offset: 0,
+        available_offset: 0,
+        end_offset: 0,
+        truncated: false,
+        replay_base64: "",
+      }
+    })
+    yield* Effect.promise(() => writeRegistration(directory, socketPath))
+    const daemon = yield* makeDaemonTransport(root, "daemon")
+
+    const errors: { kind: string }[] = []
+    let ended = false
+    const attachment = yield* daemon.subscribe(1, {
+      cursor: 0,
+      attachmentID: "attachment",
+      role: "observer",
+      onEvent: () => {},
+      onError: (error) => errors.push(error),
+      onEnd: () => {
+        ended = true
+      },
+    })
+    attachment.activate()
+    yield* poll(() => ended)
+    expect(errors.map((error) => error.kind)).toEqual(["response"])
+    attachment.detach()
+  }),
+)
+
 it.live("closes the wait connection when the wait is interrupted", () =>
   Effect.gen(function* () {
     const { root, directory } = yield* temporaryRuntime()

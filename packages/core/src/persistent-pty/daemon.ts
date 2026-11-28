@@ -156,6 +156,8 @@ export type SubscribeInput = {
   readonly role: Role
   readonly takeover?: boolean
   readonly onEvent: (event: StreamEvent) => void
+  /** A live event frame that fails to decode, or another pump failure, reported as a typed error before `onEnd`. */
+  readonly onError?: (error: DaemonError) => void
   readonly onEnd: () => void
 }
 
@@ -610,7 +612,7 @@ async function subscribePromise(
     )
     const initial = await frames.next()
     if (initial.done) throw new Error("opencode-pty closed before attachment")
-    const response = decode(initial.value)
+    const response = decodeResponse(initial.value)
     if (response.type === "error") throw responseError(response.message)
     if (response.type !== "attached") throw new Error(`unexpected opencode-pty response: ${response.type}`)
     let detached = false
@@ -627,7 +629,15 @@ async function subscribePromise(
             })
             continue
           }
-          const event = decode(frame)
+          let event: ReturnType<typeof decode>
+          try {
+            event = decode(frame)
+          } catch (cause) {
+            // A corrupt event frame is a protocol failure, not a normal stream end: surface it as a
+            // typed error before `onEnd` (in `finally`) so callers can tell the two apart.
+            input.onError?.(failure("response", cause))
+            return
+          }
           if (event.type === "resized")
             input.onEvent({
               type: "resized",
@@ -673,7 +683,9 @@ async function subscribePromise(
       activate() {
         if (activated || detached) return
         activated = true
-        void pump().catch(() => {})
+        void pump().catch((cause) =>
+          input.onError?.(cause instanceof DaemonError ? cause : failure("response", cause)),
+        )
       },
       detach() {
         if (detached) return
@@ -700,7 +712,7 @@ async function waitPromise(registration: Registration, id: number, signal: Abort
     const frame = await decoder(socket).next()
     // The connection was open, so a missing reply means the daemon went away while the process ran.
     if (frame.done) throw failure("connect", "opencode-pty closed before the process exited")
-    const response = decode(frame.value)
+    const response = decodeResponse(frame.value)
     if (response.type === "error") throw responseError(response.message)
     if (response.type !== "exited") throw failure("response", `unexpected opencode-pty response: ${response.type}`)
     return response
@@ -739,6 +751,16 @@ const decodeWireResponse = Schema.decodeUnknownSync(Schema.fromJsonString(WireRe
 
 function decode(payload: Uint8Array) {
   return decodeWireResponse(Buffer.from(payload).toString("utf8"))
+}
+
+// The connection was open and a frame arrived, so an undecodable frame is a lost/garbled reply
+// (`response`), never an unreachable daemon (`connect`) — the taxonomy `oneShot` already applies.
+function decodeResponse(payload: Uint8Array) {
+  try {
+    return decode(payload)
+  } catch (cause) {
+    throw failure("response", cause)
+  }
 }
 
 function responseError(message: string) {
