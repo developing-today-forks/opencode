@@ -1,7 +1,7 @@
 import { describe, expect, setDefaultTimeout } from "bun:test"
 import fs from "node:fs/promises"
 import path from "node:path"
-import { Context, Deferred, Effect, Fiber, Layer, Ref, Schedule } from "effect"
+import { Context, Deferred, Effect, Exit, Fiber, Layer, Ref, Schedule } from "effect"
 import { Bus } from "@opencode/core/bus"
 import { Command } from "@opencode/core/command"
 import { Database } from "@opencode/core/database/database"
@@ -265,6 +265,66 @@ describe("Session command recovery", () => {
       yield* Deferred.succeed(fixture.gate, undefined)
       yield* Fiber.join(first)
       yield* Fiber.join(second)
+
+      expect(yield* readMarker(fixture)).toBe("applied\n")
+      expect(yield* inboxTypes(fixture)).toEqual([])
+      expect(yield* interruption(fixture)).toBeUndefined()
+      expect(fixture.control.wakes).toEqual([])
+    }),
+  )
+
+  it.live("claims the first start exactly once under concurrent markStarted", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const id = yield* enqueueCommand(fixture)
+      const ref = { sessionID: fixture.created.id, id }
+      const [first, second] = yield* Effect.all(
+        [SessionInbox.markStarted(fixture.db, ref), SessionInbox.markStarted(fixture.db, ref)],
+        { concurrency: 2 },
+      )
+      // Exactly one starter owns the first start; the loser sees the claim.
+      expect([first, second].sort()).toEqual(["marked", "started"])
+    }),
+  )
+
+  it.live("leaves the row pending when the start claim fails", () =>
+    Effect.gen(function* () {
+      const fixture = yield* setup
+      const id = yield* enqueueCommand(fixture)
+      const pending = yield* SessionInbox.pendingOperations(fixture.db, fixture.created.id)
+      const operation = pending.find((item) => item.id === id)
+      if (!operation) return yield* Effect.die(new Error("pending command row is missing"))
+      // The claim's UPDATE dies (a database failure mid-claim): the row must
+      // stay pending so the next drain retries it, not consumed by a
+      // finalizer that publishes InboxDelivered unconditionally.
+      const failingDb = new Proxy(fixture.db, {
+        get: (target, prop) => {
+          if (prop === "update") {
+            return () => {
+              throw new Error("start-claim database failure")
+            }
+          }
+          const value = (target as Record<PropertyKey, unknown>)[prop]
+          return typeof value === "function" ? value.bind(target) : value
+        },
+      })
+      const exit = yield* SessionOperation.run({
+        session: fixture.created,
+        operation,
+        bus: fixture.bus,
+        db: failingDb,
+        notify: fixture.notify,
+        started: fixture.started,
+      }).pipe(Effect.exit, Effect.provideService(Instance.Service, fixture.instances))
+      expect(Exit.isFailure(exit)).toBe(true)
+
+      expect(yield* Ref.get(fixture.ran)).toBe(0)
+      expect(yield* inboxTypes(fixture)).toContain("command")
+      expect(yield* interruption(fixture)).toBeUndefined()
+
+      // The next drain settles the still-pending row normally.
+      yield* Deferred.succeed(fixture.gate, undefined)
+      yield* recover(fixture, id)
 
       expect(yield* readMarker(fixture)).toBe("applied\n")
       expect(yield* inboxTypes(fixture)).toEqual([])

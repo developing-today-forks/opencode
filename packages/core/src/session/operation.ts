@@ -44,12 +44,16 @@ const release = (sessionID: Session.ID, id: SessionMessage.ID) =>
 
 /**
  * Executes one admitted shell or command operation and consumes its inbox
- * row when execution settles, whatever the outcome. The row therefore reads
- * as pending for exactly the operation's in-flight window: a duplicate
- * admission while it is pending reconciles onto the same item instead of
- * starting the operation twice, and a row still pending when execution next
- * drains belongs to a start this process lost (a crash between admission and
- * start, or a starter that died) and is started then.
+ * row when execution settles with its terminal record. A failure before the
+ * terminal record exists — the start claim failing, the definition erroring
+ * outside its typed channels, or a notice failing — leaves the row pending:
+ * consuming it then would drop the operation without running it and without
+ * a notice. The row therefore reads as pending for exactly the operation's
+ * in-flight window plus any unsettled attempt: a duplicate admission while
+ * it is pending reconciles onto the same item instead of starting the
+ * operation twice, and a row still pending when execution next drains
+ * belongs to a start this process lost (a crash between admission and
+ * start, a starter that died, or a failed attempt) and is started then.
  *
  * A shell is never run twice for one admission: its started event projects
  * to a message under the admission's own ID, and `started` reports it, so a
@@ -74,7 +78,10 @@ export const run = Effect.fn("SessionOperation.run")(function* (input: {
   const sessionID = input.session.id
   const operation = input.operation
   if (!(yield* claim(sessionID, operation.id))) return
-  // Consuming the row is the operation's terminal record. A row the
+  // Consuming the row is the operation's terminal record: it is sequenced
+  // after the body, not ensured, so a start-claim, definition, or notice
+  // failure leaves the row pending for the next drain instead of consuming
+  // an operation that never ran and never left a notice. A row the
   // projector already consumed (a duplicate delivery) is not an error.
   const consume = input.bus
     .publish(SessionEvent.InboxDelivered, { sessionID, inboxID: operation.id })
@@ -124,7 +131,7 @@ export const run = Effect.fn("SessionOperation.run")(function* (input: {
         failed(input.notify, operation.payload.command, error.message),
       ),
     )
-  }).pipe(Effect.ensuring(consume), Effect.ensuring(release(sessionID, operation.id)))
+  }).pipe(Effect.andThen(consume), Effect.ensuring(release(sessionID, operation.id)))
 })
 
 const failed = (notify: Notify, command: string, message: string) =>
