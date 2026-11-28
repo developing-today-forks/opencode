@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { Cause, Deferred, Duration, Exit, Effect, Fiber, Layer, Schema } from "effect"
+import { Cause, DateTime, Deferred, Duration, Exit, Effect, Fiber, Layer, Schema } from "effect"
 import { TestClock } from "effect/testing"
 import { SessionEvent } from "@opencode/schema/session-event"
 import { Agent } from "@opencode/core/agent"
@@ -647,6 +647,67 @@ describe("Permission", () => {
       expect(
         yield* saved.update({ id: PermissionSaved.ID.make("psv_missing"), action: "edit" }).pipe(Effect.flip),
       ).toMatchObject({ _tag: "PermissionSaved.NotFoundError" })
+    }),
+  )
+
+  it.effect("lists saved permissions whose stored timestamps are unrepresentable instead of defecting", () =>
+    Effect.gen(function* () {
+      yield* setup()
+      const saved = yield* PermissionSaved.Service
+      yield* saved.add({ projectID: Project.ID.global, action: "read", resources: ["src/*"] })
+      const { db } = yield* Database.Service
+      const now = Date.now()
+      const corruptID = PermissionSaved.ID.create()
+      // Insert directly with values no writer should persist: an out-of-range time_created whose
+      // sibling time_updated is valid, and a second row where both timestamps are unrepresentable.
+      yield* db
+        .insert(PermissionTable)
+        .values({
+          id: corruptID,
+          project_id: Project.ID.global,
+          action: "edit",
+          resource: "docs/*",
+          time_created: 8_640_000_000_000_001,
+          time_updated: now,
+        })
+        .run()
+        .pipe(Effect.orDie)
+      yield* db
+        .insert(PermissionTable)
+        .values({
+          id: PermissionSaved.ID.create(),
+          project_id: Project.ID.global,
+          action: "bash",
+          resource: "pwd",
+          time_created: 1.5,
+          time_updated: 8_640_000_000_000_001,
+        })
+        .run()
+        .pipe(Effect.orDie)
+
+      const listed = yield* saved.list({ projectID: Project.ID.global })
+      expect(listed).toHaveLength(3)
+      const corrupt = listed.find((item) => item.id === corruptID)
+      expect(corrupt).toBeDefined()
+      // time.created is unrepresentable, so it falls back to its sibling time_updated.
+      expect(corrupt && DateTime.toEpochMillis(corrupt.time.created)).toBe(now)
+      expect(corrupt && DateTime.toEpochMillis(corrupt.time.updated)).toBe(now)
+      // Both timestamps unrepresentable on the second row degrade to the epoch.
+      const both = listed.find((item) => item.action === "bash")
+      expect(both && DateTime.toEpochMillis(both.time.created)).toBe(0)
+      expect(both && DateTime.toEpochMillis(both.time.updated)).toBe(0)
+
+      // update's read-back also degrades instead of throwing after a successful write; the corrupt
+      // time_created falls back to the refreshed time_updated sibling.
+      const updated = yield* saved.update({ id: corruptID, resource: "docs/allowed.md" })
+      expect(updated.resource).toBe("docs/allowed.md")
+      expect(DateTime.toEpochMillis(updated.time.created)).toBe(DateTime.toEpochMillis(updated.time.updated))
+
+      // Permission evaluation proceeds against the surviving rules.
+      const service = yield* Permission.Service
+      expect(
+        yield* service.ask(assertion({ id: Permission.ID.create("per_corrupt"), resources: ["src/index.ts"] })),
+      ).toMatchObject({ effect: "allow" })
     }),
   )
 

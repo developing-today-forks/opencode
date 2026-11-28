@@ -132,15 +132,41 @@ const isUniqueViolation = (error: EffectDrizzleQueryError) => {
   )
 }
 
-const info = (row: typeof PermissionTable.$inferSelect): Info => ({
-  id: row.id,
-  projectID: row.project_id,
-  action: row.action,
-  resource: row.resource,
-  time: {
-    created: DateTime.makeUnsafe(row.time_created),
-    updated: DateTime.makeUnsafe(row.time_updated),
-  },
-})
+/** The largest epoch-millisecond magnitude a JavaScript Date can hold (ECMA-262 time value range). */
+const maxEpochMillis = 8_640_000_000_000_000
+
+/**
+ * A stored epoch-millisecond column as a DateTime, or undefined when the value can't be one. Legacy or
+ * corrupt rows can hold a non-integer or out-of-range number (the columns carry no CHECK constraint),
+ * and DateTime.makeUnsafe throws on those, which would defect every saved-permission read — and with
+ * it every permission evaluation for the project (opencode#2916; session precedent in session/info.ts,
+ * #2820/#2870).
+ */
+const representable = (millis: number | null) =>
+  millis === null || !Number.isInteger(millis) || Math.abs(millis) > maxEpochMillis
+    ? undefined
+    : DateTime.makeUnsafe(millis)
+
+/**
+ * A required timestamp: its own value when representable, else its sibling's (created and updated stand
+ * in for each other), else the epoch, so a corrupt row still reads and sorts as oldest.
+ */
+const requiredTime = (own: DateTime.Utc | undefined, sibling: DateTime.Utc | undefined) =>
+  own ?? sibling ?? DateTime.makeUnsafe(0)
+
+const info = (row: typeof PermissionTable.$inferSelect): Info => {
+  const created = representable(row.time_created)
+  const updated = representable(row.time_updated)
+  return {
+    id: row.id,
+    projectID: row.project_id,
+    action: row.action,
+    resource: row.resource,
+    time: {
+      created: requiredTime(created, updated),
+      updated: requiredTime(updated, created),
+    },
+  }
+}
 
 export const node = makeGlobalNode({ service: Service, layer, deps: [Database.node] })
