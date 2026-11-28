@@ -548,13 +548,14 @@ describe("WebFetchTool registration", () => {
     }),
   )
 
-  it.effect("matches rules against the URL as written without the fragment and rejects credentials", () =>
+  it.effect("matches rules against the canonical URL without the fragment and rejects credentials", () =>
     Effect.gen(function* () {
       reset()
       const registry = yield* Tool.Service
 
       yield* executeTool(registry, call({ url: "https://Example.com#top", format: "text" }))
-      expect(assertions.map((assertion) => assertion.resources)).toEqual([["https://Example.com"]])
+      expect(assertions.map((assertion) => assertion.resources)).toEqual([["https://example.com/"]])
+      expect(requests.map((request) => request.url)).toEqual(["https://example.com/"])
 
       reset()
       expect(yield* executeTool(registry, call({ url: "https://user@example.com/", format: "text" }))).toMatchObject({
@@ -562,6 +563,17 @@ describe("WebFetchTool registration", () => {
         error: { message: "URL must not include credentials" },
       })
       expect(requests).toEqual([])
+    }),
+  )
+
+  it.effect("canonicalizes a numeric-IP alias before permission checks and the request", () =>
+    Effect.gen(function* () {
+      reset()
+      const registry = yield* Tool.Service
+
+      yield* executeTool(registry, call({ url: "http://2130706433/secret", format: "text" }))
+      expect(assertions.map((assertion) => assertion.resources)).toEqual([["http://127.0.0.1/secret"]])
+      expect(requests.map((request) => request.url)).toEqual(["http://127.0.0.1/secret"])
     }),
   )
 
