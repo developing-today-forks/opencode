@@ -7,6 +7,8 @@ import { ClientApi } from "../../contract"
 import type {
   ServerInfoOutput,
   ServerPairOutput,
+  ServerRedeemInput,
+  ServerRedeemOutput,
   ServerConnectInput,
   ServerConnectOutput,
   LocationGetInput,
@@ -121,6 +123,8 @@ import type {
   ServerCompletionsResponsesOutput,
   ServerCompletionsEmbeddingsInput,
   ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsTranscriptionsInput,
+  ServerCompletionsTranscriptionsOutput,
   ServerCompletionsMessagesInput,
   ServerCompletionsMessagesOutput,
   ServerCompletionsSystemoneInput,
@@ -352,6 +356,11 @@ const EndpointServerInfo = (raw: RawClient["server.server"]) => () =>
 const EndpointServerPair = (raw: RawClient["server.server"]) => () =>
   preserveEffect<ServerPairOutput>()(raw["server.pair"]({}).pipe(Effect.mapError(mapClientError)))
 
+const EndpointServerRedeem = (raw: RawClient["server.server"]) => (input: ServerRedeemInput) =>
+  preserveEffect<ServerRedeemOutput>()(
+    raw["server.redeem"]({ params: { code: input["code"] } }).pipe(Effect.mapError(mapClientError)),
+  )
+
 const EndpointServerConnect = (raw: RawClient["server.server"]) => (input: ServerConnectInput) =>
   preserveEffect<ServerConnectOutput>()(
     raw["server.connect"]({ params: { code: input["code"] } }).pipe(Effect.mapError(mapClientError)),
@@ -360,6 +369,7 @@ const EndpointServerConnect = (raw: RawClient["server.server"]) => (input: Serve
 const adaptGroupServer = (raw: RawClient["server.server"]) => ({
   info: EndpointServerInfo(raw),
   pair: EndpointServerPair(raw),
+  redeem: EndpointServerRedeem(raw),
   connect: EndpointServerConnect(raw),
 })
 
@@ -945,6 +955,17 @@ const EndpointServerCompletionsEmbeddings =
       ),
     )
 
+type ServerCompletionsTranscriptionsRequest = Parameters<
+  RawClient["server.completions"]["completions.transcriptions"]
+>[0]
+const EndpointServerCompletionsTranscriptions =
+  (raw: RawClient["server.completions"]) => (input: ServerCompletionsTranscriptionsInput) =>
+    preserveEffect<ServerCompletionsTranscriptionsOutput>()(
+      raw["completions.transcriptions"]({ payload: input["payload"] } as ServerCompletionsTranscriptionsRequest).pipe(
+        Effect.mapError(mapClientError),
+      ),
+    )
+
 type ServerCompletionsMessagesRequest = Parameters<RawClient["server.completions"]["completions.messages"]>[0]
 const EndpointServerCompletionsMessages =
   (raw: RawClient["server.completions"]) => (input: ServerCompletionsMessagesInput) =>
@@ -983,6 +1004,7 @@ const adaptGroupServerCompletions = (raw: RawClient["server.completions"]) => ({
   chat: EndpointServerCompletionsChat(raw),
   responses: EndpointServerCompletionsResponses(raw),
   embeddings: EndpointServerCompletionsEmbeddings(raw),
+  transcriptions: EndpointServerCompletionsTranscriptions(raw),
   messages: EndpointServerCompletionsMessages(raw),
   systemone: EndpointServerCompletionsSystemone(raw),
   models: EndpointServerCompletionsModels(raw),

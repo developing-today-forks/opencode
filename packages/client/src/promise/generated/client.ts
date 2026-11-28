@@ -1,6 +1,8 @@
 import type {
   ServerInfoOutput,
   ServerPairOutput,
+  ServerRedeemInput,
+  ServerRedeemOutput,
   ServerConnectInput,
   ServerConnectOutput,
   LocationGetInput,
@@ -115,6 +117,8 @@ import type {
   ServerCompletionsResponsesOutput,
   ServerCompletionsEmbeddingsInput,
   ServerCompletionsEmbeddingsOutput,
+  ServerCompletionsTranscriptionsInput,
+  ServerCompletionsTranscriptionsOutput,
   ServerCompletionsMessagesInput,
   ServerCompletionsMessagesOutput,
   ServerCompletionsSystemoneInput,
@@ -511,6 +515,17 @@ export function make(options: ClientOptions) {
       pair: (requestOptions?: RequestOptions) =>
         request<ServerPairOutput>(
           { method: "POST", path: `/api/pair`, successStatus: 200, declaredStatuses: [400, 401], empty: false },
+          requestOptions,
+        ),
+      redeem: (input: ServerRedeemInput, requestOptions?: RequestOptions) =>
+        request<ServerRedeemOutput>(
+          {
+            method: "POST",
+            path: `/auth/connect/${encodeURIComponent(input.code)}`,
+            successStatus: 200,
+            declaredStatuses: [400, 401],
+            empty: false,
+          },
           requestOptions,
         ),
       connect: (input: ServerConnectInput, requestOptions?: RequestOptions) =>
@@ -985,7 +1000,7 @@ export function make(options: ClientOptions) {
               method: "DELETE",
               path: `/api/session/${encodeURIComponent(input.sessionID)}/inbox/${encodeURIComponent(input.inboxID)}`,
               successStatus: 204,
-              declaredStatuses: [400, 401, 404],
+              declaredStatuses: [400, 401, 404, 409],
               empty: true,
             },
             requestOptions,
@@ -1270,6 +1285,18 @@ export function make(options: ClientOptions) {
           {
             method: "POST",
             path: `/v1/embeddings`,
+            body: input["payload"],
+            successStatus: 200,
+            declaredStatuses: [400, 401, 404, 503],
+            empty: false,
+          },
+          requestOptions,
+        ),
+      transcriptions: (input: ServerCompletionsTranscriptionsInput, requestOptions?: RequestOptions) =>
+        request<ServerCompletionsTranscriptionsOutput>(
+          {
+            method: "POST",
+            path: `/v1/audio/transcriptions`,
             body: input["payload"],
             successStatus: 200,
             declaredStatuses: [400, 401, 404, 503],
@@ -1629,7 +1656,7 @@ export function make(options: ClientOptions) {
             path: `/api/credential/${encodeURIComponent(input.credentialID)}`,
             body: { label: input["label"] },
             successStatus: 204,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404],
             empty: true,
           },
           requestOptions,
@@ -1640,7 +1667,7 @@ export function make(options: ClientOptions) {
             method: "POST",
             path: `/api/credential/${encodeURIComponent(input.credentialID)}/activate`,
             successStatus: 204,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404],
             empty: true,
           },
           requestOptions,
@@ -1651,7 +1678,7 @@ export function make(options: ClientOptions) {
             method: "DELETE",
             path: `/api/credential/${encodeURIComponent(input.credentialID)}`,
             successStatus: 204,
-            declaredStatuses: [400, 401],
+            declaredStatuses: [400, 401, 404],
             empty: true,
           },
           requestOptions,
@@ -1843,7 +1870,7 @@ export function make(options: ClientOptions) {
             query: { location: input["location"], path: input["path"] },
             body: input["payload"],
             successStatus: 200,
-            declaredStatuses: [400, 401, 404],
+            declaredStatuses: [400, 401, 404, 413],
             empty: false,
             binaryBody: true,
           },
