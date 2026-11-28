@@ -192,6 +192,52 @@ describe("ModelPlan store", () => {
     expect(() => ModelPlan.readStore(root)).toThrow()
   })
 
+  test("one malformed entry is skipped and reported instead of poisoning the whole store read (#2922)", () => {
+    const root = dir()
+    const goodPlan = {
+      id: "anthropic-max-20x",
+      providerID: "anthropic",
+      label: "Personal",
+      coverage: "subscription",
+      quotas: [{ name: "5-hour", unit: "messages", windowHours: 5 }],
+      status: "active",
+      createdAt: NOW,
+      updatedAt: NOW,
+    }
+    const badPlan = { ...goodPlan, id: "openai-plus", providerID: "openai", status: "bogus-status" }
+    fs.writeFileSync(
+      path.join(root, "plans.json"),
+      JSON.stringify({
+        version: 1,
+        plans: [goodPlan, badPlan],
+        models: {
+          "anthropic/claude": { tier: "frontier", updatedAt: NOW },
+          "openai/gpt": { tier: "bogus-tier", updatedAt: NOW },
+        },
+        pools: {
+          hard: { tier: "frontier", updatedAt: NOW },
+          broken: { tier: "bogus-tier", updatedAt: NOW },
+        },
+      }),
+    )
+    // The plain read keeps every good entry.
+    const store = ModelPlan.readStore(root)
+    expect(store.plans.map((plan) => plan.id)).toEqual(["anthropic-max-20x"])
+    expect(Object.keys(store.models)).toEqual(["anthropic/claude"])
+    expect(Object.keys(store.pools)).toEqual(["hard"])
+    // The detailed read names each skipped entry, mirroring the readNotes skipped count.
+    const detailed = ModelPlan.readStoreDetailed(root)
+    expect(detailed.store).toEqual(store)
+    expect(detailed.skipped).toEqual([
+      { kind: "plan", id: "openai-plus" },
+      { kind: "model", id: "openai/gpt" },
+      { kind: "pool", id: "broken" },
+    ])
+    // A structurally malformed store is still an error, not a tolerated read.
+    fs.writeFileSync(path.join(root, "plans.json"), JSON.stringify({ version: 1, plans: "nope", models: {}, pools: {} }))
+    expect(() => ModelPlan.readStore(root)).toThrow()
+  })
+
   test("a model needs a tier when it is first set; a pool takes a purpose and a tier", () => {
     expect(() => ModelPlan.setModel(ModelPlan.emptyStore(), "openai/gpt-6-astra", {}, NOW)).toThrow("needs a tier")
     const store = ModelPlan.setModel(
