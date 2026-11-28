@@ -1,4 +1,4 @@
-import { DateTime, Schema } from "effect"
+import { DateTime, Option, Schema } from "effect"
 import { Model } from "@opencode/schema/model"
 import { Provider } from "@opencode/schema/provider"
 import { AbsolutePath, RelativePath } from "../schema.js"
@@ -8,7 +8,16 @@ import { PersistedRevert } from "@opencode/schema/session-revert"
 import { Money } from "@opencode/schema/money"
 import type { ModelUsage } from "../model-usage.js"
 
-const decodeRevert = Schema.decodeUnknownSync(PersistedRevert)
+const decodeRevert = Schema.decodeUnknownOption(PersistedRevert)
+
+/**
+ * A stored revert value decoded to Revert, or undefined when it matches neither persisted shape. A
+ * truncated write, a hand-edited DB, or a future shape makes the strict decoder throw ParseError, and
+ * fromRow runs synchronously inside SessionStore.get/list, so one non-conforming row would brick every
+ * read of the session (opencode#2893). An undecodable revert reads as absent instead, mirroring the
+ * timestamp `representable` fallback below.
+ */
+const representableRevert = (value: unknown) => Option.getOrUndefined(decodeRevert(value))
 
 export type AuthoritativeUsage = {
   readonly costUsd: number
@@ -115,7 +124,7 @@ export function fromRow(
     subagentPolicy: row.subagent_policy ?? undefined,
     permissions: row.permission ?? undefined,
     detached: row.detached ? true : undefined,
-    revert: row.revert ? decodeRevert(row.revert) : undefined,
+    revert: row.revert ? representableRevert(row.revert) : undefined,
     outcome: row.idle_outcome ?? undefined,
     time: {
       created: required(created, updated),
