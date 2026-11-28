@@ -3,6 +3,7 @@ export * as SessionOperation from "./operation.js"
 import type { Session } from "@opencode/schema/session"
 import { Effect } from "effect"
 import { Bus } from "../bus.js"
+import type { Database } from "../database/database.js"
 import { SessionCommand } from "./command.js"
 import { SessionEvent } from "./event.js"
 import { SessionInbox } from "./inbox.js"
@@ -52,14 +53,21 @@ const release = (sessionID: Session.ID, id: SessionMessage.ID) =>
  *
  * A shell is never run twice for one admission: its started event projects
  * to a message under the admission's own ID, and `started` reports it, so a
- * recovered row whose shell already ran is only consumed. A command whose
- * execution is lost after delivery is run again by the recovery sweep
- * (at-least-once); its own prompt admission is the durable record it leaves.
+ * recovered row whose shell already ran is only consumed. A command claims
+ * its first start durably before its definition runs
+ * (`SessionInbox.markStarted`): a recovered row without the claim was
+ * admitted but never started and runs now, while a recovered row carrying
+ * the claim belongs to a start with no durable terminal result and is NOT
+ * run again — running it again could repeat its file, external-service, or
+ * other side effects. That ambiguous case consumes the row and admits an
+ * explicit interrupted notice instead, so the outcome is visible and the
+ * command can be retried intentionally.
  */
 export const run = Effect.fn("SessionOperation.run")(function* (input: {
   session: Session.Info
   operation: SessionInbox.Operation
   bus: Bus.Interface
+  db: Database.Interface["db"]
   notify: Notify
   started: (id: SessionMessage.ID) => Effect.Effect<boolean>
 }) {
@@ -88,6 +96,20 @@ export const run = Effect.fn("SessionOperation.run")(function* (input: {
       })
       return
     }
+    if (operation.type === "command") {
+      const start = yield* SessionInbox.markStarted(input.db, { sessionID, id: operation.id })
+      // A concurrent starter settled the row while this start was racing
+      // it; its terminal record already speaks for the operation.
+      if (start === "gone") return
+      // A previous start claimed the row without settling: its outcome is
+      // unknown, so surface that explicitly instead of invoking the
+      // definition a second time. The notice carries the original input so
+      // the command can be retried intentionally.
+      if (start === "started") {
+        yield* interrupted(input.notify, operation)
+        return
+      }
+    }
     yield* SessionCommand.execute({
       session: input.session,
       command: operation.payload.command,
@@ -110,4 +132,16 @@ const failed = (notify: Notify, command: string, message: string) =>
     text: `User command failed:\n/${command}\n\n${message}`,
     description: command,
     metadata: { source: "command", state: "error" },
+  })
+
+const interrupted = (notify: Notify, operation: SessionInbox.Operation & { readonly type: "command" }) =>
+  notify({
+    text: [
+      `User command interrupted:\n/${operation.payload.command}`,
+      `The command started but its outcome was lost before it finished, so it was NOT run again: running it again could repeat its effects.`,
+      `Re-run \`/${operation.payload.command}\` yourself only if that is safe.`,
+      `Original input:\n${operation.payload.text}`,
+    ].join("\n\n"),
+    description: operation.payload.command,
+    metadata: { source: "command", state: "interrupted" },
   })

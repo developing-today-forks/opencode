@@ -151,6 +151,11 @@ export const SessionInboxTable = sqliteTable(
       .notNull(),
     delivery: text().$type<SessionInbox.Delivery>().notNull(),
     enqueued_seq: integer().notNull(),
+    // A command operation claims this before its definition runs. A pending
+    // row with the claim set belongs to a start that never settled (a crash
+    // after the definition ran, or after the claim with no run yet); a
+    // pending row without it was admitted but never started.
+    started: integer({ mode: "boolean" }).notNull().default(false),
     time_created: integer()
       .notNull()
       .$default(() => Date.now()),

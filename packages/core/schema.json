@@ -1,8 +1,8 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "436c3d2d-ed6a-44e1-aa8d-4ad172b7e845",
-  "prevIds": ["bb5a557b-39ed-4b96-af60-3a6e173c77c7"],
+  "id": "e31c3d01-d4fa-4980-80c8-6423f2e0b12c",
+  "prevIds": ["436c3d2d-ed6a-44e1-aa8d-4ad172b7e845"],
   "ddl": [
     {
       "name": "account_state",
@@ -2715,6 +2715,16 @@
       "default": null,
       "generated": null,
       "name": "enqueued_seq",
+      "entityType": "columns",
+      "table": "session_inbox"
+    },
+    {
+      "type": "integer",
+      "notNull": true,
+      "autoincrement": false,
+      "default": "false",
+      "generated": null,
+      "name": "started",
       "entityType": "columns",
       "table": "session_inbox"
     },
