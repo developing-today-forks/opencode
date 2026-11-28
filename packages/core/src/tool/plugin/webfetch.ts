@@ -139,11 +139,17 @@ export const Plugin = {
           output: Output,
           execute: (input, context) =>
             Effect.gen(function* () {
-              // Rules match the URL as written. The fragment is never sent, and would keep a rule for the exact
-              // URL from matching.
-              const url = input.url.split("#")[0]
-              yield* Effect.try({
-                try: () => assertHttpUrl(new URL(url)),
+              // Canonicalize once: permission rules match the URL the HTTP stack will actually request, so an
+              // equivalent spelling (numeric-IP alias, host casing, default port) cannot slip past a rule written
+              // for the canonical form. The fragment is never sent, and would keep a rule for the exact URL from
+              // matching, so it is dropped here too. Redirect targets already go through the same treatment.
+              const url = yield* Effect.try({
+                try: () => {
+                  const parsed = new URL(input.url)
+                  assertHttpUrl(parsed)
+                  parsed.hash = ""
+                  return parsed.href
+                },
                 catch: (error) => error,
               })
 
