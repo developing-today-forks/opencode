@@ -101,6 +101,35 @@ describe("plan_info", () => {
     expect(PlanInfoTool.apply({ action: "list" }, { dataDir, now }).content).toContain("per 5h")
   })
 
+  test("one malformed entry degrades list per-entry, and writes refuse rather than dropping it (#2922)", () => {
+    const dataDir = dir()
+    const file = path.join(dataDir, "plans.json")
+    const good = {
+      id: "anthropic-max-20x",
+      providerID: "anthropic",
+      label: "Personal",
+      coverage: "subscription",
+      quotas: [],
+      status: "active",
+      createdAt: "2026-10-14T09:00:00.000Z",
+      updatedAt: "2026-10-14T09:00:00.000Z",
+    }
+    const before = JSON.stringify(
+      { version: 1, plans: [good, { ...good, id: "openai-plus", providerID: "openai", status: "bogus" }], models: {}, pools: {} },
+      null,
+      2,
+    )
+    fs.writeFileSync(file, before)
+    const listed = PlanInfoTool.apply({ action: "list" }, { dataDir, now })
+    expect(listed.content).toContain("anthropic-max-20x")
+    expect(listed.content).toContain('1 unreadable store entries skipped: plan "openai-plus"')
+    expect(() =>
+      PlanInfoTool.apply({ action: "upsert", providerID: "openai", plan: "Plus" }, { dataDir, now }),
+    ).toThrow('plan "openai-plus"')
+    // The refused write left the file — including the bad entry — untouched.
+    expect(fs.readFileSync(file, "utf8")).toBe(before)
+  })
+
   test("a damaged plan file stops writes, with a message that says what to fix", () => {
     const dataDir = dir()
     fs.writeFileSync(path.join(dataDir, "plans.json"), "{")

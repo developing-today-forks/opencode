@@ -75,7 +75,18 @@ const withoutUndefined = <T extends object>(value: T): Partial<T> =>
 export const apply = (input: Input, options: Options = {}): { output: { result: unknown }; content: string } => {
   const now = options.now?.() ?? new Date()
   const iso = now.toISOString()
-  const store = ModelPlan.readStore(options.dataDir)
+  // Per-entry tolerant read (#2922): one malformed entry is skipped and surfaced, not fatal to the
+  // whole read. Writes refuse while anything was skipped — writing the tolerated store back would
+  // silently drop the skipped entries, which is the silent erase the store contract forbids.
+  const { store, skipped } = ModelPlan.readStoreDetailed(options.dataDir)
+  const skippedText = skipped.map((entry) => `${entry.kind}${entry.id === undefined ? "" : ` "${entry.id}"`}`).join(", ")
+  const skippedNote =
+    skipped.length > 0 ? `(${skipped.length} unreadable store entries skipped: ${skippedText})` : ""
+  if ((input.action === "upsert" || input.action === "tier" || input.action === "pool") && skipped.length > 0) {
+    throw new Error(
+      `plans.json has ${skipped.length} unreadable entries (${skippedText}) that this write would drop. Fix or remove them in plans.json before recording plan information.`,
+    )
+  }
   const done = (result: unknown, content: string) => ({ output: { result }, content })
 
   if (input.action === "list") {
@@ -85,7 +96,7 @@ export const apply = (input: Input, options: Options = {}): { output: { result: 
       ([pool, entry]) => `${pool}: ${entry.tier ?? "no tier"}${entry.purpose ? ` (${entry.purpose})` : ""}`,
     )
     return done(
-      { plans: store.plans, models: store.models, pools: store.pools, notes: notes.notes },
+      { plans: store.plans, models: store.models, pools: store.pools, notes: notes.notes, skipped },
       [
         store.plans.length === 0
           ? "No plans recorded yet."
@@ -95,7 +106,10 @@ export const apply = (input: Input, options: Options = {}): { output: { result: 
         notes.notes.length
           ? `Latest notes:\n${notes.notes.map((note) => `  ${note.at.slice(0, 10)} [${note.kind}] ${note.text}`).join("\n")}`
           : "No notes recorded.",
-      ].join("\n"),
+        skippedNote,
+      ]
+        .filter(Boolean)
+        .join("\n"),
     )
   }
 
@@ -103,7 +117,11 @@ export const apply = (input: Input, options: Options = {}): { output: { result: 
     const plan = store.plans.find(
       (item) => item.id === input.id || (input.id === undefined && item.providerID === input.providerID),
     )
-    if (!plan) return done(null, `No plan matches ${input.id ?? input.providerID ?? "that request"}.`)
+    if (!plan)
+      return done(
+        null,
+        `No plan matches ${input.id ?? input.providerID ?? "that request"}.${skippedNote ? ` ${skippedNote}` : ""}`,
+      )
     const guide = ModelPlan.guidance(plan.providerID)
     return done(
       { plan, guidance: guide },

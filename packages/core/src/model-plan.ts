@@ -111,19 +111,85 @@ export const emptyStore = (): Store => ({ version: 1, plans: [], models: {}, poo
 
 const directory = (dataDir?: string) => dataDir ?? Global.Path.data
 
-/** Reads the store. A missing file is an empty store; a malformed one is an error, so a bad write cannot
- * silently erase the user's plans. */
-export const readStore = (dataDir?: string): Store => {
+/** One store entry that could not be decoded and was skipped by a tolerant read (#2922). `id` is the
+ * plan's own id when the raw entry carries one, and always the record key for a model or pool. */
+export interface SkippedStoreEntry {
+  readonly kind: "plan" | "model" | "pool"
+  readonly id?: string
+}
+
+export interface StoreRead {
+  readonly store: Store
+  readonly skipped: readonly SkippedStoreEntry[]
+}
+
+/** The store's outer shape, with entries still undecoded: a failure here is structural (not JSON, not an
+ * object, a wrong version, a section of the wrong type) and stays an error, while a failure inside one
+ * entry is that entry's alone. */
+const StoreShell = Schema.Struct({
+  version: Schema.Literal(1),
+  plans: Schema.Array(Schema.Unknown),
+  models: Schema.Record(Schema.String, Schema.Unknown),
+  pools: Schema.Record(Schema.String, Schema.Unknown),
+})
+
+const entryID = (value: unknown): string | undefined => {
+  if (typeof value !== "object" || value === null || !("id" in value)) return undefined
+  return typeof value.id === "string" ? value.id : undefined
+}
+
+/**
+ * Reads the store, tolerating individual malformed entries the way `readNotes` tolerates a damaged
+ * line (#2922): a plan, model or pool entry that does not decode is skipped and reported in `skipped`,
+ * so one hand-edited typo cannot hide every good entry from the very tool the user would use to find
+ * and fix it. A missing file is an empty store. A structurally malformed file (invalid JSON, a wrong
+ * version, a section of the wrong type) is still an error, so a bad write cannot silently erase the
+ * user's plans; and a caller that writes must refuse while `skipped` is non-empty (see plan-info),
+ * because writing the tolerated store back would drop the skipped entries for good.
+ */
+export const readStoreDetailed = (dataDir?: string): StoreRead => {
   const file = path.join(directory(dataDir), "plans.json")
-  if (!fs.existsSync(file)) return emptyStore()
+  if (!fs.existsSync(file)) return { store: emptyStore(), skipped: [] }
   let parsed: unknown
   try {
     parsed = JSON.parse(fs.readFileSync(file, "utf8"))
   } catch {
     throw new Error(`${file} is not valid JSON. Fix or move it before recording plan information.`)
   }
-  return Schema.decodeUnknownSync(Store)(parsed)
+  const shell = Schema.decodeUnknownSync(StoreShell)(parsed)
+  const skipped: SkippedStoreEntry[] = []
+  const plans: Plan[] = []
+  for (const raw of shell.plans) {
+    try {
+      plans.push(Schema.decodeUnknownSync(Plan)(raw))
+    } catch {
+      const id = entryID(raw)
+      skipped.push(id === undefined ? { kind: "plan" } : { kind: "plan", id })
+    }
+  }
+  const models: Record<string, ModelEntry> = {}
+  for (const [key, raw] of Object.entries(shell.models)) {
+    try {
+      models[key] = Schema.decodeUnknownSync(ModelEntry)(raw)
+    } catch {
+      skipped.push({ kind: "model", id: key })
+    }
+  }
+  const pools: Record<string, PoolEntry> = {}
+  for (const [key, raw] of Object.entries(shell.pools)) {
+    try {
+      pools[key] = Schema.decodeUnknownSync(PoolEntry)(raw)
+    } catch {
+      skipped.push({ kind: "pool", id: key })
+    }
+  }
+  return { store: { version: 1, plans, models, pools }, skipped }
 }
+
+/** Reads the store. A missing file is an empty store; a structurally malformed one is an error, so a
+ * bad write cannot silently erase the user's plans. Individual malformed entries are skipped rather
+ * than throwing the whole read away — use `readStoreDetailed` to see which ones (#2922). */
+export const readStore = (dataDir?: string): Store => readStoreDetailed(dataDir).store
 
 /**
  * Whether a plan still describes capacity the quota gate may act on. A plan that has
