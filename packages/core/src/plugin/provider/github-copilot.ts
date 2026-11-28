@@ -67,6 +67,26 @@ const User = Schema.Struct({
   ),
 })
 const decodeUser = Schema.decodeUnknownOption(User)
+/** Decode an OAuth device/token response body on the failure channel. A 200
+ * with valid JSON of the wrong shape must fail typed, not die: the previous
+ * `Effect.map(Schema.decodeUnknownSync(...))` turned the schema throw into a
+ * fiber defect that killed the login/poll fiber before any of the readable
+ * error branches could run (#2884). The sibling flows' decodeUnknownEffect
+ * shape (xai.ts, gitlab.ts), mapped to a plain Error like the non-OK branch. */
+export function decodeOAuthDevice(body: unknown) {
+  return Schema.decodeUnknownEffect(Device)(body).pipe(
+    Effect.mapError(() => new Error("GitHub Copilot device authorization returned an unreadable response body")),
+    Effect.catchDefect(() =>
+      Effect.fail(new Error("GitHub Copilot device authorization returned an unreadable response body")),
+    ),
+  )
+}
+export function decodeOAuthToken(body: unknown) {
+  return Schema.decodeUnknownEffect(Token)(body).pipe(
+    Effect.mapError(() => new Error("GitHub Copilot token poll returned an unreadable response body")),
+    Effect.catchDefect(() => Effect.fail(new Error("GitHub Copilot token poll returned an unreadable response body"))),
+  )
+}
 const AutoRoute = Schema.Struct({
   session_token: Schema.String,
   expires_at: Schema.Number,
@@ -114,7 +134,7 @@ const oauth = (app: App.Info) =>
           method: "POST",
           headers: headers(app),
           body: JSON.stringify({ client_id: clientID, scope: "read:user" }),
-        }).pipe(Effect.map(Schema.decodeUnknownSync(Device)))
+        }).pipe(Effect.flatMap(decodeOAuthDevice))
         const interval = deviceIntervalMs(device.interval)
 
         const poll = (wait: number): Effect.Effect<Credential.OAuth, unknown> =>
@@ -127,7 +147,7 @@ const oauth = (app: App.Info) =>
               grant_type: "urn:ietf:params:oauth:grant-type:device_code",
             }),
           }).pipe(
-            Effect.map(Schema.decodeUnknownSync(Token)),
+            Effect.flatMap(decodeOAuthToken),
             Effect.flatMap((token) => {
               if (token.access_token) {
                 const access = token.access_token
